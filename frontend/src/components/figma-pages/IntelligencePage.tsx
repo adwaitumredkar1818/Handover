@@ -30,9 +30,10 @@ import { SourceIcon } from '../figma-ui/brand'
 import {
   allFindings, ConfidenceLegend, EvidenceChip, FindingDrawer,
   ProjectNotFound, SeverityBadge, TaskStatus, projectFindings,
-  useProject, useVerification, type AnyFinding
+  useCanonicalProjectFindings, useProject, useVerification, type AnyFinding
 } from '../figma-ui/domain'
 import { DependencyFlow, KnowledgeCanvas } from '../figma-ui/graph'
+import { RelationshipWorkspace } from '../relationships/RelationshipWorkspace'
 
 /* ---------- Sub-navigation Tabs ---------- */
 const SUB = [
@@ -469,7 +470,8 @@ export function IntelligenceOverview({ projectId }: { projectId: string }) {
 export function Decisions({ projectId }: { projectId: string }) {
   const s = useStore()
   const p = useProject(projectId)
-  const list = p ? projectFindings(p.id).decisions.map((d) => ({ ...d, kind: 'Decision' as const })) : []
+  const canonical = useCanonicalProjectFindings(projectId)
+  const list = canonical.decisions
   const [open, setOpen] = useDrawerFromQuery(list)
   const [q, setQ] = useState('')
   const [vf, setVf] = useState('all')
@@ -569,7 +571,8 @@ const PRI_TONE = { Critical: 'red', High: 'amber', Medium: 'blue', Low: 'gray' }
 export function Tasks({ projectId }: { projectId: string }) {
   const s = useStore()
   const p = useProject(projectId)
-  const list = p ? projectFindings(p.id).tasks.map((d) => ({ ...d, kind: 'Task' as const })) : []
+  const canonical = useCanonicalProjectFindings(projectId)
+  const list = canonical.tasks
   const [open, setOpen] = useDrawerFromQuery(list)
   const [view, setView] = useState<'table' | 'board'>('table')
   const [owner, setOwner] = useState('all')
@@ -728,7 +731,8 @@ export function Tasks({ projectId }: { projectId: string }) {
 export function Risks({ projectId }: { projectId: string }) {
   const s = useStore()
   const p = useProject(projectId)
-  const list = p ? projectFindings(p.id).risks.map((d) => ({ ...d, kind: 'Risk' as const })) : []
+  const canonical = useCanonicalProjectFindings(projectId)
+  const list = canonical.risks
   const [open, setOpen] = useDrawerFromQuery(list)
   const [sev, setSev] = useState('all')
 
@@ -836,17 +840,25 @@ export function Risks({ projectId }: { projectId: string }) {
 }
 
 /* ---------- 20. Dependencies & Relationships View ---------- */
-export function Dependencies({ projectId }: { projectId: string }) {
+export function Dependencies({
+  projectId,
+  initialMode = 'matrix',
+}: {
+  projectId: string
+  initialMode?: 'matrix' | 'graph'
+}) {
   const s = useStore()
   const p = useProject(projectId)
-  const list = p ? projectFindings(p.id).dependencies.map((d) => ({ ...d, kind: 'Dependency' as const })) : []
+  const canonical = useCanonicalProjectFindings(projectId)
+  const list = canonical.dependencies
   const [open, setOpen] = useDrawerFromQuery(list)
   const [type, setType] = useState('all')
   const [sel, setSel] = useState<string>()
+  const [mode, setMode] = useState<'matrix' | 'graph'>(initialMode)
 
   if (!p) return <ProjectNotFound />
   const shown = list.filter((d) => type === 'all' || d.depType === type)
-  const blockedTasks = projectFindings(p.id).tasks.filter((t) => t.status === 'Blocked')
+  const blockedTasks = canonical.tasks.filter((t) => t.status === 'Blocked' || t.priority === 'Critical')
 
   return (
     <>
@@ -856,21 +868,52 @@ export function Dependencies({ projectId }: { projectId: string }) {
         title="Dependencies & Relationships"
         subtitle="Technical, task and external dependencies the incoming member needs to know about."
       />
-      <div className="mb-4 flex flex-wrap gap-2">
-        {['all', 'Technical', 'Task', 'External'].map((t) => (
+      <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="flex flex-wrap gap-2">
+          {['all', 'Technical', 'Task', 'External'].map((t) => (
+            <button
+              key={t}
+              onClick={() => {
+                setType(t)
+                if (mode === 'graph') setMode('matrix')
+              }}
+              className={cn(
+                'rounded-full border px-3 py-1 text-[13px] font-medium transition',
+                type === t ? 'border-brand bg-tint text-brand' : 'border-line bg-white text-muted'
+              )}
+            >
+              {t === 'all' ? `All (${list.length})` : `${t} (${list.filter((d) => d.depType === t).length})`}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg text-xs font-medium self-start sm:self-auto">
           <button
-            key={t}
-            onClick={() => setType(t)}
+            onClick={() => setMode('matrix')}
             className={cn(
-              'rounded-full border px-3 py-1 text-[13px] font-medium transition',
-              type === t ? 'border-brand bg-tint text-brand' : 'border-line bg-white text-muted'
+              'px-3 py-1.5 rounded-md transition-all',
+              mode === 'matrix' ? 'bg-white text-navy shadow-sm font-semibold' : 'text-slate-600 hover:text-navy'
             )}
           >
-            {t === 'all' ? `All (${list.length})` : `${t} (${list.filter((d) => d.depType === t).length})`}
+            Dependencies & Blockers
           </button>
-        ))}
+          <button
+            onClick={() => setMode('graph')}
+            className={cn(
+              'px-3 py-1.5 rounded-md transition-all flex items-center gap-1.5',
+              mode === 'graph' ? 'bg-white text-brand shadow-sm font-semibold' : 'text-slate-600 hover:text-navy'
+            )}
+          >
+            <Network className="size-3.5" />
+            Interactive Graph Explorer
+          </button>
+        </div>
       </div>
-      {!list.length ? (
+
+      {mode === 'graph' ? (
+        <div className="mt-2 mb-6">
+          <RelationshipWorkspace projectId={p.id} />
+        </div>
+      ) : !list.length ? (
         <NoData p={p} />
       ) : (
         <>
@@ -975,11 +1018,28 @@ const TL_META: Record<TimelineEvent['type'], { icon: typeof Milestone; color: st
 
 export function Timeline({ projectId }: { projectId: string }) {
   const p = useProject(projectId)
+  const canonical = useCanonicalProjectFindings(projectId)
   const [types, setTypes] = useState<string[]>([])
   const [selected, setSelected] = useState<string>()
 
   if (!p) return <ProjectNotFound />
-  const all = timeline.filter((t) => t.projectId === p.id)
+  const rawEvents = timeline.filter((t) => t.projectId === p.id)
+  const all: TimelineEvent[] = rawEvents.length > 0 ? rawEvents : canonical.all.map((f): TimelineEvent => {
+    let tType: TimelineEvent['type'] = 'decision'
+    if (f.kind === 'Task') tType = 'task'
+    else if (f.kind === 'Risk') tType = 'event'
+    else if (f.kind === 'Dependency') tType = 'milestone'
+    return {
+      id: f.id,
+      projectId: p.id,
+      date: f.date,
+      type: tType,
+      title: f.title,
+      detail: f.summary,
+      personId: f.ownerId,
+      evidenceId: f.evidenceIds[0],
+    }
+  })
   const list = all.filter((t) => !types.length || types.includes(t.type))
   const months = Array.from(new Set(list.map((t) => t.date.slice(0, 7))))
 
@@ -1096,8 +1156,9 @@ function IntelligencePageInner({ view = 'overview', projectId }: IntelligencePag
     case 'risks':
       return <Risks projectId={pid} />
     case 'dependencies':
+      return <Dependencies projectId={pid} initialMode="matrix" />
     case 'relationships':
-      return <Dependencies projectId={pid} />
+      return <Dependencies projectId={pid} initialMode="graph" />
     case 'timeline':
       return <Timeline projectId={pid} />
     default:

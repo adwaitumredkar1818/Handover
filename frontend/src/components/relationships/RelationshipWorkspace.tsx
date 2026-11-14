@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   ReactFlow,
   Controls,
@@ -26,6 +26,64 @@ import {
 } from "lucide-react";
 import { api } from "../../lib/api";
 
+export interface KnowledgeEntityNode {
+  id: string;
+  label: string;
+  type: string;
+  canonical_name: string;
+  confidence: number;
+  resolution_status: string;
+}
+
+export interface KnowledgeEntityItem {
+  id: string;
+  canonical_name: string;
+  entity_type: string;
+  confidence_score: number;
+  resolution_status: string;
+  description?: string;
+  created_at?: string;
+}
+
+export interface TraceabilityChainItem {
+  id: string;
+  decision_entity_id: string;
+  decision_name: string;
+  completeness_status: string;
+  work_item_count: number;
+  pr_count: number;
+  commit_count: number;
+  component_count: number;
+  missing_links: string[];
+}
+
+export interface DependencyGraphData {
+  nodes: Array<{ id: string; label: string; entity_type: string; is_root_blocker: boolean; in_degree: number; out_degree: number }>;
+  edges: Array<{ source: string; target: string; relationship_type: string }>;
+  cycles: string[][];
+  root_blockers: string[];
+}
+
+export interface TimelineEventItem {
+  id: string;
+  event_type: string;
+  title: string;
+  summary?: string;
+  occurred_at: string;
+  timestamp_precision: string;
+  timestamp_origin: string;
+}
+
+export interface IdentityCandidateItem {
+  id: string;
+  left_entity_name?: string;
+  left_entity_id?: string;
+  right_entity_name?: string;
+  right_entity_id?: string;
+  match_score: number;
+  policy_band?: string;
+}
+
 interface RelationshipWorkspaceProps {
   projectId: string;
 }
@@ -40,23 +98,23 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   // Graph state
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [selectedNode, setSelectedNode] = useState<KnowledgeEntityNode | null>(null);
 
   // Entities state
-  const [entities, setEntities] = useState<Array<Record<string, unknown>>>([]);
+  const [entities, setEntities] = useState<KnowledgeEntityItem[]>([]);
   const [entityFilter, setEntityFilter] = useState<string>("");
 
   // Traceability state
-  const [traceChains, setTraceChains] = useState<Array<Record<string, unknown>>>([]);
+  const [traceChains, setTraceChains] = useState<TraceabilityChainItem[]>([]);
 
   // Dependencies state
-  const [depGraph, setDepGraph] = useState<Record<string, unknown> | null>(null);
+  const [depGraph, setDepGraph] = useState<DependencyGraphData | null>(null);
 
   // Timeline state
-  const [timelineEvents, setTimelineEvents] = useState<Array<Record<string, unknown>>>([]);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEventItem[]>([]);
 
   // Candidates state
-  const [candidates, setCandidates] = useState<Array<Record<string, unknown>>>([]);
+  const [candidates, setCandidates] = useState<IdentityCandidateItem[]>([]);
 
   const loadGraphData = useCallback(async () => {
     setLoading(true);
@@ -65,7 +123,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
       const graphData = await api.relationships.getGraph(projectId);
       
       // Calculate circle or grid layout
-      const flowNodes = graphData.nodes.map((n, idx) => {
+      const flowNodes: Node[] = graphData.nodes.map((n, idx) => {
         const angle = (idx / Math.max(1, graphData.nodes.length)) * 2 * Math.PI;
         const radius = 260 + (idx % 3) * 60;
         return {
@@ -88,7 +146,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
         };
       });
 
-      const flowEdges = graphData.edges.map((e) => ({
+      const flowEdges: Edge[] = graphData.edges.map((e) => ({
         id: e.id,
         source: e.source,
         target: e.target,
@@ -104,7 +162,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, setNodes, setEdges]);
 
   useEffect(() => {
     loadGraphData();
@@ -128,7 +186,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
         setTimelineEvents(res.items || []);
       } else if (tab === "candidates" && candidates.length === 0) {
         const res = await api.relationships.listIdentityCandidates(projectId);
-        setCandidates(res || []);
+        setCandidates((res as unknown as IdentityCandidateItem[]) || []);
       }
     } catch (err: unknown) {
       setError((err as Error)?.message || `Failed to load ${tab} data`);
@@ -136,18 +194,18 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   }
 
   return (
-    <div className="flex flex-col h-[calc(100vh-140px)] bg-slate-50 border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+    <div className="flex flex-col h-[calc(100vh-180px)] min-h-[500px] bg-slate-50 border border-slate-200 rounded-xl overflow-hidden shadow-sm">
       {/* Tab Navigation */}
       <div className="flex items-center justify-between px-6 py-3 bg-white border-b border-slate-200">
         <div className="flex items-center gap-2">
           <Network className="w-5 h-5 text-indigo-600" />
-          <h2 className="font-semibold text-slate-800 text-lg">Knowledge Intelligence & Graph</h2>
+          <h2 className="font-semibold text-slate-800 text-base">Interactive Knowledge Graph & Explorer</h2>
         </div>
-        <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg text-sm font-medium">
+        <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg text-xs font-medium">
           <button
             onClick={() => loadTabDetails("graph")}
             className={`px-3 py-1.5 rounded-md transition-all ${
-              activeTab === "graph" ? "bg-white text-indigo-600 shadow-sm" : "text-slate-600 hover:text-slate-900"
+              activeTab === "graph" ? "bg-white text-indigo-600 shadow-sm font-semibold" : "text-slate-600 hover:text-slate-900"
             }`}
           >
             Graph Explorer
@@ -155,7 +213,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
           <button
             onClick={() => loadTabDetails("entities")}
             className={`px-3 py-1.5 rounded-md transition-all ${
-              activeTab === "entities" ? "bg-white text-indigo-600 shadow-sm" : "text-slate-600 hover:text-slate-900"
+              activeTab === "entities" ? "bg-white text-indigo-600 shadow-sm font-semibold" : "text-slate-600 hover:text-slate-900"
             }`}
           >
             Entities
@@ -163,7 +221,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
           <button
             onClick={() => loadTabDetails("traceability")}
             className={`px-3 py-1.5 rounded-md transition-all ${
-              activeTab === "traceability" ? "bg-white text-indigo-600 shadow-sm" : "text-slate-600 hover:text-slate-900"
+              activeTab === "traceability" ? "bg-white text-indigo-600 shadow-sm font-semibold" : "text-slate-600 hover:text-slate-900"
             }`}
           >
             Traceability
@@ -171,7 +229,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
           <button
             onClick={() => loadTabDetails("dependencies")}
             className={`px-3 py-1.5 rounded-md transition-all ${
-              activeTab === "dependencies" ? "bg-white text-indigo-600 shadow-sm" : "text-slate-600 hover:text-slate-900"
+              activeTab === "dependencies" ? "bg-white text-indigo-600 shadow-sm font-semibold" : "text-slate-600 hover:text-slate-900"
             }`}
           >
             Dependencies
@@ -179,7 +237,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
           <button
             onClick={() => loadTabDetails("timeline")}
             className={`px-3 py-1.5 rounded-md transition-all ${
-              activeTab === "timeline" ? "bg-white text-indigo-600 shadow-sm" : "text-slate-600 hover:text-slate-900"
+              activeTab === "timeline" ? "bg-white text-indigo-600 shadow-sm font-semibold" : "text-slate-600 hover:text-slate-900"
             }`}
           >
             Timeline
@@ -187,7 +245,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
           <button
             onClick={() => loadTabDetails("candidates")}
             className={`px-3 py-1.5 rounded-md transition-all ${
-              activeTab === "candidates" ? "bg-white text-indigo-600 shadow-sm" : "text-slate-600 hover:text-slate-900"
+              activeTab === "candidates" ? "bg-white text-indigo-600 shadow-sm font-semibold" : "text-slate-600 hover:text-slate-900"
             }`}
           >
             Entity Resolution
@@ -212,10 +270,10 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                 <RefreshCw className="w-6 h-6 animate-spin mr-2" /> Loading Knowledge Graph...
               </div>
             ) : nodes.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full text-slate-500">
+              <div className="flex flex-col items-center justify-center h-full text-slate-500 p-8 text-center">
                 <Network className="w-12 h-12 text-slate-300 mb-2" />
                 <p className="font-medium text-slate-700">No Graph Relationships Reconstructed Yet</p>
-                <p className="text-sm text-slate-400">Trigger relationship reconstruction in the Evidence or Settings panel.</p>
+                <p className="text-sm text-slate-400 mt-1 max-w-md">Trigger relationship discovery or AI knowledge reconstruction in the Evidence Center or Knowledge Intelligence to populate graph entities.</p>
               </div>
             ) : (
               <ReactFlow
@@ -223,7 +281,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                 edges={edges}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
-                onNodeClick={(_, node) => setSelectedNode(node.data.raw)}
+                onNodeClick={(_, node) => setSelectedNode((node.data as { raw?: KnowledgeEntityNode })?.raw || null)}
                 fitView
               >
                 <Background />
@@ -340,11 +398,11 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                 <h4 className="font-semibold text-slate-800 text-sm mb-3 flex items-center gap-2">
                   <ShieldAlert className="w-4 h-4 text-red-500" /> Root Blockers
                 </h4>
-                {depGraph?.root_blockers?.length === 0 ? (
+                {(!depGraph?.root_blockers || depGraph.root_blockers.length === 0) ? (
                   <p className="text-xs text-slate-500">No active root blockers identified.</p>
                 ) : (
                   <ul className="space-y-2">
-                    {depGraph?.root_blockers?.map((b: string, i: number) => (
+                    {depGraph.root_blockers.map((b: string, i: number) => (
                       <li key={i} className="text-xs bg-red-50 text-red-700 p-2 rounded-md border border-red-100">
                         {b}
                       </li>
@@ -357,11 +415,11 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                 <h4 className="font-semibold text-slate-800 text-sm mb-3 flex items-center gap-2">
                   <GitBranch className="w-4 h-4 text-amber-500" /> Cycle Detection
                 </h4>
-                {depGraph?.cycles?.length === 0 ? (
+                {(!depGraph?.cycles || depGraph.cycles.length === 0) ? (
                   <p className="text-xs text-emerald-600 font-medium">✓ Valid Directed Acyclic Graph (DAG): Zero circular dependencies detected.</p>
                 ) : (
                   <ul className="space-y-2">
-                    {depGraph?.cycles?.map((cyc: string[], idx: number) => (
+                    {depGraph.cycles.map((cyc: string[], idx: number) => (
                       <li key={idx} className="text-xs bg-amber-50 text-amber-800 p-2 rounded-md border border-amber-200">
                         Cycle #{idx + 1}: {cyc.join(" ➔ ")}
                       </li>

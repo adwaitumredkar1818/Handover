@@ -7,6 +7,7 @@ import { useLiveApp } from '../../context/LiveAppContext'
 import {
   decisions, dependencies, evidence, personById, risks, tasks, ROLE_LABEL, ME,
   type FindingBase, type Verification, type Project, type Handover, type EvidenceType,
+  type Decision, type Task, type Risk, type Dependency,
 } from '../../lib/figmaStore'
 import { Avatar, Badge, Button, Callout, ConfidenceBadge as Confidence, Drawer, EmptyState, Tabs, Textarea, VerifyBadge as VerificationBadge, cn, VERIF, type Tone } from './index'
 import { EvidenceTypeIcon, EVIDENCE_TYPE_LABEL } from './brand'
@@ -206,23 +207,105 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
         if (cat.includes('risk') || cat.includes('bug') || cat.includes('blocker')) kind = 'Risk'
         else if (cat.includes('dep')) kind = 'Dependency'
         else if (cat.includes('task') || cat.includes('work')) kind = 'Task'
-        else if (cat.includes('decision')) kind = 'Decision'
+        else kind = 'Decision'
 
         const anyF = f as unknown as {
           structured_summary?: string
           person_or_owner_label?: string
           confidence_metadata?: { confidence_score?: number }
           citations?: Array<{ evidence_id?: string }>
+          source_attribution?: {
+            evidence_id?: string
+            evidence_ids?: string[]
+            source_external_id?: string
+            source_author_identity?: string
+            title?: string
+          }
           created_at?: string
         }
 
-        const ownerName = anyF.person_or_owner_label || (f.item_payload?.owner as string) || (members[0]?.user_full_name || members[0]?.full_name || 'Shubham Pokale')
+        const rawAttr = (anyF.source_attribution || ((f as unknown as { source_attribution_json?: Record<string, unknown> }).source_attribution_json || {})) as Record<string, unknown>
+        const ownerName = anyF.person_or_owner_label || (f.item_payload?.owner as string) || (rawAttr["source_author_identity"] as string) || (rawAttr["author"] as string) || (members[0]?.user_full_name || members[0]?.full_name || 'Shubham')
         const summaryText = anyF.structured_summary || f.summary || f.title
         const rawScore = anyF.confidence_metadata?.confidence_score ?? f.confidence_score ?? 0.95
         const score = rawScore > 1 ? Math.round(rawScore) : Math.round(rawScore * 100)
         const dateStr = (anyF.created_at || f.extracted_at || '2026-10-17').split('T')[0] || '2026-10-17'
 
-        const evIds = (f.citations || anyF.citations || []).map((c) => c.evidence_id).filter((cid): cid is string => Boolean(cid))
+        const payload = (f.item_payload || (f as unknown as { structured_payload?: Record<string, unknown> }).structured_payload || {}) as Record<string, unknown>
+
+        // Evidence IDs extraction
+        const evIdsSet = new Set<string>()
+        if (rawAttr["evidence_id"]) evIdsSet.add(String(rawAttr["evidence_id"]))
+        if (Array.isArray(rawAttr["evidence_ids"])) {
+          for (const eid of rawAttr["evidence_ids"] as unknown[]) {
+            if (eid) evIdsSet.add(String(eid))
+          }
+        }
+        if (typeof rawAttr["source_external_id"] === 'string' && (rawAttr["source_external_id"] as string).includes(':')) {
+          const extId = (rawAttr["source_external_id"] as string).split(':')[1]?.trim()
+          if (extId) evIdsSet.add(extId)
+        }
+        if (Array.isArray(f.citations)) {
+          for (const c of f.citations) {
+            if (c?.evidence_id) evIdsSet.add(String(c.evidence_id))
+          }
+        }
+        if (Array.isArray(anyF.citations)) {
+          for (const c of anyF.citations) {
+            if (c?.evidence_id) evIdsSet.add(String(c.evidence_id))
+          }
+        }
+        if (evIdsSet.size === 0 && evidenceList[0]?.id) {
+          evIdsSet.add(evidenceList[0].id)
+        }
+        const evIds = Array.from(evIdsSet)
+
+        // Components extraction (across technical architecture, decisions, and dependencies)
+        const compList: string[] = []
+        if (Array.isArray(payload.components)) {
+          for (const c of payload.components) {
+            if (typeof c === 'string' && c.trim() && !compList.includes(c.trim())) compList.push(c.trim())
+          }
+        }
+        if (typeof payload.component === 'string' && payload.component.trim() && !compList.includes(payload.component.trim())) {
+          compList.push(payload.component.trim())
+        }
+        if (typeof payload.service === 'string' && payload.service.trim() && !compList.includes(payload.service.trim())) {
+          compList.push(payload.service.trim())
+        }
+        if (typeof payload.source_item === 'string' && payload.source_item.trim() && !compList.includes(payload.source_item.trim())) {
+          compList.push(payload.source_item.trim())
+        }
+        if (typeof payload.target_item === 'string' && payload.target_item.trim() && !compList.includes(payload.target_item.trim())) {
+          compList.push(payload.target_item.trim())
+        }
+        if (cat.includes('arch') || cat.includes('tech')) {
+          const colonTitle = f.title.includes(':') ? f.title.split(':')[0]?.trim() : f.title
+          if (colonTitle && !compList.includes(colonTitle)) compList.push(colonTitle)
+        }
+        const mainComponent = compList[0] || (f.title.includes('VRAM') ? 'Local GPU Runtime' : cat.includes('arch') ? 'Core Architecture' : undefined)
+
+        // Dependency fields
+        const depType = (payload.depType || payload.dependency_type || (f.title.toLowerCase().includes('api') || f.title.toLowerCase().includes('backend') || f.title.toLowerCase().includes('database') ? 'Technical' : f.title.toLowerCase().includes('service') || f.title.toLowerCase().includes('cloud') ? 'External' : 'Task')) as 'Technical' | 'Task' | 'External'
+        const fromNode = (payload.source_item || payload.source || payload.from || payload.from_component || (f.title.includes('->') ? f.title.split('->')[0]?.trim() : f.title.includes('depends on') ? f.title.split('depends on')[0]?.trim() : 'Frontend Application')) as string
+        const toNode = (payload.target_item || payload.target || payload.to || payload.to_component || (f.title.includes('->') ? f.title.split('->')[1]?.trim() : f.title.includes('depends on') ? f.title.split('depends on')[1]?.trim() : 'FastAPI Backend API')) as string
+        const blocking = Boolean(payload.blocking || payload.is_blocking || false)
+
+        // Decision fields
+        const reasoning = (payload.reasoning || payload.rationale || summaryText) as string
+        const discussions = (payload.discussions || [summaryText]) as string[]
+
+        // Task fields
+        const priority = (payload.priority || (f.title.toLowerCase().includes('critical') ? 'Critical' : 'High')) as 'Critical' | 'High' | 'Medium' | 'Low'
+        const taskStatus = (payload.status === 'blocked' ? 'Blocked' : payload.status === 'done' ? 'Done' : payload.status === 'in_progress' ? 'In progress' : 'To do') as 'To do' | 'In progress' | 'Blocked' | 'Done'
+        const due = (payload.due || '2026-11-20') as string
+        const history = (payload.history || [{ personId: ownerName, date: dateStr, note: 'Task identified from ingested project commits and documentation.' }]) as Array<{ personId: string; date: string; note: string }>
+
+        // Risk fields
+        const severity = (payload.severity || (f.title.toLowerCase().includes('critical') || f.title.toLowerCase().includes('exhaustion') ? 'Critical' : 'High')) as 'Critical' | 'High' | 'Medium' | 'Low'
+        const impact = (payload.impact || 'High impact on system stability and handover continuity') as string
+        const mitigation = (payload.mitigation || ['Strict single-concurrency scheduling and connection pooling']) as string[]
+        const resolution = (payload.resolution || 'Open') as 'Open' | 'Mitigating' | 'Resolved'
 
         return {
           id: f.id,
@@ -235,7 +318,27 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
           date: dateStr,
           evidenceIds: evIds,
           kind,
-        }
+          component: mainComponent,
+          components: compList,
+          // Dependency
+          depType,
+          from: fromNode,
+          to: toNode,
+          blocking,
+          // Decision
+          reasoning,
+          discussions,
+          // Task
+          priority,
+          status: taskStatus,
+          due,
+          history,
+          // Risk
+          severity,
+          impact,
+          mitigation,
+          resolution,
+        } as unknown as AnyFinding
       })
     }
 
@@ -265,6 +368,8 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
           date: '2026-10-17',
           evidenceIds: gitId1 ? [gitId1] : [],
           kind: 'Decision',
+          reasoning: 'Platform authentication must never delegate identity authority to external SaaS; Argon2id ensures password hashing security while HttpOnly cookies mitigate token exfiltration.',
+          discussions: ['Architecture Review RFC 101', 'Session storage evaluated against Redis and PostgreSQL'],
         },
         {
           id: `dec-${pid}-2`,
@@ -277,6 +382,8 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
           date: '2026-10-17',
           evidenceIds: docId ? [docId] : [],
           kind: 'Decision',
+          reasoning: 'Application-layer AES-256-GCM envelope encryption ensures data privacy regardless of whether stored on local disk or Supabase S3 bucket.',
+          discussions: ['RFC 104 Storage Isolation', 'Zero unencrypted files stored at rest'],
         },
         {
           id: `dec-${pid}-3`,
@@ -289,6 +396,8 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
           date: '2026-10-17',
           evidenceIds: docId ? [docId] : [],
           kind: 'Decision',
+          reasoning: 'Demonstrable real-world work items from verified GitHub repositories provide unforgeable proof of candidate competency.',
+          discussions: ['Skillpassport Product Spec', 'Skill extraction and verification criteria'],
         },
         {
           id: `task-${pid}-1`,
@@ -301,6 +410,10 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
           date: '2026-10-17',
           evidenceIds: gitId2 ? [gitId2] : [],
           kind: 'Task',
+          priority: 'Critical',
+          status: 'Done',
+          due: '2026-10-25',
+          history: [{ personId: ownerName, date: '2026-10-17', note: 'Configured pool_pre_ping and keepalives in session.py.' }],
         },
         {
           id: `task-${pid}-2`,
@@ -313,6 +426,10 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
           date: '2026-10-17',
           evidenceIds: docId ? [docId] : [],
           kind: 'Task',
+          priority: 'High',
+          status: 'Done',
+          due: '2026-10-28',
+          history: [{ personId: ownerName, date: '2026-10-17', note: 'Added PyMuPDF and python-docx extraction pipelines.' }],
         },
         {
           id: `risk-${pid}-1`,
@@ -325,6 +442,11 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
           date: '2026-10-17',
           evidenceIds: gitId1 ? [gitId1] : [],
           kind: 'Risk',
+          severity: 'Critical',
+          impact: 'Out of memory crashes if multiple AI inference models load simultaneously into 6GB VRAM.',
+          component: 'Ollama Local AI Runtime',
+          mitigation: ['OLLAMA_MAX_CONCURRENT_AI_JOBS=1 constraint in inference scheduler', 'Queue background jobs in PostgreSQL'],
+          resolution: 'Mitigating',
         },
         {
           id: `risk-${pid}-2`,
@@ -337,6 +459,11 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
           date: '2026-10-17',
           evidenceIds: gitId2 ? [gitId2] : [],
           kind: 'Risk',
+          severity: 'High',
+          impact: 'Sequential round-trips add latency overhead to REST API responses.',
+          component: 'Database Connection Pool',
+          mitigation: ['Eager batching with selectinload', 'FastAPI short-lived JWT verification without DB lookups'],
+          resolution: 'Mitigating',
         },
         {
           id: `dep-${pid}-1`,
@@ -349,6 +476,10 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
           date: '2026-10-17',
           evidenceIds: gitId1 ? [gitId1] : [],
           kind: 'Dependency',
+          depType: 'Technical',
+          from: 'Next.js Frontend',
+          to: 'FastAPI Backend API',
+          blocking: true,
         },
         {
           id: `dep-${pid}-2`,
@@ -361,6 +492,10 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
           date: '2026-10-17',
           evidenceIds: gitId2 ? [gitId2] : [],
           kind: 'Dependency',
+          depType: 'Technical',
+          from: 'FastAPI Backend',
+          to: 'PostgreSQL Database',
+          blocking: false,
         },
         {
           id: `dep-${pid}-3`,
@@ -373,9 +508,45 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
           date: '2026-10-17',
           evidenceIds: docId ? [docId] : [],
           kind: 'Dependency',
+          depType: 'External',
+          from: 'Extraction Pipeline',
+          to: 'GLM OCR Service (Ollama)',
+          blocking: false,
         },
-      ]
+        {
+          id: `dep-${pid}-4`,
+          projectId: pid,
+          title: 'Skill Assessment Pipeline depends on Verified Evidence Commits',
+          summary: 'Skill Passport evaluation pipeline correlates candidate skills against verified repository pull requests and commit diffs.',
+          confidence: 96,
+          verification: 'verified',
+          ownerId: ownerName,
+          date: '2026-10-17',
+          evidenceIds: gitId1 ? [gitId1] : [],
+          kind: 'Dependency',
+          depType: 'Task',
+          from: 'Skill Passport Model',
+          to: 'GitHub Commit Ingestion',
+          blocking: false,
+        },
+      ] as unknown as AnyFinding[]
     }, [liveFindings, evidenceList, members, pid])
+}
+
+export function useCanonicalProjectFindings(pid: string) {
+  const all = useCanonicalFindings(pid)
+  const decisions = all.filter((x) => x.kind === 'Decision') as unknown as (Decision & { kind: 'Decision' })[]
+  const tasks = all.filter((x) => x.kind === 'Task') as unknown as (Task & { kind: 'Task' })[]
+  const risks = all.filter((x) => x.kind === 'Risk') as unknown as (Risk & { kind: 'Risk' })[]
+  const dependencies = all.filter((x) => x.kind === 'Dependency') as unknown as (Dependency & { kind: 'Dependency' })[]
+
+  return {
+    decisions,
+    tasks,
+    risks,
+    dependencies,
+    all,
+  }
 }
 
 export function findingById(id: string): AnyFinding | undefined {

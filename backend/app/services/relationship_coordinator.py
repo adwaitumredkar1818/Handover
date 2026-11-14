@@ -48,11 +48,11 @@ logger = logging.getLogger("app.services.relationship_coordinator")
 # Mapping from KnowledgeCategory to EntityType
 _CATEGORY_TO_ENTITY_TYPE: dict[str, str] = {
     KnowledgeCategory.DECISIONS_RATIONALE.value: EntityType.DECISION.value,
-    KnowledgeCategory.TECHNICAL_ARCHITECTURE.value: EntityType.COMPONENT.value,
+    KnowledgeCategory.TECHNICAL_ARCHITECTURE.value: EntityType.TECHNICAL_COMPONENT.value,
     KnowledgeCategory.WORK_ITEMS.value: EntityType.WORK_ITEM.value,
     KnowledgeCategory.BUGS_BLOCKERS_RISKS.value: EntityType.RISK.value,
     KnowledgeCategory.DEPENDENCIES.value: EntityType.DEPENDENCY.value,
-    KnowledgeCategory.OPERATIONAL_HISTORICAL.value: EntityType.PROCEDURE.value,
+    KnowledgeCategory.OPERATIONAL_HISTORICAL.value: EntityType.DOCUMENT.value,
     KnowledgeCategory.RESPONSIBILITIES_OWNERSHIP.value: EntityType.PERSON.value,
     KnowledgeCategory.PROJECT_OVERVIEW_CONTEXT.value: EntityType.DOCUMENT.value,
 }
@@ -101,18 +101,21 @@ class RelationshipCoordinatorService:
         for k in k_items:
             e_type = _CATEGORY_TO_ENTITY_TYPE.get(k.category, EntityType.DOCUMENT.value)
             # Find primary evidence link if available
-            ev_id = k.evidence_links[0].evidence_id if k.evidence_links else None
+            ev_id = k.evidence_links[0].evidence_id if getattr(k, "evidence_links", None) else None
+            conf = float((getattr(k, "confidence_metadata_json", None) or {}).get("confidence_score", 1.0))
+            meta = getattr(k, "structured_payload", None) or {}
+            summary = getattr(k, "structured_summary", "")
 
             self._entity_repo.create_or_get_entity(
                 organisation_id=organisation_id,
                 project_id=project_id,
                 entity_type=e_type,
                 canonical_name=k.title[:255],
-                description=k.content,
+                description=summary,
                 primary_knowledge_item_id=k.id,
                 primary_evidence_id=ev_id,
-                confidence_score=float(k.confidence_score or 1.0),
-                metadata_json=k.metadata_json or {},
+                confidence_score=conf,
+                metadata_json=meta,
                 first_observed_at=k.created_at,
                 last_observed_at=k.updated_at,
                 is_synthetic=k.is_synthetic,
@@ -120,9 +123,7 @@ class RelationshipCoordinatorService:
             seeded += 1
 
             # If there's an author/owner person mentioned in metadata, seed person entity
-            owner_name = (k.metadata_json or {}).get("owner") or (k.metadata_json or {}).get(
-                "author"
-            )
+            owner_name = getattr(k, "person_or_owner_label", None) or meta.get("owner") or meta.get("author")
             if owner_name and isinstance(owner_name, str) and len(owner_name.strip()) > 1:
                 norm_owner = owner_name.strip().lower()
                 if norm_owner not in seen_people:
@@ -167,7 +168,7 @@ class RelationshipCoordinatorService:
             elif "jira" in source_type or "issue" in source_type:
                 ent_type = EntityType.WORK_ITEM.value
             elif "meeting" in source_type:
-                ent_type = EntityType.MEETING_NOTE.value
+                ent_type = EntityType.DOCUMENT.value
             else:
                 ent_type = EntityType.DOCUMENT.value
 
@@ -359,6 +360,7 @@ class RelationshipCoordinatorService:
 
         except Exception as exc:
             logger.exception("Relationship reconstruction run %s failed: %s", run.id, exc)
+            self._session.rollback()
             duration_ms = int((time.monotonic() - start_time) * 1000)
             run = self._run_repo.update_run_progress(
                 run.id,

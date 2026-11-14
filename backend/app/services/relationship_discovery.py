@@ -205,7 +205,11 @@ class RelationshipDiscoveryEngine:
 
         # Build lookup indices
         people = [e for e in entities if e.entity_type == EntityType.PERSON.value]
-        components = [e for e in entities if e.entity_type == EntityType.COMPONENT.value]
+        components = [
+            e
+            for e in entities
+            if e.entity_type in {EntityType.COMPONENT.value, EntityType.TECHNICAL_COMPONENT.value}
+        ]
         work_items = [e for e in entities if e.entity_type == EntityType.WORK_ITEM.value]
 
         people_by_handle: dict[str, KnowledgeEntity] = {}
@@ -426,7 +430,9 @@ class RelationshipDiscoveryEngine:
             self._session.execute(
                 select(KnowledgeEntity).where(
                     KnowledgeEntity.project_id == project_id,
-                    KnowledgeEntity.entity_type == EntityType.COMPONENT.value,
+                    KnowledgeEntity.entity_type.in_(
+                        [EntityType.TECHNICAL_COMPONENT.value, EntityType.COMPONENT.value]
+                    ),
                     KnowledgeEntity.is_deleted.is_(False),
                 )
             )

@@ -447,7 +447,7 @@ function SidebarContent({
           label: "Relationship Explorer",
           to: "/relationships",
           icon: Network,
-          match: "^/relationships",
+          match: "^/relationships|^/projects/.+/relationships",
         },
       ],
     },

@@ -638,10 +638,27 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     try {
       const [sum, list] = await Promise.allSettled([
         api.knowledgeIntelligence.getSummary(activeProject.id),
-        api.knowledgeIntelligence.listFindings(activeProject.id),
+        api.knowledgeIntelligence.listFindings(activeProject.id, undefined, 100, 0),
       ]);
       if (sum.status === "fulfilled") setKnowledgeSummary(sum.value as unknown as KnowledgeSummaryTelemetry);
-      if (list.status === "fulfilled") setFindings((list.value.items || []) as unknown as KnowledgeFinding[]);
+      if (list.status === "fulfilled") {
+        let allItems = (list.value.items || []) as unknown as KnowledgeFinding[];
+        const total = list.value.total || 0;
+        if (total > 100) {
+          const pagesNeeded = Math.ceil(total / 100);
+          const pagePromises = [];
+          for (let p = 1; p < pagesNeeded; p++) {
+            pagePromises.push(api.knowledgeIntelligence.listFindings(activeProject.id, undefined, 100, p * 100));
+          }
+          const pageResults = await Promise.allSettled(pagePromises);
+          for (const res of pageResults) {
+            if (res.status === "fulfilled" && res.value.items) {
+              allItems = allItems.concat(res.value.items as unknown as KnowledgeFinding[]);
+            }
+          }
+        }
+        setFindings(allItems);
+      }
     } catch (err) {
       console.error("Error loading findings:", err);
     } finally {

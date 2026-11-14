@@ -765,11 +765,21 @@ export const api = {
         body: JSON.stringify(options || {}),
       });
     },
-    async listFindings(projectId: string, domain?: string, page: number = 1): Promise<{
+    async listFindings(
+      projectId: string,
+      domain?: string,
+      limit: number = 100,
+      offset: number = 0
+    ): Promise<{
       items: Record<string, unknown>[];
       total: number;
+      limit: number;
+      offset: number;
     }> {
-      const qs = new URLSearchParams({ page: String(page) });
+      const qs = new URLSearchParams({
+        limit: String(Math.min(limit, 100)),
+        offset: String(offset),
+      });
       if (domain) qs.append("domain", domain);
       return request(`/projects/${projectId}/knowledge-intelligence/findings?${qs.toString()}`);
     },

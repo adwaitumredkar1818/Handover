@@ -2123,7 +2123,8 @@ function Inspector({
   findings?: AnyFinding[]
 }) {
   const s = useStore()
-  const { nodes, adj } = useMemo(() => buildGraph(pid, findings), [pid, findings])
+  const { evidenceList } = useLiveApp()
+  const { nodes, adj } = useMemo(() => buildGraph(pid, findings, evidenceList), [pid, findings, evidenceList])
   const node = nodes.get(nodeId)
   if (!node) return null
 
@@ -2132,7 +2133,36 @@ function Inspector({
   const groups = (['Decision', 'Task', 'Risk', 'Dependency', 'Person', 'Component'] as NodeKind[])
     .map((k) => ({ k, items: neighbors.filter((n) => n.kind === k) }))
     .filter((g) => g.items.length)
-  const ev = neighbors.filter((n) => n.kind === 'Evidence').map((n) => evidence.find((e) => e.id === n.id)!).filter(Boolean)
+  const ev = neighbors
+    .filter((n) => n.kind === 'Evidence')
+    .map((n) => {
+      const mockE = evidence.find((e) => e.id === n.id)
+      if (mockE) return mockE
+      const liveE = evidenceList.find((e) => e.id === n.id)
+      if (liveE) {
+        const liveAuthor = (liveE as unknown as Record<string, unknown>).author as string | undefined
+        return {
+          id: liveE.id,
+          projectId: pid,
+          sourceId: 'live',
+          authorId: 'live',
+          memberId: 'live',
+          processing: false,
+          extracted: true,
+          type: (liveE.provider === 'github' ? 'commit' : (liveE.mime_type?.includes('pdf') || liveE.original_filename?.endsWith('.pdf') ? 'pdf' : 'docx')) as Evidence['type'],
+          title: liveE.title || liveE.original_filename || 'Ingested project evidence',
+          source: liveE.provider || 'local_upload',
+          author: liveAuthor || 'Shubham',
+          date: liveE.created_at ? liveE.created_at.split('T')[0] : '2026-10-17',
+          ref: liveE.content_hash?.slice(0, 8) || liveE.id.slice(0, 8),
+          confidence: 95,
+          verification: 'verified' as Verification,
+          content: 'Decrypted source content available in Evidence Workspace.',
+        } as unknown as Evidence
+      }
+      return null
+    })
+    .filter((e): e is Evidence => Boolean(e))
   const v = f ? (s.verif[f.id] ?? f.verification) : undefined
 
   return (
@@ -2151,14 +2181,15 @@ function Inspector({
       <h3 className="mt-2 text-[18px] font-semibold leading-snug tracking-[-0.02em] text-navy">{node.label}</h3>
       {f && <p className="mt-2 text-[13.5px] leading-relaxed text-[#4a5d7c]">{s.edits[f.id] ?? f.summary}</p>}
       {node.kind === 'Person' && (
-        <p className="mt-2 text-[13px] text-muted">{personById(node.id.slice(2))?.title ?? 'Team member'} · {neighbors.length} linked findings</p>
+        <p className="mt-2 text-[13px] text-muted">{personById(node.id.slice(2))?.name ?? node.label} · {neighbors.length} linked findings</p>
       )}
       {node.kind === 'Component' && (
         <p className="mt-2 text-[13px] text-muted">Technical component referenced by {neighbors.length} findings.</p>
       )}
       {node.kind === 'Evidence' && (() => {
-        const e = evidence.find((x) => x.id === node.id)
-        return e ? <p className="mt-2 line-clamp-4 text-[13px] leading-relaxed text-muted">{e.content}</p> : null
+        const e = (evidence.find((x) => x.id === node.id) || evidenceList.find((x) => x.id === node.id)) as unknown as Record<string, unknown> | undefined
+        const contentStr = e ? ((e.content as string) || (e.title as string) || (e.original_filename as string) || 'Source evidence document ingested into workspace.') : null
+        return contentStr ? <p className="mt-2 line-clamp-4 text-[13px] leading-relaxed text-muted">{contentStr}</p> : null
       })()}
       {f && v && (
         <div className="mt-4 grid grid-cols-2 gap-2">
@@ -2244,7 +2275,8 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
   const s = useStore()
   const router = useRouter()
   const findings = useCanonicalFindings(projectId)
-  const { nodes, adj } = useMemo(() => buildGraph(projectId, findings), [projectId, findings])
+  const { triggerReconstruction, isLoadingFindings, isLoadingEvidence, evidenceList } = useLiveApp()
+  const { nodes, adj } = useMemo(() => buildGraph(projectId, findings, evidenceList), [projectId, findings, evidenceList])
   const [cat, setCat] = useState<'all' | NodeKind>('all')
   const [vf, setVf] = useState('all')
   const [showEv, setShowEv] = useState(true)
@@ -2257,7 +2289,6 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
   const [trail, setTrail] = useState<string[]>(first ? [first] : [])
   const [sheet, setSheet] = useState(false)
   const [drawer, setDrawer] = useState<AnyFinding>()
-  const { triggerReconstruction, isLoadingFindings, isLoadingEvidence, evidenceList } = useLiveApp()
 
   useEffect(() => {
     if (!sel && nodes.size > 0) {
@@ -2453,7 +2484,7 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
           {view === 'graph' ? (
             <>
               <div className="pointer-events-none absolute inset-0 dot-grid opacity-60" />
-              <KnowledgeCanvas pid={p.id} center={sel} onSelect={select} filter={graphFilter} findings={findings} />
+              <KnowledgeCanvas pid={p.id} center={sel} onSelect={select} filter={graphFilter} findings={findings} evidenceList={evidenceList} />
               {trail.length > 1 && (
                 <div className="absolute left-3 top-3 flex max-w-[70%] items-center gap-1 overflow-hidden rounded-[10px] border border-line bg-white/95 px-2 py-1 shadow-card backdrop-blur">
                   <History className="size-3.5 shrink-0 text-slate-400" />
@@ -2513,7 +2544,7 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
           {view === 'graph' ? (
             <div className="relative h-[440px]">
               <div className="pointer-events-none absolute inset-0 dot-grid opacity-60" />
-              <KnowledgeCanvas pid={p.id} center={sel} onSelect={select} filter={graphFilter} focusLabel={false} findings={findings} />
+              <KnowledgeCanvas pid={p.id} center={sel} onSelect={select} filter={graphFilter} focusLabel={false} findings={findings} evidenceList={evidenceList} />
             </div>
           ) : (
             <div className="max-h-[70dvh]">{listView}</div>

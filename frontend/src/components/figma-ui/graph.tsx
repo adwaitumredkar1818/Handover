@@ -10,7 +10,11 @@ export type NodeKind = 'Decision' | 'Task' | 'Risk' | 'Dependency' | 'Person' | 
 export interface GNode { id: string; label: string; kind: NodeKind }
 export const NODE_COLOR: Record<NodeKind, string> = { Decision: '#315FBA', Task: '#299B80', Risk: '#D36D72', Dependency: '#D39B43', Person: '#7997BE', Component: '#203653', Evidence: '#A0AEC0' }
 
-export function buildGraph(pid: string, customFindings?: AnyFinding[]) {
+export function buildGraph(
+  pid: string,
+  customFindings?: AnyFinding[],
+  customEvidence?: Array<{ id: string; title?: string; ref?: string; content?: string }>
+) {
   const nodes = new Map<string, GNode>()
   const adj = new Map<string, Set<string>>()
   const add = (n: GNode) => { if (!nodes.has(n.id)) nodes.set(n.id, n); if (!adj.has(n.id)) adj.set(n.id, new Set()) }
@@ -22,17 +26,34 @@ export function buildGraph(pid: string, customFindings?: AnyFinding[]) {
     add({ id: `p:${f.ownerId}`, label: personLabel, kind: 'Person' }); link(f.id, `p:${f.ownerId}`)
     for (const e of f.evidenceIds) {
       if (!e) continue
-      const ev = evidence.find((x) => x.id === e)
-      add({ id: e, label: ev ? ev.ref : e.slice(0, 8), kind: 'Evidence' })
+      const ev = evidence.find((x) => x.id === e) || customEvidence?.find((x) => x.id === e)
+      const label = ev ? (ev as any).ref || (ev as any).title || (ev as any).original_filename || e.slice(0, 8) : e.slice(0, 8)
+      add({ id: e, label, kind: 'Evidence' })
       link(f.id, e)
     }
+    const compsSet = new Set<string>()
     const comp = (f as unknown as { component?: string }).component
-    if (comp) { add({ id: `c:${comp}`, label: comp, kind: 'Component' }); link(f.id, `c:${comp}`) }
+    if (comp) compsSet.add(comp)
+    const comps = (f as unknown as { components?: string[] }).components
+    if (Array.isArray(comps)) {
+      for (const c of comps) if (c && c.trim()) compsSet.add(c.trim())
+    }
+    for (const c of compsSet) {
+      add({ id: `c:${c}`, label: c, kind: 'Component' })
+      link(f.id, `c:${c}`)
+    }
     if (f.kind === 'Dependency') {
       const d = f as unknown as Dependency
+      if (d.from) {
+        add({ id: `c:${d.from}`, label: d.from, kind: 'Component' })
+        link(f.id, `c:${d.from}`)
+      }
+      if (d.to) {
+        add({ id: `c:${d.to}`, label: d.to, kind: 'Component' })
+        link(f.id, `c:${d.to}`)
+      }
       if (d.from && d.to) {
-        add({ id: `c:${d.from}`, label: d.from, kind: 'Component' }); link(f.id, `c:${d.from}`)
-        add({ id: `c:${d.to}`, label: d.to, kind: 'Component' }); link(f.id, `c:${d.to}`)
+        link(`c:${d.from}`, `c:${d.to}`)
       }
     }
   }
@@ -85,6 +106,7 @@ export function KnowledgeCanvas({
   className,
   focusLabel = true,
   findings,
+  evidenceList,
 }: {
   pid: string
   center: string
@@ -93,8 +115,9 @@ export function KnowledgeCanvas({
   className?: string
   focusLabel?: boolean
   findings?: AnyFinding[]
+  evidenceList?: Array<{ id: string; title?: string; ref?: string; content?: string }>
 }) {
-  const { nodes, adj } = useMemo(() => buildGraph(pid, findings), [pid, findings])
+  const { nodes, adj } = useMemo(() => buildGraph(pid, findings, evidenceList), [pid, findings, evidenceList])
   const boxRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 900, h: 600 })
   useEffect(() => {

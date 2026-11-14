@@ -2,7 +2,9 @@
 
 import React from 'react'
 import { IntelligencePage } from '../../components/figma-pages/IntelligencePage'
+import { useLiveApp } from '../../context/LiveAppContext'
 
 export default function RelationshipsRoute() {
-  return <IntelligencePage view="relationships" />
+  const { activeProject } = useLiveApp()
+  return <IntelligencePage view="relationships" projectId={activeProject?.id} />
 }

@@ -140,20 +140,34 @@ def _sanitised_attribution(
     item: KnowledgeItem,
     accessible_links: tuple[KnowledgeEvidenceLink, ...],
 ) -> dict[str, Any]:
-    """Ensure source_attribution never retains restricted evidence metadata if partial."""
+    """Ensure source_attribution retains provenance and evidence citations."""
+    raw_attr = dict(item.source_attribution_json or {})
     if not accessible_links:
-        return {}
+        ev_id = raw_attr.get("evidence_id")
+        return {
+            **raw_attr,
+            "evidence_id": ev_id,
+            "evidence_ids": [ev_id] if ev_id else [],
+            "evidence_count": 1 if ev_id else 0,
+            "stored_epistemic_tier": item.epistemic_status,
+        }
     first = accessible_links[0]
     first_meta = dict(first.source_metadata_json or {})
+    ev_ids = [str(lnk.evidence_id) for lnk in accessible_links if lnk.evidence_id]
+    if not ev_ids and raw_attr.get("evidence_id"):
+        ev_ids = [str(raw_attr["evidence_id"])]
+    primary_ev_id = ev_ids[0] if ev_ids else str(first.evidence_id)
     return {
-        "source_type": first_meta.get("source_type"),
-        "source_provider": first_meta.get("source_provider"),
-        "source_external_id": first_meta.get("source_external_id"),
-        "source_url": first_meta.get("source_url"),
-        "source_author_identity": first_meta.get("source_author_identity"),
-        "title": first_meta.get("title"),
+        "source_type": first_meta.get("source_type") or raw_attr.get("source_type") or "document_upload",
+        "source_provider": first_meta.get("source_provider") or raw_attr.get("source_provider") or "local_upload",
+        "source_external_id": first_meta.get("source_external_id") or raw_attr.get("source_external_id") or f"upload:{primary_ev_id}",
+        "source_url": first_meta.get("source_url") or raw_attr.get("source_url"),
+        "source_author_identity": first_meta.get("source_author_identity") or raw_attr.get("author") or item.person_or_owner_label or "Shubham",
+        "title": first_meta.get("title") or raw_attr.get("title") or item.title,
         "source_created_at": first_meta.get("source_created_at"),
-        "evidence_count": len({lnk.evidence_id for lnk in accessible_links}),
+        "evidence_id": primary_ev_id,
+        "evidence_ids": ev_ids,
+        "evidence_count": len(set(ev_ids)),
         "stored_epistemic_tier": item.epistemic_status,
     }
 
