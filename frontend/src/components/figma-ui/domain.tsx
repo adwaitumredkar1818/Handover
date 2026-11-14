@@ -34,11 +34,11 @@ export function useProject(projectId?: string) {
   const s = useFigmaStore()
   const { activeProject, projects: liveProjects } = useLiveApp()
 
+  let project: Project | undefined = undefined
+
   // 1. If explicit projectId matches activeProject from LiveAppContext
   if (activeProject && (!projectId || activeProject.id === projectId || activeProject.name.toLowerCase() === projectId.toLowerCase())) {
-    const existing = s.projects.find((p) => p.id === activeProject.id)
-    if (existing) return existing
-    return {
+    project = s.projects.find((p) => p.id === activeProject.id) || ({
       id: activeProject.id,
       workspaceId: activeProject.organisation_id || 'sandbox',
       name: activeProject.name,
@@ -54,11 +54,13 @@ export function useProject(projectId?: string) {
       startDate: '2026-01-01',
       endDate: '2026-12-31',
       color: '#315FBA',
-    } as Project
+    } as Project)
   }
 
   // 2. Try exact ID match in s.projects
-  let project = projectId ? s.projects.find((p) => p.id === projectId) : undefined
+  if (!project && projectId) {
+    project = s.projects.find((p) => p.id === projectId)
+  }
 
   // 3. Try slug / name / code match in s.projects
   if (!project && projectId && projectId !== 'atlas' && projectId !== 'all') {

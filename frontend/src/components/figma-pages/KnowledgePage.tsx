@@ -294,10 +294,8 @@ export function DataSources({ projectId }: { projectId: string }) {
   const [connecting, setConnecting] = useState<SourceType | null>(null)
   const { openConnectSourceModal, setIsUploadModalOpen, sourceMappings, triggerSync, evidenceList } = useLiveApp()
 
-  if (!p) return <ProjectNotFound />
-  const canManage = p.role === 'manager'
   const types: SourceType[] = ['github', 'jira', 'slack', 'docs', 'confluence', 'gdrive']
-  const srcs = s.sources.filter((x) => x.projectId === p.id)
+  const srcs = s.sources.filter((x) => (p?.id ? x.projectId === p.id : false))
 
   const githubMapping = sourceMappings.find((m) => m.provider === 'github')
   const jiraMapping = sourceMappings.find((m) => m.provider === 'jira')
@@ -319,7 +317,7 @@ export function DataSources({ projectId }: { projectId: string }) {
         const count = githubEvidence.length || (githubMapping ? 72 : 0)
         map.set(t, {
           id: githubMapping?.id || 'src-github',
-          projectId: p.id,
+          projectId: p?.id || '',
           type: 'github',
           name: 'GitHub',
           account: isConn ? 'Connected repository' : 'Not connected',
@@ -334,7 +332,7 @@ export function DataSources({ projectId }: { projectId: string }) {
         const isConn = docEvidence.length > 0
         map.set(t, {
           id: 'src-docs',
-          projectId: p.id,
+          projectId: p?.id || '',
           type: 'docs',
           name: 'PDF & DOCX uploads',
           account: isConn ? 'Uploaded Project Documentation' : 'Not connected',
@@ -349,7 +347,7 @@ export function DataSources({ projectId }: { projectId: string }) {
         const isConn = !!jiraMapping || jiraEvidence.length > 0
         map.set(t, {
           id: jiraMapping?.id || 'src-jira',
-          projectId: p.id,
+          projectId: p?.id || '',
           type: 'jira',
           name: 'Jira',
           account: isConn ? 'Connected Jira Workspace' : 'Not connected',
@@ -364,7 +362,7 @@ export function DataSources({ projectId }: { projectId: string }) {
         const isConn = !!slackMapping || slackEvidence.length > 0
         map.set(t, {
           id: slackMapping?.id || 'src-slack',
-          projectId: p.id,
+          projectId: p?.id || '',
           type: 'slack',
           name: 'Slack',
           account: isConn ? 'Connected Slack Channels' : 'Not connected',
@@ -378,7 +376,7 @@ export function DataSources({ projectId }: { projectId: string }) {
       } else {
         map.set(t, mockSrc || {
           id: `src-${t}`,
-          projectId: p.id,
+          projectId: p?.id || '',
           type: t,
           name: SOURCE_META[t]?.label || t,
           account: 'Not connected',
@@ -392,7 +390,10 @@ export function DataSources({ projectId }: { projectId: string }) {
       }
     })
     return map
-  }, [p.id, srcs, githubMapping, jiraMapping, slackMapping, githubEvidence.length, docEvidence, jiraEvidence.length, slackEvidence.length])
+  }, [p?.id, srcs, githubMapping, jiraMapping, slackMapping, githubEvidence.length, docEvidence, jiraEvidence.length, slackEvidence.length])
+
+  if (!p) return <ProjectNotFound />
+  const canManage = p.role === 'manager'
 
   return (
     <>
@@ -825,9 +826,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     })
   }, [evidenceList, p?.id])
 
-  if (!p) return <ProjectNotFound />
-
-  const storeItems = evidence.filter((e) => e.projectId === p.id)
+  const storeItems = evidence.filter((e) => (p?.id ? e.projectId === p.id : false))
   const all = liveItems.length > 0 ? liveItems : storeItems
   const sources = useMemo(() => {
     const sList: Source[] = []
@@ -839,7 +838,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     if (gitEvidence.length > 0) {
       sList.push({
         id: 'src-github',
-        projectId: p.id,
+        projectId: p?.id || '',
         type: 'github',
         name: 'GitHub Repository',
         account: 'Connected',
@@ -854,7 +853,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     if (docEvidence.length > 0) {
       sList.push({
         id: 'src-docs',
-        projectId: p.id,
+        projectId: p?.id || '',
         type: 'docs',
         name: 'Uploaded Specifications',
         account: 'Connected',
@@ -869,7 +868,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     if (jiraEvidence.length > 0) {
       sList.push({
         id: 'src-jira',
-        projectId: p.id,
+        projectId: p?.id || '',
         type: 'jira',
         name: 'Jira Workspace',
         account: 'Connected',
@@ -884,7 +883,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     if (slackEvidence.length > 0) {
       sList.push({
         id: 'src-slack',
-        projectId: p.id,
+        projectId: p?.id || '',
         type: 'slack',
         name: 'Slack Discussions',
         account: 'Connected',
@@ -897,10 +896,10 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
       })
     }
     if (sList.length === 0) {
-      return s.sources.filter((x) => x.projectId === p.id)
+      return s.sources.filter((x) => (p?.id ? x.projectId === p.id : false))
     }
     return sList
-  }, [evidenceList, p.id, s.sources])
+  }, [evidenceList, p?.id, s.sources])
 
   const cutoff = range === '30' ? '2025-05-19' : range === '90' ? '2025-03-20' : '0'
   const list = all.filter(
@@ -981,6 +980,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
       }))
     if (liveMatches.length > 0) return liveMatches
 
+    if (!p?.id) return []
     return allFindings(p.id)
       .filter((f) => f.evidenceIds.includes(activeEvidenceId))
       .map((f) => ({
@@ -990,7 +990,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
         summary: f.summary,
         verification: s.verif[f.id] ?? f.verification,
       }))
-  }, [liveFindings, activeEvidenceId, p.id, s.verif])
+  }, [liveFindings, activeEvidenceId, p?.id, s.verif])
 
   const reset = () => {
     setQ('')
@@ -1000,6 +1000,8 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     setProc('all')
     setRange('all')
   }
+
+  if (!p) return <ProjectNotFound />
 
   return (
     <>
@@ -1621,8 +1623,6 @@ export function EvidenceDetail({ projectId, evidenceId }: { projectId: string; e
   const liveSummary = evidenceList.find((x) => x.id === evidenceId)
   const storeE = evidence.find((x) => x.id === evidenceId) || evidence.find((x) => x.projectId === projectId)
 
-  if (!p) return <ProjectNotFound />
-
   let eType: Evidence['type'] = storeE?.type || 'pdf'
   if (detail?.provider === 'github' || liveSummary?.provider === 'github') eType = 'commit'
   else if (detail?.provider === 'jira' || liveSummary?.provider === 'jira') eType = 'issue'
@@ -1664,7 +1664,7 @@ export function EvidenceDetail({ projectId, evidenceId }: { projectId: string; e
 
   const e: Evidence = {
     id: evidenceId,
-    projectId: p.id,
+    projectId: p?.id || '',
     type: eType,
     title: detail?.title || liveSummary?.title || storeE?.title || 'Evidence Record',
     sourceId: detail?.provider || liveSummary?.provider || storeE?.sourceId || 'docs',
@@ -1682,12 +1682,14 @@ export function EvidenceDetail({ projectId, evidenceId }: { projectId: string; e
     extracted: extractedFacts,
   }
   const src = s.sources.find((x) => x.id === e.sourceId)
-  const related = allFindings(p.id).filter((f) => f.evidenceIds.includes(e.id))
-  const handovers = s.handovers.filter((h) => h.projectId === p.id && h.status !== 'draft')
+  const related = p?.id ? allFindings(p.id).filter((f) => f.evidenceIds.includes(e.id)) : []
+  const handovers = s.handovers.filter((h) => (p?.id ? h.projectId === p.id : false) && h.status !== 'draft')
   const groups = (['Decision', 'Task', 'Risk', 'Dependency'] as const).map((k) => ({
     k,
     items: related.filter((r) => r.kind === k),
   }))
+
+  if (!p) return <ProjectNotFound />
 
   return (
     <>

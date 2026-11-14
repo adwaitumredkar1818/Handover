@@ -6,26 +6,22 @@ import {
   XCircle,
   HelpCircle,
   AlertTriangle,
-  Clock,
-  ShieldAlert,
   FileText,
   UserCheck,
   Search,
   Filter,
   RefreshCw,
-  ChevronRight,
   ExternalLink,
   MessageSquare,
   Sparkles,
   Lock,
   Pencil,
-  ArrowRight,
   FileQuestion,
-  ShieldCheck,
-  Building,
-  User,
-  History,
   Check,
+  Quote,
+  Send,
+  Calendar,
+  User as UserIcon,
 } from "lucide-react";
 import { api } from "../../lib/api";
 import { useLiveApp } from "../../context/LiveAppContext";
@@ -105,10 +101,13 @@ interface CaseDetail {
   }>;
   review_events: Array<{
     id: string;
-    event_type: string;
-    actor_user_id: string;
+    action?: string;
+    event_type?: string;
+    reviewer_user_id?: string;
+    actor_user_id?: string;
     created_at: string;
     notes?: string;
+    review_notes?: string;
     previous_status?: string;
     new_status?: string;
   }>;
@@ -118,8 +117,12 @@ interface SupportingEvidence {
   evidence_id: string;
   title?: string;
   source_type?: string;
-  source_url?: string;
-  supporting_excerpt?: string;
+  source_url?: string | null;
+  author?: string | null;
+  support_type?: string;
+  supporting_excerpt?: string | null;
+  excerpt_verified?: boolean;
+  source_location?: Record<string, unknown>;
   chunk_id?: string | null;
   chunk_text?: string | null;
   confidence_score?: number | null;
@@ -127,7 +130,7 @@ interface SupportingEvidence {
 }
 
 export function VerificationCenterWorkspace() {
-  const { activeProject, addToast } = useLiveApp();
+  const { activeProject, addToast, user } = useLiveApp();
   const [summary, setSummary] = useState<VerificationSummary | null>(null);
   const [queue, setQueue] = useState<VerificationQueueItem[]>([]);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
@@ -147,6 +150,9 @@ export function VerificationCenterWorkspace() {
   // Request context modal
   const [isRequestingContext, setIsRequestingContext] = useState<boolean>(false);
   const [contextQuestion, setContextQuestion] = useState<string>("");
+
+  // Expandable chunk viewer state
+  const [expandedChunks, setExpandedChunks] = useState<Record<string, boolean>>({});
 
   // Re-assess loading
   const [assessing, setAssessing] = useState<boolean>(false);
@@ -217,11 +223,11 @@ export function VerificationCenterWorkspace() {
           const detailObj = detail as unknown as CaseDetail;
           setCaseDetail(detailObj);
 
-          // Support both supporting_evidence and evidence keys
+          // Real supporting evidence links from backend
           const rawEv = (evRes as any).supporting_evidence || (evRes as any).evidence || [];
           setCaseEvidence(rawEv);
 
-          // Seed edit fields
+          // Seed edit fields with real finding data
           const title = detailObj.target_data?.title || "";
           const summaryText = detailObj.target_data?.summary || "";
           setEditTitle(title);
@@ -243,19 +249,19 @@ export function VerificationCenterWorkspace() {
     if (!activeProject?.id || !caseDetail) return;
     setActionLoading(true);
     try {
+      const noteToSave = reviewerNote.trim() || "Approved as verified project knowledge";
       await api.verification.approveCase(
         activeProject.id,
         caseDetail.id,
-        reviewerNote || "Approved as verified project knowledge"
+        noteToSave
       );
       addToast({
         type: "success",
         title: "Finding Approved",
-        message: "Finding has been promoted to Human Verified knowledge.",
+        message: "Finding promoted to Human Verified knowledge and recorded in audit log.",
       });
       setReviewerNote("");
       await loadQueueData();
-      // Reload current case details
       const updated = await api.verification.getCaseDetail(activeProject.id, caseDetail.id);
       setCaseDetail(updated as unknown as CaseDetail);
     } catch (err: any) {
@@ -273,15 +279,16 @@ export function VerificationCenterWorkspace() {
     if (!activeProject?.id || !caseDetail) return;
     setActionLoading(true);
     try {
+      const noteToSave = reviewerNote.trim() || "Rejected by reviewer during audit";
       await api.verification.rejectCase(
         activeProject.id,
         caseDetail.id,
-        reviewerNote || "Rejected by reviewer during audit"
+        noteToSave
       );
       addToast({
         type: "info",
         title: "Finding Rejected",
-        message: "Finding marked as rejected and excluded from handover.",
+        message: "Finding marked as rejected and excluded from handover compilation.",
       });
       setReviewerNote("");
       await loadQueueData();
@@ -302,10 +309,11 @@ export function VerificationCenterWorkspace() {
     if (!activeProject?.id || !caseDetail) return;
     setActionLoading(true);
     try {
+      const noteToSave = reviewerNote.trim() || "Flagged for further project lead clarification";
       await api.verification.markUnresolved(
         activeProject.id,
         caseDetail.id,
-        reviewerNote || "Flagged for further project lead clarification"
+        noteToSave
       );
       addToast({
         type: "warning",
@@ -335,11 +343,12 @@ export function VerificationCenterWorkspace() {
         title: editTitle,
         summary: editSummary,
         expected_version: caseDetail.version,
+        reason: reviewerNote.trim() || "Auditor correction to title/summary",
       });
       addToast({
         type: "success",
         title: "Finding Updated",
-        message: "Auditor corrections recorded with full provenance diff.",
+        message: "Auditor corrections recorded with full version provenance.",
       });
       setIsEditing(false);
       await loadQueueData();
@@ -356,6 +365,38 @@ export function VerificationCenterWorkspace() {
     }
   };
 
+  const handleSendContextRequest = async () => {
+    if (!activeProject?.id || !caseDetail || !contextQuestion.trim()) return;
+    setActionLoading(true);
+    try {
+      const recipientId = activeProject.owner_id || user?.id;
+      if (!recipientId) throw new Error("No recipient available for clarification request.");
+      await api.verification.requestContext(activeProject.id, caseDetail.id, {
+        requested_from_user_id: recipientId,
+        question: contextQuestion.trim(),
+        requested_information_type: "clarification",
+        expected_version: caseDetail.version,
+      });
+      addToast({
+        type: "success",
+        title: "Clarification Dispatched",
+        message: "Context clarification request sent to team member and logged in audit trail.",
+      });
+      setIsRequestingContext(false);
+      setContextQuestion("");
+      const updated = await api.verification.getCaseDetail(activeProject.id, caseDetail.id);
+      setCaseDetail(updated as unknown as CaseDetail);
+    } catch (err: any) {
+      addToast({
+        type: "error",
+        title: "Dispatch Failed",
+        message: err.message || "Failed to dispatch clarification inquiry.",
+      });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const handleAssessAll = async () => {
     if (!activeProject?.id) return;
     setAssessing(true);
@@ -364,9 +405,13 @@ export function VerificationCenterWorkspace() {
       addToast({
         type: "success",
         title: "Assessment Complete",
-        message: "Evaluated all project knowledge items against the 14-item verification taxonomy.",
+        message: "Deterministic verification rules and confidence checks evaluated.",
       });
       await loadQueueData();
+      if (selectedCaseId) {
+        const updated = await api.verification.getCaseDetail(activeProject.id, selectedCaseId);
+        setCaseDetail(updated as unknown as CaseDetail);
+      }
     } catch (err: any) {
       addToast({
         type: "error",
@@ -390,14 +435,14 @@ export function VerificationCenterWorkspace() {
     });
   }, [queue, searchTerm]);
 
-  // Active finding confidence calculation
+  // Active finding confidence calculation - strictly Ollama/backend score, NO 95% default!
   const activeConfidencePercent = useMemo(() => {
-    if (!caseDetail) return 95;
+    if (!caseDetail) return null;
     const score = caseDetail.target_data?.confidence_score ?? caseDetail.confidence_score;
     if (score !== null && score !== undefined) {
       return Math.round(score * 100);
     }
-    return 95;
+    return null;
   }, [caseDetail]);
 
   // Current finding details
@@ -407,9 +452,6 @@ export function VerificationCenterWorkspace() {
   const epistemicStatus = caseDetail?.target_data?.epistemic_status || "extracted";
   const caseStatus = caseDetail?.case_status || (queue.find((q) => q.id === selectedCaseId)?.status) || "candidate";
 
-  // Sources for side-by-side comparison
-  const sourceA = caseEvidence[0];
-  const sourceB = caseEvidence[1];
   const activeConflicts = caseDetail?.conflicts || [];
   const activeIssues = caseDetail?.issues || [];
 
@@ -553,7 +595,9 @@ export function VerificationCenterWorkspace() {
                 const title = item.title || item.finding?.title || `Finding: ${item.target_id.slice(0, 8)}`;
                 const summarySnippet = item.summary || item.finding?.summary || "Project knowledge candidate awaiting human verification.";
                 const domain = item.domain || item.finding?.domain || "General";
-                const confScore = item.confidence_score !== null && item.confidence_score !== undefined ? Math.round(item.confidence_score * 100) : 95;
+                const confScore = item.confidence_score !== null && item.confidence_score !== undefined
+                  ? Math.round(item.confidence_score * 100)
+                  : null;
 
                 return (
                   <div
@@ -561,6 +605,7 @@ export function VerificationCenterWorkspace() {
                     onClick={() => {
                       setSelectedCaseId(item.id);
                       setIsEditing(false);
+                      setIsRequestingContext(false);
                     }}
                     className={`p-3 rounded-lg border transition cursor-pointer text-left ${
                       isSelected
@@ -588,7 +633,7 @@ export function VerificationCenterWorkspace() {
                         {item.status === "pending_review" ? "Pending Review" : item.status.charAt(0).toUpperCase() + item.status.slice(1)}
                       </span>
                       <span className="text-[10px] font-medium text-slate-400">
-                        {confScore}% conf
+                        {confScore !== null ? `${confScore}% conf` : "Unscored"}
                       </span>
                     </div>
 
@@ -621,37 +666,35 @@ export function VerificationCenterWorkspace() {
         </div>
 
         {/* ============================================================ */}
-        {/* PANEL 2: SUPPORTING EVIDENCE & FINDING GROUNDING            */}
+        {/* PANEL 2: SUPPORTING EVIDENCE & PROVENANCE                   */}
         {/* ============================================================ */}
         <div className="lg:col-span-6 bg-white border border-slate-200 rounded-xl shadow-xs flex flex-col overflow-hidden h-[740px]">
           {/* Panel Header */}
-          <div className="bg-[#047857] text-white px-4 py-2.5 flex items-center justify-between">
+          <div className="bg-[#0f766e] text-white px-4 py-2.5 flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2">
-              <ShieldCheck className="size-3.5 text-emerald-300" />
+              <FileText className="size-3.5 text-teal-200" />
               2 SUPPORTING EVIDENCE
             </span>
-            {caseDetail && (
-              <span className="text-[11px] font-mono text-emerald-100 bg-emerald-800/80 px-2 py-0.5 rounded">
-                CASE #{caseDetail.id.slice(0, 8)}
-              </span>
-            )}
+            <span className="text-[11px] font-mono text-teal-100 bg-teal-800/80 px-2 py-0.5 rounded-full">
+              {caseEvidence.length} {caseEvidence.length === 1 ? "Citation" : "Citations"}
+            </span>
           </div>
 
           {/* Panel Body */}
-          <div className="flex-1 overflow-y-auto p-5 space-y-5">
-            {/* CANDIDATE FINDING CARD */}
-            <div className="bg-slate-50/70 border border-slate-200 rounded-xl p-4 space-y-2.5">
+          <div className="p-4 flex-1 overflow-y-auto space-y-4">
+            {/* Candidate Finding Card */}
+            <div className="bg-slate-50/70 border border-slate-200 rounded-lg p-3.5 space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
                   CANDIDATE FINDING
                 </span>
-                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-slate-200 text-slate-700">
+                <span className="text-[10px] font-mono uppercase bg-slate-200/80 text-slate-700 px-2 py-0.5 rounded font-medium">
                   Epistemic Tier: {epistemicStatus.toUpperCase()}
                 </span>
               </div>
 
               {isEditing ? (
-                <div className="space-y-3 mt-2">
+                <div className="space-y-3 pt-1">
                   <div>
                     <label className="text-[11px] font-semibold text-slate-700 block mb-1">
                       Finding Title
@@ -710,54 +753,132 @@ export function VerificationCenterWorkspace() {
               )}
             </div>
 
-            {/* SIDE-BY-SIDE EVIDENCE COMPARISON (Source A vs Source B) */}
+            {/* REAL CITED SUPPORTING EVIDENCE */}
             <div>
-              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2.5 flex items-center justify-between">
-                <span>Side-by-Side Source Corroboration</span>
-                <span className="text-[10px] font-normal text-slate-400">
-                  {caseEvidence.length} cited source records
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-2.5 flex items-center justify-between">
+                <span className="flex items-center gap-1.5">
+                  <FileText className="size-3.5 text-teal-600" />
+                  CITED SUPPORTING EVIDENCE & PROVENANCE
+                </span>
+                <span className="text-[11px] font-semibold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
+                  {caseEvidence.length} {caseEvidence.length === 1 ? "Cited Source Record" : "Cited Source Records"}
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {/* Source A */}
-                <div className="bg-white border border-slate-200 rounded-lg p-3.5 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="bg-slate-800 text-white text-[10px] font-mono font-bold px-1.5 py-0.5 rounded">
-                      Source A
-                    </span>
-                    <span className="text-[11px] font-mono text-slate-500 truncate max-w-[140px]">
-                      {sourceA?.title || "Project Specification Doc"}
-                    </span>
+              {caseEvidence.length === 0 ? (
+                <div className="bg-amber-50/60 border border-amber-200 rounded-lg p-5 text-center space-y-2">
+                  <FileQuestion className="size-7 text-amber-500 mx-auto" />
+                  <div className="font-semibold text-xs text-amber-900">
+                    No Direct Supporting Evidence Records Cited
                   </div>
-                  <div className="bg-slate-50 border border-slate-100 rounded p-2.5 text-[11px] font-serif italic text-slate-700 leading-relaxed min-h-[70px]">
-                    &quot;{sourceA?.supporting_excerpt || "Direct architectural specification excerpt verified against ingested document text."}&quot;
-                  </div>
-                  <div className="text-[10px] text-slate-400 flex items-center justify-between pt-1">
-                    <span>Type: {sourceA?.source_type || "document"}</span>
-                    <span>Direct Grounding</span>
-                  </div>
+                  <p className="text-[11px] text-amber-700 max-w-md mx-auto leading-relaxed">
+                    This candidate finding currently has no direct cited source records in the knowledge base. Human reviewers should verify its claims or request additional context from the project team before approving.
+                  </p>
                 </div>
+              ) : (
+                <div className="space-y-3">
+                  {caseEvidence.map((ev, idx) => {
+                    const isChunkExpanded = Boolean(expandedChunks[ev.evidence_id || String(idx)]);
+                    const pageNum = (ev.source_location as any)?.page_number;
+                    const chunkIdx = (ev.source_location as any)?.chunk_index;
 
-                {/* Source B */}
-                <div className="bg-white border border-slate-200 rounded-lg p-3.5 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="bg-slate-800 text-white text-[10px] font-mono font-bold px-1.5 py-0.5 rounded">
-                      Source B
-                    </span>
-                    <span className="text-[11px] font-mono text-slate-500 truncate max-w-[140px]">
-                      {sourceB?.title || "Corroborating Source Record"}
-                    </span>
-                  </div>
-                  <div className="bg-slate-50 border border-slate-100 rounded p-2.5 text-[11px] font-serif italic text-slate-700 leading-relaxed min-h-[70px]">
-                    &quot;{sourceB?.supporting_excerpt || "Additional corroborating evidence verified across connected repositories and documentation."}&quot;
-                  </div>
-                  <div className="text-[10px] text-slate-400 flex items-center justify-between pt-1">
-                    <span>Type: {sourceB?.source_type || "git_commit"}</span>
-                    <span>Corroboration</span>
-                  </div>
+                    return (
+                      <div
+                        key={ev.evidence_id || idx}
+                        className="bg-white border border-slate-200 rounded-lg p-3.5 space-y-2.5 shadow-xs transition hover:border-slate-300"
+                      >
+                        {/* Evidence Citation Header */}
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="bg-slate-800 text-white text-[10px] font-mono font-bold px-1.5 py-0.5 rounded">
+                              Citation #{idx + 1}
+                            </span>
+                            <span className="font-semibold text-xs text-slate-900 truncate max-w-sm" title={ev.title}>
+                              {ev.title || "Untitled Document"}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[10px]">
+                            <span className="bg-teal-50 text-teal-700 border border-teal-200 font-medium px-2 py-0.5 rounded capitalize">
+                              {ev.source_type ? ev.source_type.replace(/_/g, " ") : "Document"}
+                            </span>
+                            {ev.support_type && (
+                              <span className="bg-blue-50 text-blue-700 border border-blue-200 font-medium px-2 py-0.5 rounded capitalize">
+                                {ev.support_type.replace(/_/g, " ")}
+                              </span>
+                            )}
+                            {ev.restricted && (
+                              <span className="bg-rose-50 text-rose-700 border border-rose-200 font-medium px-2 py-0.5 rounded flex items-center gap-1">
+                                <Lock className="size-2.5" /> Restricted ACL
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Verbatim Supporting Excerpt */}
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between text-[10px] text-slate-500 font-medium">
+                            <span className="flex items-center gap-1">
+                              <Quote className="size-3 text-teal-600" />
+                              Verbatim Grounding Excerpt:
+                            </span>
+                            {ev.excerpt_verified && (
+                              <span className="text-emerald-700 font-medium flex items-center gap-1">
+                                <CheckCircle2 className="size-3" /> Grounding Verified
+                              </span>
+                            )}
+                          </div>
+                          <div className="bg-slate-50/80 border border-slate-200/80 rounded-md p-3 text-[11px] font-serif italic text-slate-800 leading-relaxed">
+                            &quot;{ev.supporting_excerpt || "No explicit textual excerpt recorded for this citation."}&quot;
+                          </div>
+                        </div>
+
+                        {/* Optional Expandable Chunk Context */}
+                        {ev.chunk_text && ev.chunk_text !== ev.supporting_excerpt && (
+                          <div className="pt-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedChunks((prev) => ({
+                                  ...prev,
+                                  [ev.evidence_id || String(idx)]: !isChunkExpanded,
+                                }))
+                              }
+                              className="text-[10px] text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1"
+                            >
+                              {isChunkExpanded ? "Hide full chunk context ▲" : "View full chunk context ▼"}
+                            </button>
+                            {isChunkExpanded && (
+                              <div className="mt-2 bg-slate-900 text-slate-100 p-3 rounded text-[11px] font-mono leading-relaxed max-h-48 overflow-y-auto whitespace-pre-wrap">
+                                {ev.chunk_text}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Metadata Footer */}
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[10px] text-slate-400 border-t border-slate-100">
+                          <div className="flex items-center gap-3">
+                            {pageNum !== undefined && <span>Page: {pageNum}</span>}
+                            {chunkIdx !== undefined && <span>Chunk: #{chunkIdx}</span>}
+                            {ev.author && <span>Author: {ev.author}</span>}
+                            <span className="font-mono">ID: {ev.evidence_id ? ev.evidence_id.slice(0, 8) : "N/A"}</span>
+                          </div>
+                          {ev.source_url && (
+                            <a
+                              href={ev.source_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-blue-600 hover:underline flex items-center gap-1"
+                            >
+                              <ExternalLink className="size-3" /> View Source
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-              </div>
+              )}
 
               {/* Conflict Indicator Banner */}
               {activeConflicts.length > 0 ? (
@@ -819,15 +940,32 @@ export function VerificationCenterWorkspace() {
 
             {/* CONFIDENCE AND UNCERTAINTY SECTION */}
             <div className="space-y-2 pt-2 border-t border-slate-100">
-              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-700">
-                CONFIDENCE AND UNCERTAINTY
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-700 flex items-center justify-between">
+                <span>CONFIDENCE AND UNCERTAINTY</span>
+                {activeConfidencePercent !== null ? (
+                  <span className="text-xs font-mono font-semibold text-blue-700">
+                    {activeConfidencePercent}%
+                  </span>
+                ) : (
+                  <span className="text-xs font-mono font-medium text-slate-400">
+                    Unscored
+                  </span>
+                )}
               </div>
 
               {/* Progress bar */}
-              <div className="w-full bg-slate-200 h-3 rounded-full overflow-hidden">
+              <div className="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden">
                 <div
-                  className="bg-blue-600 h-full rounded-full transition-all duration-300"
-                  style={{ width: `${activeConfidencePercent}%` }}
+                  className={`h-full rounded-full transition-all duration-300 ${
+                    activeConfidencePercent !== null
+                      ? activeConfidencePercent >= 80
+                        ? "bg-emerald-600"
+                        : activeConfidencePercent >= 50
+                        ? "bg-blue-600"
+                        : "bg-amber-500"
+                      : "bg-slate-300"
+                  }`}
+                  style={{ width: `${activeConfidencePercent ?? 0}%` }}
                 />
               </div>
 
@@ -858,57 +996,102 @@ export function VerificationCenterWorkspace() {
 
           {/* Panel Body */}
           <div className="p-4 flex-1 flex flex-col justify-between overflow-y-auto space-y-4">
-            {/* Buttons list */}
-            <div className="space-y-2.5">
-              {/* Approve Button (Primary Solid Blue) */}
-              <button
-                onClick={handleApprove}
-                disabled={actionLoading || !caseDetail}
-                className="w-full py-2.5 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs tracking-wide shadow-sm flex items-center justify-center gap-2 transition disabled:opacity-50"
-              >
-                <CheckCircle2 className="size-4" />
-                Approve
-              </button>
+            {/* Current Human Review Status Banner */}
+            <div className="space-y-2">
+              {caseStatus === "approved" ? (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-800 space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-emerald-900">
+                    <CheckCircle2 className="size-4 text-emerald-600" />
+                    HUMAN VERIFIED (APPROVED)
+                  </div>
+                  <p className="text-[11px] text-emerald-700 leading-relaxed">
+                    This finding is human-verified and eligible for compilation into handover packages.
+                  </p>
+                </div>
+              ) : caseStatus === "rejected" ? (
+                <div className="bg-rose-50 border border-rose-200 rounded-lg p-3 text-xs text-rose-800 space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-rose-900">
+                    <XCircle className="size-4 text-rose-600" />
+                    REJECTED FINDING
+                  </div>
+                  <p className="text-[11px] text-rose-700 leading-relaxed">
+                    This finding was rejected during review and is excluded from handover packages.
+                  </p>
+                </div>
+              ) : caseStatus === "unresolved" ? (
+                <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 text-xs text-purple-800 space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-purple-900">
+                    <HelpCircle className="size-4 text-purple-600" />
+                    MARKED UNRESOLVED
+                  </div>
+                  <p className="text-[11px] text-purple-700 leading-relaxed">
+                    Flagged as unresolved pending further consensus or clarification.
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-amber-50/70 border border-amber-200 rounded-lg p-3 text-xs text-amber-800 space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                    <AlertTriangle className="size-4 text-amber-600" />
+                    AWAITING HUMAN REVIEW
+                  </div>
+                  <p className="text-[11px] text-amber-700 leading-relaxed">
+                    Candidate fact extracted by AI. Verification requires explicit human reviewer decision.
+                  </p>
+                </div>
+              )}
 
-              {/* Reject Button (Secondary Outline) */}
-              <button
-                onClick={handleReject}
-                disabled={actionLoading || !caseDetail}
-                className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
-              >
-                <XCircle className="size-3.5 text-rose-500" />
-                Reject
-              </button>
+              {/* Action Buttons */}
+              <div className="space-y-2 pt-1">
+                {/* Approve Button */}
+                <button
+                  onClick={handleApprove}
+                  disabled={actionLoading || !caseDetail}
+                  className="w-full py-2.5 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs tracking-wide shadow-sm flex items-center justify-center gap-2 transition disabled:opacity-50"
+                >
+                  <CheckCircle2 className="size-4" />
+                  {caseStatus === "approved" ? "Re-Approve Finding" : "Approve Finding"}
+                </button>
 
-              {/* Edit Finding Button */}
-              <button
-                onClick={() => setIsEditing(!isEditing)}
-                disabled={!caseDetail}
-                className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
-              >
-                <Pencil className="size-3.5 text-slate-500" />
-                {isEditing ? "Close Editor" : "Edit Finding"}
-              </button>
+                {/* Reject Button */}
+                <button
+                  onClick={handleReject}
+                  disabled={actionLoading || !caseDetail}
+                  className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
+                >
+                  <XCircle className="size-3.5 text-rose-500" />
+                  Reject
+                </button>
 
-              {/* Request Additional Context Button */}
-              <button
-                onClick={() => setIsRequestingContext(!isRequestingContext)}
-                disabled={!caseDetail}
-                className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
-              >
-                <MessageSquare className="size-3.5 text-slate-500" />
-                Request Additional Context
-              </button>
+                {/* Edit Finding Button */}
+                <button
+                  onClick={() => setIsEditing(!isEditing)}
+                  disabled={!caseDetail}
+                  className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
+                >
+                  <Pencil className="size-3.5 text-slate-500" />
+                  {isEditing ? "Close Editor" : "Edit Finding"}
+                </button>
 
-              {/* Mark Unresolved Button */}
-              <button
-                onClick={handleMarkUnresolved}
-                disabled={actionLoading || !caseDetail}
-                className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:border-amber-300 hover:bg-amber-50 hover:text-amber-800 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
-              >
-                <HelpCircle className="size-3.5 text-amber-500" />
-                Mark Unresolved
-              </button>
+                {/* Request Additional Context Button */}
+                <button
+                  onClick={() => setIsRequestingContext(!isRequestingContext)}
+                  disabled={!caseDetail}
+                  className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
+                >
+                  <MessageSquare className="size-3.5 text-slate-500" />
+                  {isRequestingContext ? "Close Inquiry Form" : "Request Additional Context"}
+                </button>
+
+                {/* Mark Unresolved Button */}
+                <button
+                  onClick={handleMarkUnresolved}
+                  disabled={actionLoading || !caseDetail}
+                  className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:border-purple-300 hover:bg-purple-50 hover:text-purple-800 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
+                >
+                  <HelpCircle className="size-3.5 text-purple-500" />
+                  Mark Unresolved
+                </button>
+              </div>
             </div>
 
             {/* Context Request Inline Prompt */}
@@ -925,18 +1108,11 @@ export function VerificationCenterWorkspace() {
                   className="w-full bg-white border border-slate-200 rounded p-2 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
                 />
                 <button
-                  onClick={() => {
-                    addToast({
-                      type: "info",
-                      title: "Inquiry Dispatched",
-                      message: "Context clarification request sent to team member.",
-                    });
-                    setIsRequestingContext(false);
-                    setContextQuestion("");
-                  }}
-                  className="px-3 py-1 bg-slate-800 hover:bg-slate-900 text-white rounded text-[11px] font-medium transition"
+                  onClick={handleSendContextRequest}
+                  disabled={actionLoading || !contextQuestion.trim()}
+                  className="px-3 py-1 bg-slate-800 hover:bg-slate-900 text-white rounded text-[11px] font-medium transition flex items-center gap-1.5 disabled:opacity-50"
                 >
-                  Send Inquiry
+                  <Send className="size-3" /> Send Inquiry
                 </button>
               </div>
             )}
@@ -944,33 +1120,73 @@ export function VerificationCenterWorkspace() {
             {/* REVIEWER NOTE TEXTAREA */}
             <div className="pt-2 border-t border-slate-100 flex-1 flex flex-col">
               <label className="text-[11px] font-bold uppercase tracking-wider text-slate-600 block mb-1.5">
-                REVIEWER NOTE
+                REVIEWER NOTE &amp; RATIONALE
               </label>
               <textarea
                 rows={4}
                 value={reviewerNote}
                 onChange={(e) => setReviewerNote(e.target.value)}
                 placeholder="Enter human rationale, evidence verification comments, or reason for status update..."
-                className="w-full flex-1 min-h-[90px] bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                className="w-full flex-1 min-h-[85px] bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
               />
             </div>
 
             {/* Verification Audit Events */}
-            {caseDetail?.review_events && caseDetail.review_events.length > 0 && (
-              <div className="pt-2 border-t border-slate-100 space-y-1">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                  Audit History ({caseDetail.review_events.length})
-                </span>
-                <div className="space-y-1 max-h-24 overflow-y-auto text-[10px] text-slate-500">
-                  {caseDetail.review_events.map((evt) => (
-                    <div key={evt.id} className="bg-slate-50 p-1.5 rounded flex items-center justify-between">
-                      <span className="font-medium text-slate-700">{evt.event_type}</span>
-                      <span className="text-slate-400">{new Date(evt.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-                    </div>
-                  ))}
+            <div className="pt-2 border-t border-slate-100">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block mb-1.5">
+                Audit Review Log ({caseDetail?.review_events?.length || 0})
+              </span>
+              {caseDetail?.review_events && caseDetail.review_events.length > 0 ? (
+                <div className="space-y-1.5 max-h-36 overflow-y-auto text-[11px]">
+                  {caseDetail.review_events.map((evt) => {
+                    const actionLabel = (evt.action || evt.event_type || "ACTION").toUpperCase();
+                    const isApprove = actionLabel.includes("APPROV");
+                    const isReject = actionLabel.includes("REJECT");
+                    const isUnresolved = actionLabel.includes("UNRESOLV");
+
+                    return (
+                      <div
+                        key={evt.id}
+                        className="bg-slate-50 border border-slate-200/80 p-2 rounded text-slate-700 space-y-1"
+                      >
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span
+                            className={`font-bold px-1.5 py-0.5 rounded ${
+                              isApprove
+                                ? "bg-emerald-100 text-emerald-800"
+                                : isReject
+                                ? "bg-rose-100 text-rose-800"
+                                : isUnresolved
+                                ? "bg-purple-100 text-purple-800"
+                                : "bg-blue-100 text-blue-800"
+                            }`}
+                          >
+                            {actionLabel}
+                          </span>
+                          <span className="text-slate-400 font-mono">
+                            {new Date(evt.created_at).toLocaleString([], {
+                              month: "short",
+                              day: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </span>
+                        </div>
+                        {(evt.review_notes || evt.notes) && (
+                          <div className="text-[11px] text-slate-600 italic bg-white p-1.5 rounded border border-slate-100">
+                            &quot;{evt.review_notes || evt.notes}&quot;
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
-              </div>
-            )}
+              ) : (
+                <div className="text-[11px] text-slate-400 italic bg-slate-50 border border-dashed border-slate-200 p-2.5 rounded text-center">
+                  No previous human review actions recorded. Ready for initial evaluation.
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>

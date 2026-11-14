@@ -83,6 +83,8 @@ class VerificationReviewEventResponse(BaseModel):
     previous_status: str
     new_status: str
     review_notes: str | None = None
+    event_type: str | None = None
+    notes: str | None = None
     finding_patch_json: dict[str, Any] | None = None
     correlation_id: str
     created_at: datetime
@@ -218,8 +220,11 @@ class EditFindingRequest(BaseModel):
 
     expected_version: int | None = Field(default=None)
     patch_data: dict[str, Any] = Field(
+        default_factory=dict,
         description="Fields to patch (title, summary, item_payload)."
     )
+    title: str | None = None
+    summary: str | None = None
     reason: str = Field(default="Auditor correction", max_length=500)
 
 

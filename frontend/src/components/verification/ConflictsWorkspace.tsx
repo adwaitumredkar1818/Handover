@@ -10,7 +10,6 @@ import {
   HelpCircle,
   FileText,
   GitCommit,
-  GitBranch,
   Search,
   Filter,
   RefreshCw,
@@ -64,6 +63,7 @@ interface ConflictSummary {
   reconciled_count: number;
   superseded_count: number;
   dismissed_count: number;
+  resolved_count?: number;
   by_type: Record<string, number>;
 }
 
@@ -80,14 +80,18 @@ export function ConflictsWorkspace() {
   const [filterTab, setFilterTab] = useState<"all" | "unresolved" | "temporal" | "decision" | "status" | "resolved">("all");
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isModifying, setIsModifying] = useState(false);
 
   // Adjudication form state
   const [resolutionChoice, setResolutionChoice] = useState<"superseded_b" | "reconciled" | "superseded_a" | "dismissed">("superseded_b");
   const [resolutionNotes, setResolutionNotes] = useState("");
   const [preferredClaim, setPreferredClaim] = useState<"a" | "b" | "both" | "dismissed">("b");
 
-  const loadData = useCallback(async (projId: string) => {
-    setLoading(true);
+  // Load data without dependency on selectedConflictId (prevents reload loop)
+  const loadData = useCallback(async (projId: string, showSpinner = true) => {
+    if (showSpinner) {
+      setLoading(true);
+    }
     setErrorMessage(null);
     try {
       const [sumRes, listRes] = await Promise.all([
@@ -98,22 +102,26 @@ export function ConflictsWorkspace() {
       if (sumRes) setSummary(sumRes);
       if (listRes && listRes.items) {
         setConflicts(listRes.items);
-        const firstItem = listRes.items[0];
-        if (firstItem && !selectedConflictId) {
-          setSelectedConflictId(firstItem.id);
-        }
+        setSelectedConflictId((prev) => {
+          if (prev && listRes.items.some((it) => it.id === prev)) {
+            return prev;
+          }
+          return listRes.items[0]?.id || null;
+        });
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to load project conflicts.";
       setErrorMessage(msg);
     } finally {
-      setLoading(false);
+      if (showSpinner) {
+        setLoading(false);
+      }
     }
-  }, [selectedConflictId]);
+  }, []);
 
   useEffect(() => {
     if (activeProject?.id) {
-      loadData(activeProject.id);
+      loadData(activeProject.id, true);
     }
   }, [activeProject?.id, loadData]);
 
@@ -125,7 +133,7 @@ export function ConflictsWorkspace() {
     try {
       const res = await api.conflicts.detect(activeProject.id);
       setSuccessMessage(res.message || "Conflict detection executed successfully.");
-      await loadData(activeProject.id);
+      await loadData(activeProject.id, false);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to run conflict detection.";
       setErrorMessage(msg);
@@ -141,6 +149,7 @@ export function ConflictsWorkspace() {
   // Set default notes when switching conflict
   useEffect(() => {
     if (selectedConflict) {
+      setIsModifying(false);
       if (selectedConflict.resolution_state === "unresolved") {
         if (selectedConflict.temporal_comparison === "b_supersedes_a") {
           setResolutionChoice("superseded_b");
@@ -155,7 +164,7 @@ export function ConflictsWorkspace() {
         setResolutionNotes(selectedConflict.resolution_notes || "");
       }
     }
-  }, [selectedConflict]);
+  }, [selectedConflict?.id]);
 
   const handleResolveConflict = async () => {
     if (!activeProject?.id || !selectedConflict) return;
@@ -176,14 +185,55 @@ export function ConflictsWorkspace() {
     }
 
     try {
-      await api.conflicts.resolve(activeProject.id, selectedConflict.id, {
+      const updated = await api.conflicts.resolve(activeProject.id, selectedConflict.id, {
         resolution_state: state,
         resolution_notes: resolutionNotes.trim(),
         preferred_claim: preferredClaim,
       });
 
-      setSuccessMessage(`Conflict adjudicated as ${state.toUpperCase()} successfully.`);
-      await loadData(activeProject.id);
+      // Find next unresolved conflict before updating
+      const nextUnresolved = conflicts.find(
+        (c) => c.resolution_state === "unresolved" && c.id !== selectedConflict.id
+      );
+
+      // Update in-memory state immediately so screen and badges update instantly
+      const updatedItem = (updated as any)?.id ? (updated as any) : {
+        ...selectedConflict,
+        resolution_state: state,
+        resolution_notes: resolutionNotes.trim(),
+        resolved_at: new Date().toISOString(),
+      };
+
+      setConflicts((prev) =>
+        prev.map((c) => (c.id === selectedConflict.id ? updatedItem : c))
+      );
+
+      setSummary((prev) =>
+        prev
+          ? {
+              ...prev,
+              unresolved_count: Math.max(0, prev.unresolved_count - 1),
+              resolved_count: (prev.resolved_count || 0) + 1,
+            }
+          : prev
+      );
+
+      setIsModifying(false);
+
+      if (filterTab === "unresolved") {
+        if (nextUnresolved) {
+          setSelectedConflictId(nextUnresolved.id);
+          setSuccessMessage(`Conflict adjudicated as ${state.toUpperCase()} successfully. Next contradiction in queue loaded.`);
+        } else {
+          setSelectedConflictId(null);
+          setSuccessMessage(`Conflict adjudicated as ${state.toUpperCase()} successfully. All contradictions in this project have been resolved!`);
+        }
+      } else {
+        setSuccessMessage(`Conflict adjudicated as ${state.toUpperCase()} successfully.`);
+      }
+
+      // Background sync without unmounting or spinner
+      loadData(activeProject.id, false);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to resolve conflict.";
       setErrorMessage(msg);
@@ -192,11 +242,50 @@ export function ConflictsWorkspace() {
     }
   };
 
+  // Next unresolved conflict navigator
+  const handleSelectNextUnresolved = () => {
+    const next = conflicts.find(
+      (c) => c.resolution_state === "unresolved" && c.id !== selectedConflictId
+    );
+    if (next) {
+      setSelectedConflictId(next.id);
+      setIsModifying(false);
+      setErrorMessage(null);
+      setSuccessMessage(null);
+    }
+  };
+
+  // Dynamic counts calculated directly from conflicts array for real-time reactivity
+  const unresolvedCount = useMemo(
+    () => conflicts.filter((c) => c.resolution_state === "unresolved").length,
+    [conflicts]
+  );
+  const resolvedCount = useMemo(
+    () => conflicts.filter((c) => c.resolution_state !== "unresolved").length,
+    [conflicts]
+  );
+  const temporalCount = useMemo(
+    () => conflicts.filter((c) => c.conflict_type === "temporal_conflict").length,
+    [conflicts]
+  );
+  const decisionCount = useMemo(
+    () => conflicts.filter((c) => c.conflict_type === "decision_conflict").length,
+    [conflicts]
+  );
+  const statusCount = useMemo(
+    () => conflicts.filter((c) => c.conflict_type === "status_conflict").length,
+    [conflicts]
+  );
+
   // Filtered conflicts list
   const filteredConflicts = useMemo(() => {
     return conflicts.filter((c) => {
       // Tab filter
-      if (filterTab === "unresolved" && c.resolution_state !== "unresolved") return false;
+      if (filterTab === "unresolved") {
+        if (c.resolution_state !== "unresolved") {
+          return false;
+        }
+      }
       if (filterTab === "resolved" && c.resolution_state === "unresolved") return false;
       if (filterTab === "temporal" && c.conflict_type !== "temporal_conflict") return false;
       if (filterTab === "decision" && c.conflict_type !== "decision_conflict") return false;
@@ -222,13 +311,13 @@ export function ConflictsWorkspace() {
       }
       return true;
     });
-  }, [conflicts, filterTab, searchQuery]);
+  }, [conflicts, filterTab, searchQuery, selectedConflictId]);
 
   const formatTimestamp = (ts?: string | null) => {
     if (!ts) return "Timestamp not recorded";
     try {
       const d = new Date(ts);
-      return d.toLocaleDateString("en-US", {
+      return d.toLocaleString("en-US", {
         month: "short",
         day: "numeric",
         year: "numeric",
@@ -242,229 +331,239 @@ export function ConflictsWorkspace() {
 
   const getConflictTypeBadge = (type: string) => {
     switch (type) {
-      case "decision_conflict":
-        return <span className="px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 border border-purple-200">Decision Divergence</span>;
-      case "status_conflict":
-        return <span className="px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800 border border-orange-200">Status Mismatch</span>;
       case "temporal_conflict":
-        return <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800 border border-blue-200">Temporal Supersession</span>;
-      case "technical_conflict":
-        return <span className="px-2 py-0.5 rounded text-xs font-medium bg-rose-100 text-rose-800 border border-rose-200">Technical Contradiction</span>;
-      case "ownership_conflict":
-        return <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 border border-amber-200">Ownership Dispute</span>;
+        return (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-rose-50 text-rose-700 border border-rose-200">
+            <Clock className="w-3 h-3" /> Temporal Inconsistency
+          </span>
+        );
+      case "decision_conflict":
+        return (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-200">
+            <GitCompare className="w-3 h-3" /> Decision Divergence
+          </span>
+        );
+      case "status_conflict":
+        return (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+            <AlertTriangle className="w-3 h-3" /> Status Mismatch
+          </span>
+        );
       default:
-        return <span className="px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-800 border border-slate-200">{type.replace("_", " ")}</span>;
+        return (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-red-50 text-red-700 border border-red-200">
+            <ShieldAlert className="w-3 h-3" /> Technical Contradiction
+          </span>
+        );
     }
   };
 
   const getResolutionBadge = (state: string) => {
     switch (state) {
-      case "unresolved":
-        return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-900 border border-amber-300 flex items-center gap-1"><AlertTriangle className="w-3 h-3 text-amber-600" /> Unresolved</span>;
       case "reconciled":
-        return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-900 border border-emerald-300 flex items-center gap-1"><CheckCircle2 className="w-3 h-3 text-emerald-600" /> Reconciled</span>;
+        return (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+            <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Reconciled
+          </span>
+        );
       case "superseded":
-        return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-900 border border-blue-300 flex items-center gap-1"><Clock className="w-3 h-3 text-blue-600" /> Superseded</span>;
+        return (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+            <Clock className="w-3 h-3 text-blue-600" /> Superseded
+          </span>
+        );
       case "dismissed":
-        return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700 border border-slate-300 flex items-center gap-1"><XCircle className="w-3 h-3 text-slate-500" /> Dismissed</span>;
+        return (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">
+            <XCircle className="w-3 h-3 text-slate-500" /> Dismissed
+          </span>
+        );
       default:
-        return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-800">{state}</span>;
+        return (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+            <AlertTriangle className="w-3 h-3 text-amber-600" /> Unresolved
+          </span>
+        );
     }
   };
 
   return (
-    <div className="flex flex-col min-h-screen bg-slate-50 text-slate-900">
-      {/* Top Header */}
-      <div className="bg-white border-b border-slate-200 px-6 py-4">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2 text-xs font-medium text-slate-500 mb-1">
-              <span>The Sapiens</span>
-              <span>&gt;</span>
-              <span>Validation</span>
-              <span>&gt;</span>
-              <span className="text-blue-600 font-semibold">Conflicts & Contradictions</span>
-            </div>
-            <h1 className="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
-              <GitCompare className="w-6 h-6 text-blue-600" />
-              Conflicts & Contradictions
-            </h1>
-            <p className="text-sm text-slate-500 mt-0.5">
-              Automated detection and human adjudication of contradictory facts or conflicting timelines across disparate sources.
-            </p>
+    <div className="flex flex-col gap-5 w-full">
+      {/* Top Banner Navigation */}
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
+            <span>VALIDATION</span>
+            <span>/</span>
+            <span className="text-teal-700 font-semibold">VERIFY</span>
+            <span>/</span>
+            <span className="text-slate-600">CONFLICTS</span>
           </div>
-
-          <div className="flex items-center gap-2.5">
-            <button
-              onClick={handleRunDetection}
-              disabled={detecting}
-              className="inline-flex items-center gap-2 px-3.5 py-2 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition-colors disabled:opacity-50 shadow-sm"
-            >
-              <RefreshCw className={`w-4 h-4 ${detecting ? "animate-spin" : ""}`} />
-              {detecting ? "Detecting Contradictions..." : "Run Conflict Detection"}
-            </button>
-
-            <Link
-              href="/verification"
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 transition-colors"
-            >
-              <ShieldCheck className="w-4 h-4 text-emerald-600" />
-              Verification Center
-            </Link>
-
-            <Link
-              href="/evidence"
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 transition-colors"
-            >
-              Evidence Center
-              <ChevronRight className="w-4 h-4 text-slate-400" />
-            </Link>
-          </div>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 mt-1">
+            Conflicts &amp; Contradictions
+          </h1>
+          <p className="text-xs text-slate-500 mt-1">
+            Automated detection and human adjudication of contradictory facts or conflicting timelines across disparate sources.
+          </p>
         </div>
 
-        {/* Success / Error notification */}
-        {successMessage && (
-          <div className="mt-3 p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg text-sm flex items-center justify-between">
-            <span className="flex items-center gap-2">
-              <Check className="w-4 h-4 text-emerald-600" />
-              {successMessage}
-            </span>
-            <button onClick={() => setSuccessMessage(null)} className="text-emerald-600 hover:text-emerald-900 text-xs">Dismiss</button>
-          </div>
-        )}
-        {errorMessage && (
-          <div className="mt-3 p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg text-sm flex items-center justify-between">
-            <span className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-rose-600" />
-              {errorMessage}
-            </span>
-            <button onClick={() => setErrorMessage(null)} className="text-rose-600 hover:text-rose-900 text-xs">Dismiss</button>
-          </div>
-        )}
-
-        {/* Metrics Row */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-5">
-          <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 flex items-center justify-between">
-            <div>
-              <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Contradictions</p>
-              <p className="text-2xl font-bold text-slate-900 mt-0.5">{summary?.total_conflicts ?? conflicts.length}</p>
-            </div>
-            <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center text-blue-700">
-              <GitCompare className="w-5 h-5" />
-            </div>
-          </div>
-
-          <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3.5 flex items-center justify-between">
-            <div>
-              <p className="text-xs font-medium text-amber-800 uppercase tracking-wider">Unresolved (Requires Human)</p>
-              <p className="text-2xl font-bold text-amber-900 mt-0.5">{summary?.unresolved_count ?? conflicts.filter(c => c.resolution_state === "unresolved").length}</p>
-            </div>
-            <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center text-amber-700">
-              <AlertTriangle className="w-5 h-5" />
-            </div>
-          </div>
-
-          <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-3.5 flex items-center justify-between">
-            <div>
-              <p className="text-xs font-medium text-blue-800 uppercase tracking-wider">Superseded Updates</p>
-              <p className="text-2xl font-bold text-blue-900 mt-0.5">{summary?.superseded_count ?? conflicts.filter(c => c.resolution_state === "superseded").length}</p>
-            </div>
-            <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center text-blue-700">
-              <Clock className="w-5 h-5" />
-            </div>
-          </div>
-
-          <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3.5 flex items-center justify-between">
-            <div>
-              <p className="text-xs font-medium text-emerald-800 uppercase tracking-wider">Reconciled / Harmonized</p>
-              <p className="text-2xl font-bold text-emerald-900 mt-0.5">
-                {(summary?.reconciled_count ?? 0) + (summary?.dismissed_count ?? 0)}
-              </p>
-            </div>
-            <div className="w-10 h-10 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-700">
-              <ShieldCheck className="w-5 h-5" />
-            </div>
-          </div>
+        <div className="flex items-center gap-2.5">
+          <button
+            onClick={handleRunDetection}
+            disabled={detecting}
+            className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white transition-colors disabled:opacity-50 shadow-xs"
+          >
+            <Sparkles className={`w-3.5 h-3.5 ${detecting ? "animate-spin" : ""}`} />
+            {detecting ? "Running Contradiction Scan..." : "Run Conflict Detection"}
+          </button>
+          <Link
+            href="/verification"
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-colors shadow-xs"
+          >
+            <span>Verification Center</span>
+            <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+          </Link>
         </div>
       </div>
 
-      {/* Main Split-Screen Workspace */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Column: Conflict Queue & Filters */}
-        <div className="w-full md:w-[420px] lg:w-[460px] border-r border-slate-200 bg-white flex flex-col shrink-0">
-          {/* Search & Tabs */}
-          <div className="p-3.5 border-b border-slate-200 space-y-2.5">
+      {/* Main Notification Alerts */}
+      {successMessage && (
+        <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800 flex items-center justify-between shadow-xs">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{successMessage}</span>
+          </div>
+          <button onClick={() => setSuccessMessage(null)} className="text-emerald-700 hover:text-emerald-900 font-bold">
+            ×
+          </button>
+        </div>
+      )}
+      {errorMessage && (
+        <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-800 flex items-center justify-between shadow-xs">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{errorMessage}</span>
+          </div>
+          <button onClick={() => setErrorMessage(null)} className="text-rose-700 hover:text-rose-900 font-bold">
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* Workspace Metric KPI Ribbon */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Total Flagged</p>
+          <p className="text-xl font-bold text-slate-900 mt-1">{conflicts.length}</p>
+        </div>
+        <div className="bg-amber-50/60 border border-amber-200 rounded-xl p-3.5 shadow-xs">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-800">Unresolved</p>
+          <p className="text-xl font-bold text-amber-700 mt-1">{unresolvedCount}</p>
+        </div>
+        <div className="bg-blue-50/60 border border-blue-200 rounded-xl p-3.5 shadow-xs">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-blue-800">Superseded</p>
+          <p className="text-xl font-bold text-blue-700 mt-1">
+            {conflicts.filter((c) => c.resolution_state === "superseded").length}
+          </p>
+        </div>
+        <div className="bg-emerald-50/60 border border-emerald-200 rounded-xl p-3.5 shadow-xs">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-emerald-800">Reconciled</p>
+          <p className="text-xl font-bold text-emerald-700 mt-1">
+            {conflicts.filter((c) => c.resolution_state === "reconciled").length}
+          </p>
+        </div>
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 shadow-xs">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-600">Dismissed</p>
+          <p className="text-xl font-bold text-slate-700 mt-1">
+            {conflicts.filter((c) => c.resolution_state === "dismissed").length}
+          </p>
+        </div>
+      </div>
+
+      {/* Main Interactive Split-Workspace */}
+      <div className="flex flex-col lg:flex-row gap-5 flex-1 items-start w-full">
+        {/* Left Area: Conflict Queue & Filters */}
+        <div className="w-full lg:w-96 bg-white border border-slate-200 rounded-xl shadow-xs flex flex-col h-[780px] shrink-0 overflow-hidden">
+          {/* Search Box */}
+          <div className="p-3 border-b border-slate-100">
             <div className="relative">
               <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
               <input
                 type="text"
+                placeholder="Search conflicts by title, source, text..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search conflicts by title, source, text..."
-                className="w-full pl-9 pr-3 py-1.5 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 focus:bg-white"
+                className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 focus:bg-white"
               />
             </div>
 
-            <div className="flex items-center gap-1 overflow-x-auto text-xs font-medium scrollbar-none pb-1">
+            {/* Quick Filter Tabs */}
+            <div className="flex flex-wrap gap-1 mt-2.5 text-xs">
               <button
+                type="button"
                 onClick={() => setFilterTab("all")}
                 className={`px-2.5 py-1 rounded-md transition-colors ${
                   filterTab === "all"
-                    ? "bg-slate-900 text-white"
+                    ? "bg-slate-900 text-white font-medium"
                     : "bg-slate-100 text-slate-600 hover:bg-slate-200"
                 }`}
               >
                 All ({conflicts.length})
               </button>
               <button
+                type="button"
                 onClick={() => setFilterTab("unresolved")}
                 className={`px-2.5 py-1 rounded-md transition-colors ${
                   filterTab === "unresolved"
-                    ? "bg-amber-600 text-white"
+                    ? "bg-amber-600 text-white font-medium"
                     : "bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100"
                 }`}
               >
-                Unresolved ({summary?.unresolved_count ?? 0})
+                Unresolved ({unresolvedCount})
               </button>
               <button
+                type="button"
                 onClick={() => setFilterTab("temporal")}
                 className={`px-2.5 py-1 rounded-md transition-colors ${
                   filterTab === "temporal"
-                    ? "bg-blue-600 text-white"
+                    ? "bg-blue-600 text-white font-medium"
                     : "bg-slate-100 text-slate-600 hover:bg-slate-200"
                 }`}
               >
                 Temporal
               </button>
               <button
+                type="button"
                 onClick={() => setFilterTab("decision")}
                 className={`px-2.5 py-1 rounded-md transition-colors ${
                   filterTab === "decision"
-                    ? "bg-purple-600 text-white"
+                    ? "bg-purple-600 text-white font-medium"
                     : "bg-slate-100 text-slate-600 hover:bg-slate-200"
                 }`}
               >
                 Decisions
               </button>
               <button
+                type="button"
                 onClick={() => setFilterTab("status")}
                 className={`px-2.5 py-1 rounded-md transition-colors ${
                   filterTab === "status"
-                    ? "bg-orange-600 text-white"
+                    ? "bg-orange-600 text-white font-medium"
                     : "bg-slate-100 text-slate-600 hover:bg-slate-200"
                 }`}
               >
                 Status
               </button>
               <button
+                type="button"
                 onClick={() => setFilterTab("resolved")}
                 className={`px-2.5 py-1 rounded-md transition-colors ${
                   filterTab === "resolved"
-                    ? "bg-emerald-600 text-white"
+                    ? "bg-emerald-600 text-white font-medium"
                     : "bg-slate-100 text-slate-600 hover:bg-slate-200"
                 }`}
               >
-                Resolved
+                Resolved ({resolvedCount})
               </button>
             </div>
           </div>
@@ -490,11 +589,17 @@ export function ConflictsWorkspace() {
                 return (
                   <button
                     key={c.id}
-                    onClick={() => setSelectedConflictId(c.id)}
+                    type="button"
+                    onClick={() => {
+                      setSelectedConflictId(c.id);
+                      setIsModifying(false);
+                      setErrorMessage(null);
+                      setSuccessMessage(null);
+                    }}
                     className={`w-full text-left p-3.5 transition-colors flex flex-col gap-1.5 ${
                       isSelected
-                        ? "bg-blue-50/70 border-l-4 border-l-blue-600"
-                        : "hover:bg-slate-50 border-l-4 border-l-transparent"
+                        ? "bg-blue-50/60 border-l-4 border-l-blue-600"
+                        : "hover:bg-slate-50/80"
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -531,9 +636,26 @@ export function ConflictsWorkspace() {
         </div>
 
         {/* Right Area: Side-by-Side Adjudication Canvas */}
-        <div className="flex-1 overflow-y-auto bg-slate-50 p-6">
-          {!selectedConflict ? (
-            <div className="h-full flex flex-col items-center justify-center text-center p-8 text-slate-400">
+        <div className="flex-1 w-full overflow-y-auto bg-slate-50 p-6 rounded-xl border border-slate-200">
+          {filterTab === "unresolved" && unresolvedCount === 0 ? (
+            <div className="h-full min-h-[420px] flex flex-col items-center justify-center text-center p-8 bg-white rounded-xl border border-slate-200 shadow-xs">
+              <div className="w-16 h-16 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-4 border border-emerald-200">
+                <CheckCircle2 className="w-8 h-8" />
+              </div>
+              <h3 className="text-xl font-bold text-slate-900">All Contradictions Resolved!</h3>
+              <p className="text-sm max-w-md text-slate-500 mt-2">
+                Every flagged contradiction across documentation, code commits, and project evidence has been reviewed and adjudicated.
+              </p>
+              <button
+                type="button"
+                onClick={() => setFilterTab("all")}
+                className="mt-6 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold shadow-xs transition"
+              >
+                View All Conflicts &amp; Audit Logs
+              </button>
+            </div>
+          ) : !selectedConflict ? (
+            <div className="h-full min-h-[420px] flex flex-col items-center justify-center text-center p-8 text-slate-400">
               <GitCompare className="w-12 h-12 text-slate-300 mb-3" />
               <h3 className="text-base font-semibold text-slate-700">Select a Conflict to Adjudicate</h3>
               <p className="text-sm max-w-sm text-slate-500 mt-1">
@@ -597,7 +719,13 @@ export function ConflictsWorkspace() {
               {/* Side-by-Side Comparison Panels */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                 {/* Panel A */}
-                <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm flex flex-col justify-between space-y-4">
+                <div
+                  className={`bg-white border rounded-xl p-5 shadow-sm flex flex-col justify-between space-y-4 ${
+                    selectedConflict.resolution_state === "superseded" && preferredClaim === "a"
+                      ? "border-emerald-500 ring-2 ring-emerald-500/20"
+                      : "border-slate-200"
+                  }`}
+                >
                   <div className="space-y-3">
                     <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                       <div className="flex items-center gap-2">
@@ -611,7 +739,7 @@ export function ConflictsWorkspace() {
                           </p>
                         </div>
                       </div>
-                      <span className="text-[11px] px-2 py-0.5 rounded bg-slate-100 text-slate-600">
+                      <span className="text-[11px] px-2 py-0.5 rounded bg-slate-100 text-slate-600 capitalize">
                         {selectedConflict.claim_a_source_type || "document"}
                       </span>
                     </div>
@@ -633,26 +761,34 @@ export function ConflictsWorkspace() {
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setResolutionChoice("superseded_a");
-                      setPreferredClaim("a");
-                      setResolutionNotes(`Adjudicated: Claim A is accepted as the canonical truth; newer claim B is rejected.`);
-                    }}
-                    className={`w-full py-2 px-3 text-xs font-semibold rounded-lg border transition-colors flex items-center justify-center gap-1.5 ${
-                      resolutionChoice === "superseded_a"
-                        ? "bg-slate-900 text-white border-slate-900"
-                        : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
-                    }`}
-                  >
-                    <Check className="w-3.5 h-3.5" />
-                    Prefer Claim A as Canonical
-                  </button>
+                  {(selectedConflict.resolution_state === "unresolved" || isModifying) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setResolutionChoice("superseded_a");
+                        setPreferredClaim("a");
+                        setResolutionNotes(`Adjudicated: Claim A is accepted as the canonical truth; newer claim B is rejected.`);
+                      }}
+                      className={`w-full py-2 px-3 text-xs font-semibold rounded-lg border transition-colors flex items-center justify-center gap-1.5 ${
+                        resolutionChoice === "superseded_a"
+                          ? "bg-slate-900 text-white border-slate-900"
+                          : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                      }`}
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      Prefer Claim A as Canonical
+                    </button>
+                  )}
                 </div>
 
                 {/* Panel B */}
-                <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm flex flex-col justify-between space-y-4">
+                <div
+                  className={`bg-white border rounded-xl p-5 shadow-sm flex flex-col justify-between space-y-4 ${
+                    selectedConflict.resolution_state === "superseded" && preferredClaim === "b"
+                      ? "border-blue-500 ring-2 ring-blue-500/20"
+                      : "border-slate-200"
+                  }`}
+                >
                   <div className="space-y-3">
                     <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                       <div className="flex items-center gap-2">
@@ -666,7 +802,7 @@ export function ConflictsWorkspace() {
                           </p>
                         </div>
                       </div>
-                      <span className="text-[11px] px-2 py-0.5 rounded bg-blue-100 text-blue-700">
+                      <span className="text-[11px] px-2 py-0.5 rounded bg-blue-100 text-blue-700 capitalize">
                         {selectedConflict.claim_b_source_type || "github"}
                       </span>
                     </div>
@@ -688,188 +824,257 @@ export function ConflictsWorkspace() {
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setResolutionChoice("superseded_b");
-                      setPreferredClaim("b");
-                      setResolutionNotes(`Adjudicated: Newer Claim B supersedes prior specification Claim A.`);
-                    }}
-                    className={`w-full py-2 px-3 text-xs font-semibold rounded-lg border transition-colors flex items-center justify-center gap-1.5 ${
-                      resolutionChoice === "superseded_b"
-                        ? "bg-blue-600 text-white border-blue-600"
-                        : "bg-white text-blue-700 border-blue-300 hover:bg-blue-50"
-                    }`}
-                  >
-                    <Check className="w-3.5 h-3.5" />
-                    Prefer Claim B as Superseding
-                  </button>
+                  {(selectedConflict.resolution_state === "unresolved" || isModifying) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setResolutionChoice("superseded_b");
+                        setPreferredClaim("b");
+                        setResolutionNotes(`Adjudicated: Newer Claim B supersedes prior specification Claim A.`);
+                      }}
+                      className={`w-full py-2 px-3 text-xs font-semibold rounded-lg border transition-colors flex items-center justify-center gap-1.5 ${
+                        resolutionChoice === "superseded_b"
+                          ? "bg-blue-600 text-white border-blue-600"
+                          : "bg-white text-blue-700 border-blue-300 hover:bg-blue-50"
+                      }`}
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      Prefer Claim B as Superseding
+                    </button>
+                  )}
                 </div>
               </div>
 
               {/* Human Adjudication Center */}
-              <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-4">
-                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                  <div className="flex items-center gap-2">
-                    <ShieldAlert className="w-5 h-5 text-indigo-600" />
-                    <h3 className="text-base font-bold text-slate-900">Human Adjudication Authority</h3>
-                  </div>
-                  <span className="text-xs text-slate-500 font-mono">
-                    Status: {selectedConflict.resolution_state.toUpperCase()}
-                  </span>
-                </div>
-
-                {selectedConflict.resolution_state !== "unresolved" ? (
-                  /* Already Resolved Details */
-                  <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2 text-emerald-900 font-semibold text-sm">
-                        <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                        Conflict Adjudicated as {selectedConflict.resolution_state.toUpperCase()}
+              {selectedConflict.resolution_state !== "unresolved" && !isModifying ? (
+                /* RESOLVED STATUS CARD (Displays clean verification summary with next action) */
+                <div className="bg-white border border-emerald-200 rounded-xl p-6 shadow-sm space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-full bg-emerald-100 border border-emerald-300 flex items-center justify-center text-emerald-700">
+                        <CheckCircle2 className="w-5 h-5" />
                       </div>
-                      <span className="text-xs text-emerald-700">
+                      <div>
+                        <h3 className="text-base font-bold text-slate-900">
+                          Conflict Adjudicated &amp; Resolved
+                        </h3>
+                        <p className="text-xs text-slate-500">
+                          Permanent adjudication record logged in PostgreSQL verification ledger
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {getResolutionBadge(selectedConflict.resolution_state)}
+                      <span className="text-xs text-slate-400 font-mono">
                         Resolved: {formatTimestamp(selectedConflict.resolved_at)}
                       </span>
                     </div>
-
-                    <div className="p-3 bg-white border border-emerald-200 rounded-lg text-xs text-slate-800">
-                      <p className="font-semibold text-slate-700 mb-1">Adjudicator Rationale:</p>
-                      <p>{selectedConflict.resolution_notes || "No additional notes provided."}</p>
-                    </div>
-
-                    <div className="pt-2 flex justify-end">
-                      <button
-                        onClick={() => {
-                          setResolutionChoice("reconciled");
-                          setResolutionNotes(selectedConflict.resolution_notes || "");
-                        }}
-                        className="text-xs font-medium text-blue-600 hover:underline"
-                      >
-                        Modify Adjudication Decision
-                      </button>
-                    </div>
                   </div>
-                ) : null}
 
-                {/* Adjudication Controls (Always active or available for re-adjudication) */}
-                <div className="space-y-4 pt-1">
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-2">
-                      Select Adjudication Action
-                    </label>
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setResolutionChoice("superseded_b");
-                          setPreferredClaim("b");
-                        }}
-                        className={`p-3 rounded-lg border text-left text-xs transition-colors flex flex-col gap-1 ${
-                          resolutionChoice === "superseded_b"
-                            ? "bg-blue-50 border-blue-500 ring-2 ring-blue-500/20 text-blue-900 font-semibold"
-                            : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
-                        }`}
-                      >
-                        <span className="flex items-center gap-1 font-bold">
-                          <Clock className="w-3.5 h-3.5 text-blue-600" />
-                          Claim B Supersedes
-                        </span>
-                        <span className="text-[11px] text-slate-500 font-normal">
-                          Accept Claim B as the newer canonical truth.
-                        </span>
-                      </button>
+                  {/* Resolution Details */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-1">
+                      <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                        Adjudication Outcome
+                      </span>
+                      <p className="text-sm font-semibold text-slate-900">
+                        {selectedConflict.resolution_state === "superseded"
+                          ? "Temporal Precedence: Superseded"
+                          : selectedConflict.resolution_state === "reconciled"
+                          ? "Scope Harmonization: Reconciled"
+                          : "Dismissed as False Positive"}
+                      </p>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        {selectedConflict.resolution_state === "superseded"
+                          ? "Newer evidence was verified to supersede prior documentation."
+                          : selectedConflict.resolution_state === "reconciled"
+                          ? "Both claims reconciled across complementary project contexts."
+                          : "Identified as a compatible terminology variation."}
+                      </p>
+                    </div>
 
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setResolutionChoice("reconciled");
-                          setPreferredClaim("both");
-                        }}
-                        className={`p-3 rounded-lg border text-left text-xs transition-colors flex flex-col gap-1 ${
-                          resolutionChoice === "reconciled"
-                            ? "bg-emerald-50 border-emerald-500 ring-2 ring-emerald-500/20 text-emerald-900 font-semibold"
-                            : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
-                        }`}
-                      >
-                        <span className="flex items-center gap-1 font-bold">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                          Reconcile Both
+                    <div className="p-3.5 bg-emerald-50/60 border border-emerald-200 rounded-lg space-y-1">
+                      <span className="text-[10px] uppercase font-bold text-emerald-800 tracking-wider">
+                        Auditor Review Notes
+                      </span>
+                      <p className="text-xs font-serif italic text-emerald-950 leading-relaxed">
+                        &quot;{selectedConflict.resolution_notes || "Adjudicated and verified by project lead."}&quot;
+                      </p>
+                      {selectedConflict.resolved_by_user_id && (
+                        <span className="text-[10px] text-emerald-700 block font-mono pt-1">
+                          Reviewer ID: {selectedConflict.resolved_by_user_id.slice(0, 8)}...
                         </span>
-                        <span className="text-[11px] text-slate-500 font-normal">
-                          Harmonize both claims across different scopes.
-                        </span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setResolutionChoice("superseded_a");
-                          setPreferredClaim("a");
-                        }}
-                        className={`p-3 rounded-lg border text-left text-xs transition-colors flex flex-col gap-1 ${
-                          resolutionChoice === "superseded_a"
-                            ? "bg-slate-200 border-slate-600 ring-2 ring-slate-500/20 text-slate-900 font-semibold"
-                            : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
-                        }`}
-                      >
-                        <span className="flex items-center gap-1 font-bold">
-                          <FileText className="w-3.5 h-3.5 text-slate-700" />
-                          Claim A Canonical
-                        </span>
-                        <span className="text-[11px] text-slate-500 font-normal">
-                          Retain Claim A as baseline and reject Claim B.
-                        </span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setResolutionChoice("dismissed");
-                          setPreferredClaim("dismissed");
-                        }}
-                        className={`p-3 rounded-lg border text-left text-xs transition-colors flex flex-col gap-1 ${
-                          resolutionChoice === "dismissed"
-                            ? "bg-slate-200 border-slate-600 ring-2 ring-slate-500/20 text-slate-900 font-semibold"
-                            : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
-                        }`}
-                      >
-                        <span className="flex items-center gap-1 font-bold">
-                          <XCircle className="w-3.5 h-3.5 text-slate-500" />
-                          Dismiss (Non-Conflict)
-                        </span>
-                        <span className="text-[11px] text-slate-500 font-normal">
-                          Mark as false positive; semantically compatible.
-                        </span>
-                      </button>
+                      )}
                     </div>
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                      Reviewer Rationale (Audit Record)
-                    </label>
-                    <textarea
-                      rows={3}
-                      value={resolutionNotes}
-                      onChange={(e) => setResolutionNotes(e.target.value)}
-                      placeholder="Explain the rationale for this adjudication decision for the immutable audit trail..."
-                      className="w-full p-3 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 focus:bg-white"
-                    />
-                  </div>
-
-                  <div className="flex justify-end pt-1">
+                  {/* Action Bar */}
+                  <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100">
                     <button
                       type="button"
-                      onClick={handleResolveConflict}
-                      disabled={resolving || !resolutionNotes.trim()}
-                      className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-lg bg-slate-900 hover:bg-slate-800 text-white transition-colors disabled:opacity-50 shadow-sm"
+                      onClick={() => setIsModifying(true)}
+                      className="text-xs font-medium text-slate-600 hover:text-slate-900 border border-slate-200 rounded-lg px-3 py-1.5 hover:bg-slate-50 transition"
                     >
-                      <CheckCircle2 className={`w-4 h-4 ${resolving ? "animate-spin" : ""}`} />
-                      {resolving ? "Submitting Adjudication..." : "Confirm Adjudication & Update Canonical State"}
+                      Modify / Re-open Decision
                     </button>
+
+                    {unresolvedCount > 0 ? (
+                      <button
+                        type="button"
+                        onClick={handleSelectNextUnresolved}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition shadow-sm"
+                      >
+                        <span>Proceed to Next Unresolved Conflict ({unresolvedCount} remaining)</span>
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    ) : (
+                      <div className="text-xs text-emerald-700 font-medium flex items-center gap-1.5">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                        All project contradictions have been successfully adjudicated!
+                      </div>
+                    )}
                   </div>
                 </div>
-              </div>
+              ) : (
+                /* ACTIVE ADJUDICATION CONTROLS (Displayed when unresolved or in modifying mode) */
+                <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <div className="flex items-center gap-2">
+                      <ShieldAlert className="w-5 h-5 text-indigo-600" />
+                      <h3 className="text-base font-bold text-slate-900">
+                        {isModifying ? "Modify Conflict Adjudication" : "Human Adjudication Authority"}
+                      </h3>
+                    </div>
+                    {isModifying && (
+                      <button
+                        type="button"
+                        onClick={() => setIsModifying(false)}
+                        className="text-xs text-slate-500 hover:text-slate-800"
+                      >
+                        Cancel Modification
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="space-y-4 pt-1">
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-2">
+                        Select Adjudication Action
+                      </label>
+                      <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setResolutionChoice("superseded_b");
+                            setPreferredClaim("b");
+                          }}
+                          className={`p-3 rounded-lg border text-left text-xs transition-colors flex flex-col gap-1 ${
+                            resolutionChoice === "superseded_b"
+                              ? "bg-blue-50 border-blue-500 ring-2 ring-blue-500/20 text-blue-900 font-semibold"
+                              : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
+                          }`}
+                        >
+                          <span className="flex items-center gap-1 font-bold">
+                            <Clock className="w-3.5 h-3.5 text-blue-600" />
+                            Claim B Supersedes
+                          </span>
+                          <span className="text-[11px] text-slate-500 font-normal">
+                            Accept Claim B as the newer canonical truth.
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setResolutionChoice("reconciled");
+                            setPreferredClaim("both");
+                          }}
+                          className={`p-3 rounded-lg border text-left text-xs transition-colors flex flex-col gap-1 ${
+                            resolutionChoice === "reconciled"
+                              ? "bg-emerald-50 border-emerald-500 ring-2 ring-emerald-500/20 text-emerald-900 font-semibold"
+                              : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
+                          }`}
+                        >
+                          <span className="flex items-center gap-1 font-bold">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                            Reconcile Both
+                          </span>
+                          <span className="text-[11px] text-slate-500 font-normal">
+                            Harmonize both claims across different scopes.
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setResolutionChoice("superseded_a");
+                            setPreferredClaim("a");
+                          }}
+                          className={`p-3 rounded-lg border text-left text-xs transition-colors flex flex-col gap-1 ${
+                            resolutionChoice === "superseded_a"
+                              ? "bg-slate-200 border-slate-600 ring-2 ring-slate-500/20 text-slate-900 font-semibold"
+                              : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
+                          }`}
+                        >
+                          <span className="flex items-center gap-1 font-bold">
+                            <FileText className="w-3.5 h-3.5 text-slate-700" />
+                            Claim A Canonical
+                          </span>
+                          <span className="text-[11px] text-slate-500 font-normal">
+                            Retain Claim A as baseline and reject Claim B.
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setResolutionChoice("dismissed");
+                            setPreferredClaim("dismissed");
+                          }}
+                          className={`p-3 rounded-lg border text-left text-xs transition-colors flex flex-col gap-1 ${
+                            resolutionChoice === "dismissed"
+                              ? "bg-slate-200 border-slate-600 ring-2 ring-slate-500/20 text-slate-900 font-semibold"
+                              : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
+                          }`}
+                        >
+                          <span className="flex items-center gap-1 font-bold">
+                            <XCircle className="w-3.5 h-3.5 text-slate-500" />
+                            Dismiss (Non-Conflict)
+                          </span>
+                          <span className="text-[11px] text-slate-500 font-normal">
+                            Mark as false positive; semantically compatible.
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                        Reviewer Rationale (Audit Record)
+                      </label>
+                      <textarea
+                        rows={3}
+                        value={resolutionNotes}
+                        onChange={(e) => setResolutionNotes(e.target.value)}
+                        placeholder="Explain the rationale for this adjudication decision for the immutable audit trail..."
+                        className="w-full p-3 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 focus:bg-white"
+                      />
+                    </div>
+
+                    <div className="flex justify-end pt-1">
+                      <button
+                        type="button"
+                        onClick={handleResolveConflict}
+                        disabled={resolving || !resolutionNotes.trim()}
+                        className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-lg bg-slate-900 hover:bg-slate-800 text-white transition-colors disabled:opacity-50 shadow-sm"
+                      >
+                        <CheckCircle2 className={`w-4 h-4 ${resolving ? "animate-spin" : ""}`} />
+                        {resolving ? "Submitting Adjudication..." : "Confirm Adjudication & Update Canonical State"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Bottom Regulatory / Epistemic Banner */}
               <div className="p-4 bg-emerald-50/60 border border-emerald-200 rounded-xl flex items-center gap-3 text-xs text-emerald-900">

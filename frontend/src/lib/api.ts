@@ -847,15 +847,41 @@ export const api = {
     },
     async getCaseEvidence(projectId: string, caseId: string): Promise<{
       case_id: string;
-      evidence: Array<{
-        id: string;
-        source_name: string;
+      target_type?: string;
+      target_id?: string;
+      supporting_evidence: Array<{
+        evidence_id: string;
+        title: string;
         source_type: string;
-        content_snippet: string;
-        created_at: string;
+        source_url?: string | null;
+        author?: string | null;
+        support_type?: string;
+        supporting_excerpt?: string | null;
+        excerpt_verified?: boolean;
+        source_location?: Record<string, unknown>;
+        chunk_id?: string | null;
+        chunk_text?: string | null;
+        confidence_score?: number | null;
+        restricted?: boolean;
       }>;
+      conflicts: Array<Record<string, unknown>>;
     }> {
       return request(`/projects/${projectId}/verification/cases/${caseId}/evidence`);
+    },
+    async requestContext(
+      projectId: string,
+      caseId: string,
+      payload: {
+        requested_from_user_id: string;
+        question: string;
+        requested_information_type?: string;
+        expected_version?: number;
+      }
+    ): Promise<Record<string, unknown>> {
+      return request(`/projects/${projectId}/verification/cases/${caseId}/request-context`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
     },
     async approveCase(projectId: string, caseId: string, notes?: string): Promise<Record<string, unknown>> {
       return request(`/projects/${projectId}/verification/cases/${caseId}/approve`, {
@@ -875,10 +901,19 @@ export const api = {
         body: JSON.stringify({ reason }),
       });
     },
-    async editFinding(projectId: string, caseId: string, payload: { title?: string; summary?: string; expected_version: number }): Promise<Record<string, unknown>> {
+    async editFinding(projectId: string, caseId: string, payload: { title?: string; summary?: string; expected_version: number; reason?: string }): Promise<Record<string, unknown>> {
       return request(`/projects/${projectId}/verification/cases/${caseId}/finding`, {
         method: "PATCH",
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          expected_version: payload.expected_version,
+          patch_data: {
+            title: payload.title,
+            summary: payload.summary,
+          },
+          title: payload.title,
+          summary: payload.summary,
+          reason: payload.reason || "Auditor correction",
+        }),
       });
     },
     async assignReviewer(projectId: string, caseId: string, userId: string): Promise<Record<string, unknown>> {

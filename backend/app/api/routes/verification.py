@@ -176,6 +176,16 @@ def _to_case_detail_response(
     if _str_val(case.target_type) == _str_val(VerificationTargetType.KNOWLEDGE_ITEM):
         item = session.get(KnowledgeItem, case.target_id)
         if item:
+            score_val = (
+                float(item.confidence_score)
+                if getattr(item, "confidence_score", None) is not None
+                else None
+            )
+            if score_val is None and getattr(item, "confidence_metadata_json", None):
+                meta_sc = item.confidence_metadata_json.get("confidence_score")
+                if meta_sc is not None:
+                    score_val = float(meta_sc)
+
             target_data = {
                 "id": str(item.id),
                 "title": item.title,
@@ -185,9 +195,7 @@ def _to_case_detail_response(
                 or getattr(item, "category", ""),
                 "epistemic_status": _str_val(item.epistemic_status),
                 "review_status": _str_val(item.review_status),
-                "confidence_score": float(item.confidence_score)
-                if getattr(item, "confidence_score", None) is not None
-                else None,
+                "confidence_score": score_val,
                 "item_payload": getattr(item, "structured_payload", None)
                 or getattr(item, "item_payload", {}),
             }
@@ -210,10 +218,26 @@ def _to_case_detail_response(
     conflicts_resp = [
         VerificationConflictResponse.model_validate(c) for c in getattr(case, "conflicts", [])
     ]
-    events_resp = [
-        VerificationReviewEventResponse.model_validate(e)
-        for e in getattr(case, "review_events", [])
-    ]
+    events_resp: list[VerificationReviewEventResponse] = []
+    for e in getattr(case, "review_events", []):
+        action_val = _str_val(getattr(e, "action", ""))
+        notes_val = getattr(e, "review_notes", None)
+        events_resp.append(
+            VerificationReviewEventResponse(
+                id=e.id,
+                case_id=e.case_id,
+                reviewer_user_id=e.reviewer_user_id,
+                action=action_val,
+                event_type=action_val,
+                previous_status=_str_val(e.previous_status),
+                new_status=_str_val(e.new_status),
+                review_notes=notes_val,
+                notes=notes_val,
+                finding_patch_json=getattr(e, "finding_patch_json", None),
+                correlation_id=getattr(e, "correlation_id", ""),
+                created_at=e.created_at,
+            )
+        )
     context_resp = [
         VerificationContextRequestResponse.model_validate(r)
         for r in getattr(case, "context_requests", [])
@@ -432,50 +456,35 @@ def get_case_evidence_details(
                 )
                 continue
 
+            link_conf = (
+                float(link.confidence_score)
+                if getattr(link, "confidence_score", None) is not None
+                else None
+            )
+            if link_conf is None and getattr(link, "source_metadata_json", None):
+                meta_sc = link.source_metadata_json.get("confidence_score")
+                if meta_sc is not None:
+                    link_conf = float(meta_sc)
+
             supporting_evidence.append(
                 {
                     "evidence_id": str(ev.id),
                     "title": ev.title,
                     "source_type": ev.source_type,
                     "source_url": ev.source_url,
+                    "author": getattr(ev, "author_or_creator", None),
+                    "support_type": link.support_type,
                     "supporting_excerpt": link.supporting_excerpt,
+                    "excerpt_verified": link.excerpt_verified,
+                    "source_location": link.source_location_json,
                     "chunk_id": str(link.evidence_chunk_id) if link.evidence_chunk_id else None,
                     "chunk_text": getattr(link.evidence_chunk, "chunk_text", None),
-                    "confidence_score": float(link.confidence_score)
-                    if getattr(link, "confidence_score", None) is not None
-                    else None,
+                    "confidence_score": link_conf,
                     "restricted": False,
                 }
             )
 
-    if not supporting_evidence:
-        item = db_session.get(KnowledgeItem, case.target_id)
-        if item:
-            payload = item.structured_payload or getattr(item, "item_payload", {}) or {}
-            excerpt = payload.get("supporting_excerpt") or getattr(item, "summary", "") or ""
-            ev_list = list(
-                db_session.execute(
-                    select(EvidenceItem).where(EvidenceItem.project_id == case.project_id).limit(2)
-                )
-                .scalars()
-                .all()
-            )
-            for idx, ev in enumerate(ev_list):
-                supporting_evidence.append(
-                    {
-                        "evidence_id": str(ev.id),
-                        "title": ev.title,
-                        "source_type": ev.source_type,
-                        "source_url": ev.source_url,
-                        "supporting_excerpt": excerpt if idx == 0 else f"Corroborating record from {ev.title}",
-                        "chunk_id": None,
-                        "chunk_text": None,
-                        "confidence_score": float(item.confidence_score) if item.confidence_score is not None else 0.95,
-                        "restricted": False,
-                    }
-                )
-
-    # Conflicts
+    # Conflicts (zero fabrication - return exact links only)
     conflicts_data: list[dict[str, Any]] = []
     for c in getattr(case, "conflicts", []):
         conflicts_data.append(
@@ -629,13 +638,18 @@ def edit_case_finding(
     service = HumanReviewService(db_session)
     version = payload.expected_version if payload.expected_version is not None else existing_case.version
     reason = payload.reason or "Human reviewer correction"
+    patch_data = dict(payload.patch_data or {})
+    if payload.title is not None:
+        patch_data["title"] = payload.title
+    if payload.summary is not None:
+        patch_data["summary"] = payload.summary
 
     try:
         case = service.edit_finding(
             case_id=case_id,
             reviewer_user_id=project_ctx.user_id,
             expected_version=version,
-            patch_data=payload.patch_data,
+            patch_data=patch_data,
             reason=reason,
         )
         db_session.commit()

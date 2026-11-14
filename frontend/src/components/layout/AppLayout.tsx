@@ -93,6 +93,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     pathname === "/knowledge" ||
     pathname === "/relationships" ||
     pathname === "/verification" ||
+    pathname === "/conflicts" ||
     pathname === "/handover";
 
   return (
