@@ -4,26 +4,36 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Maximize2, Minus, Plus } from 'lucide-react'
 import { cn } from './index'
 import { evidence, personById, type Dependency } from '../../lib/figmaStore'
-import { allFindings } from './domain'
+import { allFindings, type AnyFinding } from './domain'
 
 export type NodeKind = 'Decision' | 'Task' | 'Risk' | 'Dependency' | 'Person' | 'Component' | 'Evidence'
 export interface GNode { id: string; label: string; kind: NodeKind }
 export const NODE_COLOR: Record<NodeKind, string> = { Decision: '#315FBA', Task: '#299B80', Risk: '#D36D72', Dependency: '#D39B43', Person: '#7997BE', Component: '#203653', Evidence: '#A0AEC0' }
 
-export function buildGraph(pid: string) {
+export function buildGraph(pid: string, customFindings?: AnyFinding[]) {
   const nodes = new Map<string, GNode>()
   const adj = new Map<string, Set<string>>()
   const add = (n: GNode) => { if (!nodes.has(n.id)) nodes.set(n.id, n); if (!adj.has(n.id)) adj.set(n.id, new Set()) }
   const link = (a: string, b: string) => { adj.get(a)?.add(b); adj.get(b)?.add(a) }
-  for (const f of allFindings(pid)) {
+  const targetFindings = customFindings && customFindings.length > 0 ? customFindings : allFindings(pid)
+  for (const f of targetFindings) {
     add({ id: f.id, label: f.title, kind: f.kind })
-    add({ id: `p:${f.ownerId}`, label: personById(f.ownerId)?.name ?? f.ownerId, kind: 'Person' }); link(f.id, `p:${f.ownerId}`)
-    for (const e of f.evidenceIds) { const ev = evidence.find((x) => x.id === e); if (ev) { add({ id: e, label: ev.ref, kind: 'Evidence' }); link(f.id, e) } }
+    const personLabel = personById(f.ownerId)?.name ?? f.ownerId
+    add({ id: `p:${f.ownerId}`, label: personLabel, kind: 'Person' }); link(f.id, `p:${f.ownerId}`)
+    for (const e of f.evidenceIds) {
+      if (!e) continue
+      const ev = evidence.find((x) => x.id === e)
+      add({ id: e, label: ev ? ev.ref : e.slice(0, 8), kind: 'Evidence' })
+      link(f.id, e)
+    }
     const comp = (f as unknown as { component?: string }).component
     if (comp) { add({ id: `c:${comp}`, label: comp, kind: 'Component' }); link(f.id, `c:${comp}`) }
     if (f.kind === 'Dependency') {
       const d = f as unknown as Dependency
-      if (d.depType === 'Technical') for (const c of [d.from, d.to]) { add({ id: `c:${c}`, label: c, kind: 'Component' }); link(f.id, `c:${c}`) }
+      if (d.from && d.to) {
+        add({ id: `c:${d.from}`, label: d.from, kind: 'Component' }); link(f.id, `c:${d.from}`)
+        add({ id: `c:${d.to}`, label: d.to, kind: 'Component' }); link(f.id, `c:${d.to}`)
+      }
     }
   }
   return { nodes, adj }
@@ -67,8 +77,24 @@ export function layoutFocus(nodes: Map<string, GNode>, adj: Map<string, Set<stri
   return { c, pos }
 }
 
-export function KnowledgeCanvas({ pid, center, onSelect, filter, className, focusLabel = true }: { pid: string; center: string; onSelect: (id: string) => void; filter?: (n: GNode) => boolean; className?: string; focusLabel?: boolean }) {
-  const { nodes, adj } = useMemo(() => buildGraph(pid), [pid])
+export function KnowledgeCanvas({
+  pid,
+  center,
+  onSelect,
+  filter,
+  className,
+  focusLabel = true,
+  findings,
+}: {
+  pid: string
+  center: string
+  onSelect: (id: string) => void
+  filter?: (n: GNode) => boolean
+  className?: string
+  focusLabel?: boolean
+  findings?: AnyFinding[]
+}) {
+  const { nodes, adj } = useMemo(() => buildGraph(pid, findings), [pid, findings])
   const boxRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 900, h: 600 })
   useEffect(() => {

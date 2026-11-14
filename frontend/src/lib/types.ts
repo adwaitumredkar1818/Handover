@@ -4,7 +4,18 @@ export interface User {
   id: UUID;
   email: string;
   full_name: string;
-  is_active: boolean;
+  is_active?: boolean;
+  status?: string;
+  is_email_verified?: boolean;
+  roles?: string[];
+  permissions?: string[];
+}
+
+export interface AuthSessionResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  user: User;
 }
 
 export interface Organisation {

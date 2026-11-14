@@ -1,5 +1,6 @@
 import type {
   User,
+  AuthSessionResponse,
   Organisation,
   OrganisationMember,
   Project,
@@ -43,6 +44,25 @@ export function setStoredToken(token: string | null) {
   }
 }
 
+export function getStoredUser(): User | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem("handover_cached_user");
+    return raw ? (JSON.parse(raw) as User) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredUser(user: User | null) {
+  if (typeof window === "undefined") return;
+  if (user) {
+    localStorage.setItem("handover_cached_user", JSON.stringify(user));
+  } else {
+    localStorage.removeItem("handover_cached_user");
+  }
+}
+
 let refreshPromise: Promise<string | null> | null = null;
 
 async function tryRefreshToken(): Promise<string | null> {
@@ -59,17 +79,21 @@ async function tryRefreshToken(): Promise<string | null> {
         });
         if (!res.ok) {
           setStoredToken(null);
+          setStoredUser(null);
           return null;
         }
-        const data = (await res.json()) as { access_token?: string };
+        const data = (await res.json()) as { access_token?: string; user?: User };
         if (data?.access_token) {
           setStoredToken(data.access_token);
+          if (data.user) setStoredUser(data.user);
           return data.access_token;
         }
         setStoredToken(null);
+        setStoredUser(null);
         return null;
       } catch {
         setStoredToken(null);
+        setStoredUser(null);
         return null;
       } finally {
         refreshPromise = null;
@@ -258,14 +282,14 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
-    async login(data: { email: string; password: string }): Promise<{ access_token: string; token_type: string }> {
-      return request<{ access_token: string; token_type: string }>("/auth/login", {
+    async login(data: { email: string; password: string }): Promise<AuthSessionResponse> {
+      return request<AuthSessionResponse>("/auth/login", {
         method: "POST",
         body: JSON.stringify(data),
       });
     },
-    async refreshToken(): Promise<{ access_token: string; token_type: string; expires_in: number }> {
-      return request<{ access_token: string; token_type: string; expires_in: number }>("/auth/refresh", {
+    async refreshToken(): Promise<AuthSessionResponse> {
+      return request<AuthSessionResponse>("/auth/refresh", {
         method: "POST",
       });
     },
@@ -276,6 +300,7 @@ export const api = {
         // ignore network error on logout
       } finally {
         setStoredToken(null);
+        setStoredUser(null);
       }
     },
     async me(): Promise<User> {
@@ -694,6 +719,16 @@ export const api = {
         body: JSON.stringify({ decision, rationale }),
       });
     },
+    async triggerReconstruction(projectId: string): Promise<{
+      id: string;
+      status: string;
+      entities_discovered: number;
+      relationships_discovered: number;
+    }> {
+      return request(`/projects/${projectId}/relationships/reconstruct`, {
+        method: "POST",
+      });
+    },
   },
   knowledgeIntelligence: {
     async getSummary(projectId: string): Promise<{
@@ -704,6 +739,31 @@ export const api = {
       candidate_count: number;
     }> {
       return request(`/projects/${projectId}/knowledge-intelligence/summary`);
+    },
+    async getDomains(projectId: string): Promise<{
+      domains: Array<{
+        domain_id: string;
+        display_name: string;
+        description: string;
+        item_count: number;
+        verified_count: number;
+        pending_review_count: number;
+        completeness_score: number;
+      }>;
+      total_domains: number;
+      active_domains_count: number;
+    }> {
+      return request(`/projects/${projectId}/knowledge-intelligence/domains`);
+    },
+    async triggerExtraction(projectId: string, options?: { domains?: string[]; evidence_ids?: string[]; force_rerun?: boolean }): Promise<{
+      run: Record<string, unknown>;
+      job?: Record<string, unknown>;
+      already_active: boolean;
+    }> {
+      return request(`/projects/${projectId}/knowledge-intelligence/extract`, {
+        method: "POST",
+        body: JSON.stringify(options || {}),
+      });
     },
     async listFindings(projectId: string, domain?: string, page: number = 1): Promise<{
       items: Record<string, unknown>[];

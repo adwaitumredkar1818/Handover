@@ -34,6 +34,14 @@ def build_db_connect_args(
         connect_args["connect_timeout"] = db_cfg.connect_timeout_seconds
     if "sslmode" not in query_params:
         connect_args["sslmode"] = db_cfg.ssl_mode
+    if "keepalives" not in query_params:
+        connect_args["keepalives"] = 1
+    if "keepalives_idle" not in query_params:
+        connect_args["keepalives_idle"] = 30
+    if "keepalives_interval" not in query_params:
+        connect_args["keepalives_interval"] = 10
+    if "keepalives_count" not in query_params:
+        connect_args["keepalives_count"] = 5
     if "prepare_threshold" not in query_params:
         # Supabase transaction pooler (port 6543) requires disabling statement preparation
         if parsed.port == 6543 or "pooler" in (parsed.hostname or ""):
@@ -48,11 +56,11 @@ def create_db_engine(settings: Settings) -> Engine:
 
     return create_engine(
         raw_url,
-        pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=10,
+        pool_pre_ping=False,
+        pool_size=15,
+        max_overflow=25,
         pool_timeout=30,
-        pool_recycle=1800,
+        pool_recycle=300,
         connect_args=connect_args,
     )
 

@@ -174,7 +174,7 @@ def to_evidence_detail_response(item: EvidenceItem) -> EvidenceDetailResponse:
     """Map detailed EvidenceItem with separated extracted text & pages."""
     summary = to_evidence_summary_response(item)
     extracted_content: EvidenceExtractedContentResponse | None = None
-    if item.content is not None:
+    if item.content is not None and (item.content.extracted_text or "").strip():
         extracted_content = EvidenceExtractedContentResponse(
             char_count=item.content.char_count,
             word_count=item.content.word_count,
@@ -200,7 +200,18 @@ def to_evidence_detail_response(item: EvidenceItem) -> EvidenceDetailResponse:
             word_count=len(combined_text.split()),
             extraction_warnings=[],
             extracted_text=combined_text,
-            pages=[],
+            pages=[
+                EvidencePageContentResponse(
+                    page_number=c.page_number or (c.chunk_index + 1),
+                    extraction_outcome="extracted",
+                    ocr_applied=False,
+                    ocr_truncated=False,
+                    text_content=c.chunk_text,
+                    char_count=c.char_count,
+                    structured_metadata={"section_title": c.section_title or f"Section {c.chunk_index + 1}"},
+                )
+                for c in item.chunks if c.chunk_text
+            ],
         )
 
     can_download = bool(item.storage_object_key and item.deleted_at is None)

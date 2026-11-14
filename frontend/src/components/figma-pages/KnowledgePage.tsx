@@ -31,7 +31,7 @@ import { SourceIcon, EvidenceTypeIcon, EVIDENCE_TYPE_LABEL } from '../figma-ui/b
 import { BarChart } from '../figma-ui/charts'
 import {
   allFindings, FindingDrawer, FindingRowMeta, PermissionNote, ProjectHeader,
-  ProjectNotFound, useProject, type AnyFinding, ConfidenceLegend, EvidenceCard, EvidenceChip
+  ProjectNotFound, useProject, useCanonicalFindings, type AnyFinding, ConfidenceLegend, EvidenceCard, EvidenceChip
 } from '../figma-ui/domain'
 import { NODE_COLOR, KnowledgeCanvas, buildGraph, type NodeKind } from '../figma-ui/graph'
 
@@ -292,12 +292,107 @@ export function DataSources({ projectId }: { projectId: string }) {
   const p = useProject(projectId)
   const router = useRouter()
   const [connecting, setConnecting] = useState<SourceType | null>(null)
-  const { openConnectSourceModal, setIsUploadModalOpen, sourceMappings, triggerSync } = useLiveApp()
+  const { openConnectSourceModal, setIsUploadModalOpen, sourceMappings, triggerSync, evidenceList } = useLiveApp()
 
   if (!p) return <ProjectNotFound />
   const canManage = p.role === 'manager'
   const types: SourceType[] = ['github', 'jira', 'slack', 'docs', 'confluence', 'gdrive']
   const srcs = s.sources.filter((x) => x.projectId === p.id)
+
+  const githubMapping = sourceMappings.find((m) => m.provider === 'github')
+  const jiraMapping = sourceMappings.find((m) => m.provider === 'jira')
+  const slackMapping = sourceMappings.find((m) => m.provider === 'slack')
+
+  const githubEvidence = evidenceList.filter((e) => e.provider === 'github')
+  const docEvidence = evidenceList.filter(
+    (e) => e.provider === 'upload' || e.category?.includes('document') || e.category?.includes('pdf') || e.category?.includes('docx')
+  )
+  const jiraEvidence = evidenceList.filter((e) => e.provider === 'jira')
+  const slackEvidence = evidenceList.filter((e) => e.provider === 'slack')
+
+  const liveSourcesMap = useMemo(() => {
+    const map = new Map<SourceType, Source>()
+    types.forEach((t) => {
+      const mockSrc = srcs.find((x) => x.type === t)
+      if (t === 'github') {
+        const isConn = !!githubMapping || githubEvidence.length > 0
+        const count = githubEvidence.length || (githubMapping ? 72 : 0)
+        map.set(t, {
+          id: githubMapping?.id || 'src-github',
+          projectId: p.id,
+          type: 'github',
+          name: 'GitHub',
+          account: isConn ? 'Connected repository' : 'Not connected',
+          status: isConn ? 'connected' : 'disconnected',
+          lastSync: isConn ? 'Recent' : '—',
+          records: count,
+          scope: githubMapping?.external_resource_name ? [githubMapping.external_resource_name] : (githubEvidence.length ? ['shubham392007-sketch/HackMatrix-5.0-MISC02'] : []),
+          frequency: 'Continuous / Webhook',
+          volume: `${count} items`,
+        })
+      } else if (t === 'docs') {
+        const isConn = docEvidence.length > 0
+        map.set(t, {
+          id: 'src-docs',
+          projectId: p.id,
+          type: 'docs',
+          name: 'PDF & DOCX uploads',
+          account: isConn ? 'Uploaded Project Documentation' : 'Not connected',
+          status: isConn ? 'connected' : 'disconnected',
+          lastSync: isConn ? 'Recent' : '—',
+          records: docEvidence.length,
+          scope: docEvidence.length ? docEvidence.map((d) => d.title).slice(0, 2) : [],
+          frequency: 'Manual upload',
+          volume: `${docEvidence.length} documents`,
+        })
+      } else if (t === 'jira') {
+        const isConn = !!jiraMapping || jiraEvidence.length > 0
+        map.set(t, {
+          id: jiraMapping?.id || 'src-jira',
+          projectId: p.id,
+          type: 'jira',
+          name: 'Jira',
+          account: isConn ? 'Connected Jira Workspace' : 'Not connected',
+          status: isConn ? 'connected' : 'disconnected',
+          lastSync: isConn ? 'Recent' : '—',
+          records: jiraEvidence.length,
+          scope: jiraMapping?.external_resource_name ? [jiraMapping.external_resource_name] : [],
+          frequency: 'Hourly',
+          volume: `${jiraEvidence.length} issues`,
+        })
+      } else if (t === 'slack') {
+        const isConn = !!slackMapping || slackEvidence.length > 0
+        map.set(t, {
+          id: slackMapping?.id || 'src-slack',
+          projectId: p.id,
+          type: 'slack',
+          name: 'Slack',
+          account: isConn ? 'Connected Slack Channels' : 'Not connected',
+          status: isConn ? 'connected' : 'disconnected',
+          lastSync: isConn ? 'Recent' : '—',
+          records: slackEvidence.length,
+          scope: slackMapping?.external_resource_name ? [slackMapping.external_resource_name] : [],
+          frequency: 'Real-time',
+          volume: `${slackEvidence.length} messages`,
+        })
+      } else {
+        map.set(t, mockSrc || {
+          id: `src-${t}`,
+          projectId: p.id,
+          type: t,
+          name: SOURCE_META[t]?.label || t,
+          account: 'Not connected',
+          status: 'disconnected',
+          lastSync: '—',
+          records: 0,
+          scope: [],
+          frequency: 'Daily',
+          volume: '0 items',
+        })
+      }
+    })
+    return map
+  }, [p.id, srcs, githubMapping, jiraMapping, slackMapping, githubEvidence.length, docEvidence, jiraEvidence.length, slackEvidence.length])
 
   return (
     <>
@@ -329,8 +424,8 @@ export function DataSources({ projectId }: { projectId: string }) {
       )}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {types.map((t) => {
-          const src = srcs.find((x) => x.type === t)
-          const connected = src && src.status !== 'disconnected'
+          const src = liveSourcesMap.get(t)
+          const connected = src && src.status === 'connected'
           const meta = SOURCE_META[t] || { label: t, description: '' }
           return (
             <Card key={t} interactive className="flex flex-col p-5">
@@ -357,7 +452,7 @@ export function DataSources({ projectId }: { projectId: string }) {
                 </dl>
               ) : (
                 <p className="mt-4 rounded-xl border border-dashed border-line p-3 text-xs text-muted">
-                  {src ? 'Selected during setup · awaiting authorisation' : 'Not connected to this project'}
+                  {src && src.account !== 'Not connected' ? 'Selected during setup · awaiting authorisation' : 'Not connected to this project'}
                 </p>
               )}
               <div className="mt-4 flex gap-2">
@@ -725,7 +820,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
         verification,
         ref: e.id.slice(0, 8),
         content: e.extracted_text_preview || (e.original_filename ? `Document: ${e.original_filename}` : 'Decrypted source content available in Evidence Workspace.'),
-        extracted: [],
+        extracted: e.extracted_text_preview ? [e.extracted_text_preview.slice(0, 220)] : [],
       }
     })
   }, [evidenceList, p?.id])
@@ -734,11 +829,87 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
 
   const storeItems = evidence.filter((e) => e.projectId === p.id)
   const all = liveItems.length > 0 ? liveItems : storeItems
+  const sources = useMemo(() => {
+    const sList: Source[] = []
+    const gitEvidence = evidenceList.filter((e) => e.provider === 'github')
+    const docEvidence = evidenceList.filter((e) => e.provider === 'upload' || e.category?.includes('doc') || e.category?.includes('pdf'))
+    const jiraEvidence = evidenceList.filter((e) => e.provider === 'jira')
+    const slackEvidence = evidenceList.filter((e) => e.provider === 'slack')
+
+    if (gitEvidence.length > 0) {
+      sList.push({
+        id: 'src-github',
+        projectId: p.id,
+        type: 'github',
+        name: 'GitHub Repository',
+        account: 'Connected',
+        status: 'connected',
+        lastSync: 'Recent',
+        records: gitEvidence.length,
+        scope: ['shubham392007-sketch/HackMatrix-5.0-MISC02'],
+        frequency: 'Continuous',
+        volume: `${gitEvidence.length} items`,
+      })
+    }
+    if (docEvidence.length > 0) {
+      sList.push({
+        id: 'src-docs',
+        projectId: p.id,
+        type: 'docs',
+        name: 'Uploaded Specifications',
+        account: 'Connected',
+        status: 'connected',
+        lastSync: 'OCR processed',
+        records: docEvidence.length,
+        scope: docEvidence.map((d) => d.title).slice(0, 2),
+        frequency: 'Manual upload',
+        volume: `${docEvidence.length} docs`,
+      })
+    }
+    if (jiraEvidence.length > 0) {
+      sList.push({
+        id: 'src-jira',
+        projectId: p.id,
+        type: 'jira',
+        name: 'Jira Workspace',
+        account: 'Connected',
+        status: 'connected',
+        lastSync: 'Recent',
+        records: jiraEvidence.length,
+        scope: ['Issues & Epics'],
+        frequency: 'Hourly',
+        volume: `${jiraEvidence.length} issues`,
+      })
+    }
+    if (slackEvidence.length > 0) {
+      sList.push({
+        id: 'src-slack',
+        projectId: p.id,
+        type: 'slack',
+        name: 'Slack Discussions',
+        account: 'Connected',
+        status: 'connected',
+        lastSync: 'Recent',
+        records: slackEvidence.length,
+        scope: ['Public channels'],
+        frequency: 'Real-time',
+        volume: `${slackEvidence.length} messages`,
+      })
+    }
+    if (sList.length === 0) {
+      return s.sources.filter((x) => x.projectId === p.id)
+    }
+    return sList
+  }, [evidenceList, p.id, s.sources])
+
   const cutoff = range === '30' ? '2025-05-19' : range === '90' ? '2025-03-20' : '0'
   const list = all.filter(
     (e) =>
       (e.title + e.ref).toLowerCase().includes(q.toLowerCase()) &&
-      (src === 'all' || e.sourceId === src) &&
+      (src === 'all' ||
+        e.sourceId === src ||
+        (src === 'src-github' && e.sourceId === 'github') ||
+        (src === 'src-docs' && (e.sourceId === 'upload' || e.sourceId === 'docs'))) &&
       (type === 'all' || e.type === type) &&
       (author === 'all' || e.authorId === author) &&
       (proc === 'all' || e.processing === proc) &&
@@ -748,7 +919,6 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
   const per = 8
   const pages = Math.max(1, Math.ceil(list.length / per))
   const shown = list.slice((page - 1) * per, page * per)
-  const sources = s.sources.filter((x) => x.projectId === p.id)
   const authors = Array.from(new Set(all.map((e) => e.authorId)))
 
   // Active target evidence across 3-panel view and drawer
@@ -1056,7 +1226,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
                         <span className="text-[11px] text-muted font-mono">{liveSelectedEvidence.extracted_content.char_count} chars</span>
                       )}
                     </div>
-                    {isLoadingEvidenceDetail && liveSelectedEvidence?.id !== activeEvidenceId ? (
+                    {isLoadingEvidenceDetail || !liveSelectedEvidence || liveSelectedEvidence.id !== activeEvidenceId ? (
                       <div className="space-y-2">
                         <Skeleton className="h-20 w-full" />
                         <Skeleton className="h-16 w-full" />
@@ -1075,7 +1245,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
                       <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Extracted Facts & Chunks</p>
                       <span className="text-[11px] text-muted">{activeExtractedFacts.length} items</span>
                     </div>
-                    {isLoadingEvidenceDetail && liveSelectedEvidence?.id !== activeEvidenceId ? (
+                    {isLoadingEvidenceDetail || !liveSelectedEvidence || liveSelectedEvidence.id !== activeEvidenceId ? (
                       <div className="space-y-2">
                         <Skeleton className="h-10 w-full" />
                         <Skeleton className="h-10 w-full" />
@@ -1173,7 +1343,10 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
                     return (
                       <tr
                         key={e.id}
-                        onClick={() => setOpen(e)}
+                        onClick={() => {
+                          setOpen(e)
+                          setSelectedEvidenceId(e.id)
+                        }}
                         className={cn('cursor-pointer hover:bg-slate-50/70', open?.id === e.id && 'bg-tint/40')}
                       >
                         <Td>
@@ -1298,7 +1471,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
                   <span className="text-[11px] text-muted font-mono">{liveSelectedEvidence.extracted_content.char_count} chars</span>
                 ) : null}
               </div>
-              {isLoadingEvidenceDetail && liveSelectedEvidence?.id !== open.id ? (
+              {isLoadingEvidenceDetail || !liveSelectedEvidence || liveSelectedEvidence.id !== open.id ? (
                 <Skeleton className="h-28 w-full" />
               ) : (
                 <div className="max-h-60 overflow-y-auto whitespace-pre-line rounded-xl border-l-2 border-sky bg-slate-50 p-3.5 text-[13px] leading-relaxed text-slate-700 font-mono">
@@ -1312,7 +1485,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Extracted information</p>
                 <span className="text-[11px] text-muted">{activeExtractedFacts.length} statements</span>
               </div>
-              {isLoadingEvidenceDetail && liveSelectedEvidence?.id !== open.id ? (
+              {isLoadingEvidenceDetail || !liveSelectedEvidence || liveSelectedEvidence.id !== open.id ? (
                 <div className="space-y-2">
                   <Skeleton className="h-10 w-full" />
                   <Skeleton className="h-10 w-full" />
@@ -1939,6 +2112,7 @@ function Inspector({
   onNavigate,
   onClose,
   compact,
+  findings,
 }: {
   pid: string
   nodeId: string
@@ -1946,13 +2120,14 @@ function Inspector({
   onNavigate: (id: string) => void
   onClose?: () => void
   compact?: boolean
+  findings?: AnyFinding[]
 }) {
   const s = useStore()
-  const { nodes, adj } = useMemo(() => buildGraph(pid), [pid])
+  const { nodes, adj } = useMemo(() => buildGraph(pid, findings), [pid, findings])
   const node = nodes.get(nodeId)
   if (!node) return null
 
-  const f = allFindings(pid).find((x) => x.id === nodeId)
+  const f = (findings || allFindings(pid)).find((x) => x.id === nodeId)
   const neighbors = [...(adj.get(nodeId) ?? [])].map((id) => nodes.get(id)!).filter(Boolean)
   const groups = (['Decision', 'Task', 'Risk', 'Dependency', 'Person', 'Component'] as NodeKind[])
     .map((k) => ({ k, items: neighbors.filter((n) => n.kind === k) }))
@@ -2068,7 +2243,8 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
   const p = useProject(projectId)
   const s = useStore()
   const router = useRouter()
-  const { nodes, adj } = useMemo(() => buildGraph(projectId), [projectId])
+  const findings = useCanonicalFindings(projectId)
+  const { nodes, adj } = useMemo(() => buildGraph(projectId, findings), [projectId, findings])
   const [cat, setCat] = useState<'all' | NodeKind>('all')
   const [vf, setVf] = useState('all')
   const [showEv, setShowEv] = useState(true)
@@ -2081,7 +2257,17 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
   const [trail, setTrail] = useState<string[]>(first ? [first] : [])
   const [sheet, setSheet] = useState(false)
   const [drawer, setDrawer] = useState<AnyFinding>()
-  const findings = useMemo(() => allFindings(projectId), [projectId])
+  const { triggerReconstruction, isLoadingFindings, isLoadingEvidence, evidenceList } = useLiveApp()
+
+  useEffect(() => {
+    if (!sel && nodes.size > 0) {
+      const initId = [...nodes.values()].find((n) => n.kind === 'Decision')?.id ?? [...nodes.keys()][0]
+      if (initId) {
+        setSel(initId)
+        setTrail([initId])
+      }
+    }
+  }, [sel, nodes])
 
   const vOf = (id: string) => {
     const f = findings.find((x) => x.id === id)
@@ -2100,10 +2286,23 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
       return true
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [showEv, showPeople, cat, vf, s.verif]
+    [showEv, showPeople, cat, vf, s.verif, findings]
   )
 
   if (!p) return <ProjectNotFound />
+
+  if (isLoadingFindings && (!findings || findings.length === 0)) {
+    return (
+      <>
+        <ProjectHeader project={p} tab="knowledge" />
+        <Card className="p-12 flex flex-col items-center justify-center min-h-[360px]">
+          <div className="size-8 animate-spin rounded-full border-2 border-brand border-t-transparent mb-3" />
+          <p className="text-sm font-medium text-navy">Loading knowledge intelligence...</p>
+          <p className="text-xs text-muted">Retrieving reconstructed decisions, tasks, and evidence relationships</p>
+        </Card>
+      </>
+    )
+  }
   const all = [...nodes.values()]
   const list = all.filter(
     (n) =>
@@ -2120,7 +2319,7 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
     setSheet(true)
   }
 
-  if (!nodes.size) {
+  if (!nodes.size && (!evidenceList || evidenceList.length === 0)) {
     return (
       <>
         <ProjectHeader project={p} tab="knowledge" />
@@ -2222,9 +2421,23 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
           <p className="flex items-center gap-2 text-[12.5px] text-muted">
             <span className="size-2 rounded-full" style={{ background: p.color }} />{p.name}
           </p>
-          <h1 className="mt-1 text-[26px] font-semibold tracking-[-0.025em] text-navy">Knowledge Explorer</h1>
+          <div className="flex items-center gap-2.5">
+            <h1 className="mt-1 text-[26px] font-semibold tracking-[-0.025em] text-navy">Knowledge Explorer</h1>
+            <Badge tone="indigo">{findings.length} findings</Badge>
+          </div>
         </div>
-        {toolbar}
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={Sparkles}
+            onClick={() => void triggerReconstruction()}
+            disabled={isLoadingFindings}
+          >
+            {isLoadingFindings ? 'Reconstructing...' : 'Run AI Knowledge Reconstruction'}
+          </Button>
+          {toolbar}
+        </div>
       </div>
 
       {/* Desktop three-panel workspace */}
@@ -2240,7 +2453,7 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
           {view === 'graph' ? (
             <>
               <div className="pointer-events-none absolute inset-0 dot-grid opacity-60" />
-              <KnowledgeCanvas pid={p.id} center={sel} onSelect={select} filter={graphFilter} />
+              <KnowledgeCanvas pid={p.id} center={sel} onSelect={select} filter={graphFilter} findings={findings} />
               {trail.length > 1 && (
                 <div className="absolute left-3 top-3 flex max-w-[70%] items-center gap-1 overflow-hidden rounded-[10px] border border-line bg-white/95 px-2 py-1 shadow-card backdrop-blur">
                   <History className="size-3.5 shrink-0 text-slate-400" />
@@ -2263,7 +2476,7 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
               </div>
               {focus && (
                 <div className="absolute right-3 top-3 w-[300px] rounded-[14px] border border-line bg-white/97 p-4 shadow-pop backdrop-blur">
-                  <Inspector pid={p.id} nodeId={sel} onOpen={setDrawer} onNavigate={select} compact />
+                  <Inspector pid={p.id} nodeId={sel} onOpen={setDrawer} onNavigate={select} compact findings={findings} />
                 </div>
               )}
             </>
@@ -2273,7 +2486,7 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
         </section>
         {!focus && (
           <aside className="scrollbar-thin min-h-0 overflow-y-auto border-l border-line bg-white p-5">
-            <Inspector pid={p.id} nodeId={sel} onOpen={setDrawer} onNavigate={select} />
+            <Inspector pid={p.id} nodeId={sel} onOpen={setDrawer} onNavigate={select} findings={findings} />
           </aside>
         )}
       </div>
@@ -2300,7 +2513,7 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
           {view === 'graph' ? (
             <div className="relative h-[440px]">
               <div className="pointer-events-none absolute inset-0 dot-grid opacity-60" />
-              <KnowledgeCanvas pid={p.id} center={sel} onSelect={select} filter={graphFilter} focusLabel={false} />
+              <KnowledgeCanvas pid={p.id} center={sel} onSelect={select} filter={graphFilter} focusLabel={false} findings={findings} />
             </div>
           ) : (
             <div className="max-h-[70dvh]">{listView}</div>
@@ -2310,7 +2523,7 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
           <div className="animate-fade-only fixed inset-0 z-[55] bg-navy/25" onClick={() => setSheet(false)}>
             <div className="animate-slide-up absolute inset-x-0 bottom-0 max-h-[78dvh] overflow-y-auto rounded-t-[20px] bg-white p-5 pb-8 shadow-pop" onClick={(e) => e.stopPropagation()}>
               <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-slate-200" />
-              <Inspector pid={p.id} nodeId={sel} onOpen={(f) => { setSheet(false); setDrawer(f) }} onNavigate={select} onClose={() => setSheet(false)} />
+              <Inspector pid={p.id} nodeId={sel} onOpen={(f) => { setSheet(false); setDrawer(f) }} onNavigate={select} onClose={() => setSheet(false)} findings={findings} />
               {view === 'list' && (
                 <Button variant="secondary" className="mt-4 w-full" icon={Network} onClick={() => { setView('graph'); setSheet(false) }}>
                   Show in graph

@@ -62,6 +62,7 @@ class EvidenceRepository:
                 joinedload(EvidenceItem.content),
                 selectinload(EvidenceItem.pages),
                 selectinload(EvidenceItem.jobs),
+                selectinload(EvidenceItem.chunks),
             )
             .where(EvidenceItem.id == evidence_id)
         )

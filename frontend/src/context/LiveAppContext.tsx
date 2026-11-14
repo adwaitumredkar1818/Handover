@@ -9,7 +9,7 @@ import React, {
   useRef,
   type ReactNode,
 } from "react";
-import { api, setStoredToken, ApiError } from "../lib/api";
+import { api, setStoredToken, setStoredUser, getStoredUser, ApiError } from "../lib/api";
 import type {
   User,
   Organisation,
@@ -163,6 +163,8 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
 
   // Overview state
   const [overview, setOverview] = useState<ProjectOverview | null>(null);
+  const overviewRef = useRef<ProjectOverview | null>(null);
+  overviewRef.current = overview;
   const [isLoadingOverview, setIsLoadingOverview] = useState(false);
 
   // Members state
@@ -301,24 +303,57 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   // Initialize auth from localStorage and verify with backend
   useEffect(() => {
     async function initAuth() {
-      setIsLoadingAuth(true);
       try {
         const stored = typeof window !== "undefined" ? localStorage.getItem("handover_access_token") : null;
+        const cachedUser = getStoredUser();
+
+        // If we have cached token & user, hydrate instantly in 0ms so user sees authenticated state without flash
+        if (stored && cachedUser) {
+          setStoredToken(stored);
+          setToken(stored);
+          setUser(cachedUser);
+          setIsLoadingAuth(false);
+
+          // Silently verify or refresh session in the background
+          try {
+            const me = await api.auth.me();
+            setUser(me);
+            setStoredUser(me);
+          } catch {
+            try {
+              const refreshed = await api.auth.refreshToken();
+              setStoredToken(refreshed.access_token);
+              setStoredUser(refreshed.user);
+              setToken(refreshed.access_token);
+              setUser(refreshed.user);
+            } catch {
+              setStoredToken(null);
+              setStoredUser(null);
+              setToken(null);
+              setUser(null);
+            }
+          }
+          return;
+        }
+
+        setIsLoadingAuth(true);
         if (stored) {
+          setStoredToken(stored);
           setToken(stored);
           try {
             const me = await api.auth.me();
             setUser(me);
+            setStoredUser(me);
           } catch {
-            // Token expired or invalid — try silent refresh via HttpOnly cookie
             try {
               const refreshed = await api.auth.refreshToken();
               setStoredToken(refreshed.access_token);
+              setStoredUser(refreshed.user);
               setToken(refreshed.access_token);
-              const me = await api.auth.me();
-              setUser(me);
+              setUser(refreshed.user);
             } catch {
               setStoredToken(null);
+              setStoredUser(null);
               setToken(null);
               setUser(null);
             }
@@ -328,9 +363,9 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
           try {
             const refreshed = await api.auth.refreshToken();
             setStoredToken(refreshed.access_token);
+            setStoredUser(refreshed.user);
             setToken(refreshed.access_token);
-            const me = await api.auth.me();
-            setUser(me);
+            setUser(refreshed.user);
           } catch {
             // No active session, user remains unauthenticated
           }
@@ -472,7 +507,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         ? (transRes.value as { departing_user?: { id?: string }; successor_user?: { id?: string } } | null)
         : null;
 
-      const currentOverview = overview && overview.project_id === currentProjectId ? overview : null;
+      const currentOverview = overviewRef.current && overviewRef.current.project_id === currentProjectId ? overviewRef.current : null;
       const departingId = transitionData?.departing_user?.id || currentOverview?.departing_member?.id;
       const successorId = transitionData?.successor_user?.id || currentOverview?.successor?.id;
 
@@ -503,7 +538,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoadingMembers(false);
     }
-  }, [user, activeProject, overview]);
+  }, [user?.id, activeProject?.id]);
 
   // Load project sources & org connections
   const refreshSources = useCallback(async () => {
@@ -617,11 +652,11 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const triggerReconstruction = useCallback(async () => {
     if (!activeProject) return;
     try {
-      await api.knowledgeIntelligence.listFindings(activeProject.id);
+      await api.knowledgeIntelligence.triggerExtraction(activeProject.id);
       addToast({
-        type: "info",
+        type: "success",
         title: "Reconstruction Triggered",
-        message: "Ollama Qwen3 8B knowledge extraction job queued.",
+        message: "Ollama Qwen3 8B knowledge extraction job queued across canonical domains.",
       });
       await refreshFindings();
       await refreshOverview();
@@ -726,15 +761,25 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   // Trigger data refreshes when active project changes
   const activeProjectId = activeProject?.id;
   const currentUserId = user?.id;
+  const lastLoadedProjectIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!currentUserId || !activeProjectId) return;
+    if (!currentUserId || !activeProjectId) {
+      lastLoadedProjectIdRef.current = null;
+      return;
+    }
+    if (lastLoadedProjectIdRef.current === activeProjectId) {
+      return;
+    }
+    lastLoadedProjectIdRef.current = activeProjectId;
+
     let active = true;
     void Promise.resolve().then(() => {
       if (!active) return;
       void refreshOverview();
       void refreshMembers();
       void refreshSources();
+      void refreshEvidence();
       void refreshFindings();
       void refreshVerification();
       void refreshHandovers();
@@ -748,35 +793,23 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     refreshOverview,
     refreshMembers,
     refreshSources,
+    refreshEvidence,
     refreshFindings,
     refreshVerification,
     refreshHandovers,
   ]);
 
-  // Load evidence only when active project changes
-  useEffect(() => {
-    if (!currentUserId || !activeProjectId) return;
-    let active = true;
-    void Promise.resolve().then(async () => {
-      if (!active) return;
-      await refreshEvidence();
-    });
-    return () => {
-      active = false;
-    };
-  }, [currentUserId, activeProjectId, refreshEvidence]);
-
   // Auth actions
   const login = async (email: string, password: string) => {
     const res = await api.auth.login({ email, password });
     setStoredToken(res.access_token);
+    setStoredUser(res.user);
     setToken(res.access_token);
-    const me = await api.auth.me();
-    setUser(me);
+    setUser(res.user);
     addToast({
       type: "success",
       title: "Authenticated",
-      message: `Signed in as ${me.email}`,
+      message: `Signed in as ${res.user.email}`,
     });
   };
 
@@ -798,6 +831,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       // ignore
     }
     setStoredToken(null);
+    setStoredUser(null);
     setToken(null);
     setUser(null);
     setActiveOrg(null);

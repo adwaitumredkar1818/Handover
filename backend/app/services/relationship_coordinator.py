@@ -294,16 +294,12 @@ class RelationshipCoordinatorService:
                 .scalars()
                 .all()
             )
-            # Compare entities of same type
-            by_type: dict[str, list[KnowledgeEntity]] = {}
-            for e in all_entities:
-                by_type.setdefault(e.entity_type, []).append(e)
-
-            for _e_type, group in by_type.items():
-                if len(group) > 1:
-                    for i in range(len(group)):
-                        for j in range(i + 1, min(i + 20, len(group))):
-                            self._identity_service.evaluate_and_record_candidate(group[i], group[j])
+            # 6. Run Identity Resolution across person entities for cross-platform profile matching
+            person_group = [e for e in all_entities if e.entity_type == EntityType.PERSON.value]
+            if len(person_group) > 1:
+                for i in range(len(person_group)):
+                    for j in range(i + 1, min(i + 10, len(person_group))):
+                        self._identity_service.evaluate_and_record_candidate(person_group[i], person_group[j])
 
             # 7. Index Decision Traceability Chains
             self._traceability_service.index_project_traceability(
