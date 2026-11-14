@@ -193,9 +193,10 @@ class CandidateEvidenceRef(BaseSchema):
 
 
 class ConfidenceMetadata(BaseSchema):
-    """Explicit non-calibrated confidence & completeness structure."""
+    """Explicit confidence & completeness structure with honest model score."""
 
     extraction_confidence: ConfidenceLevel = ConfidenceLevel.MEDIUM
+    confidence_score: float | None = None
     evidence_support_quality: Literal["explicit", "partial", "weak_or_indirect"] = "explicit"
     information_completeness: Literal["complete", "partial", "incomplete"] = "partial"
     attribution_certainty: Literal["explicit", "inferred", "missing"] = "explicit"

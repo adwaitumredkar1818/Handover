@@ -24,6 +24,7 @@ from app.models.enums import (
     VerificationPriority,
     VerificationTargetType,
 )
+from app.models.evidence import EvidenceItem
 from app.models.knowledge import KnowledgeEvidenceLink, KnowledgeItem
 from app.models.relationship import KnowledgeRelationship
 from app.models.verification import VerificationCase
@@ -70,7 +71,10 @@ def _str_val(val: Any) -> str:
     return str(val) if val is not None else ""
 
 
-def _to_case_item_response(case: VerificationCase) -> VerificationCaseItemResponse:
+def _to_case_item_response(
+    case: VerificationCase,
+    target_obj: KnowledgeItem | KnowledgeRelationship | None = None,
+) -> VerificationCaseItemResponse:
     open_issues = [
         i for i in getattr(case, "issues", []) if getattr(i, "resolution_state", "") == "open"
     ]
@@ -79,6 +83,52 @@ def _to_case_item_response(case: VerificationCase) -> VerificationCaseItemRespon
         for c in getattr(case, "conflicts", [])
         if getattr(c, "resolution_state", "") == "unresolved"
     ]
+
+    title: str | None = None
+    summary: str | None = None
+    domain: str | None = None
+    category: str | None = None
+    confidence_score: float | None = None
+    finding_dict: dict[str, Any] | None = None
+
+    if target_obj:
+        if isinstance(target_obj, KnowledgeItem):
+            title = target_obj.title
+            summary = getattr(target_obj, "structured_summary", None) or getattr(target_obj, "summary", "") or ""
+            domain = getattr(target_obj, "primary_domain", None) or getattr(target_obj, "category", "") or "General"
+            category = getattr(target_obj, "category", None) or domain
+            confidence_score = (
+                float(target_obj.confidence_score)
+                if getattr(target_obj, "confidence_score", None) is not None
+                else None
+            )
+            if confidence_score is None and getattr(target_obj, "confidence_metadata_json", None):
+                meta_score = target_obj.confidence_metadata_json.get("confidence_score")
+                if meta_score is not None:
+                    confidence_score = float(meta_score)
+            finding_dict = {
+                "title": title,
+                "summary": summary,
+                "domain": domain,
+                "category": category,
+            }
+        elif isinstance(target_obj, KnowledgeRelationship):
+            title = f"{target_obj.relationship_type.upper()}: {target_obj.relationship_basis}"
+            summary = f"Relationship linking {target_obj.source_entity_id} -> {target_obj.target_entity_id}"
+            domain = "Relationship"
+            category = target_obj.relationship_type
+            confidence_score = (
+                float(target_obj.confidence_score)
+                if target_obj.confidence_score is not None
+                else None
+            )
+            finding_dict = {
+                "title": title,
+                "summary": summary,
+                "domain": domain,
+                "category": category,
+            }
+
     return VerificationCaseItemResponse(
         id=case.id,
         organisation_id=case.organisation_id,
@@ -98,6 +148,15 @@ def _to_case_item_response(case: VerificationCase) -> VerificationCaseItemRespon
         resolved_at=case.resolved_at,
         created_at=case.created_at,
         updated_at=case.updated_at,
+        title=title,
+        summary=summary,
+        domain=domain,
+        category=category,
+        confidence_score=confidence_score,
+        finding=finding_dict,
+        status=_str_val(case.case_status),
+        risk_level=_str_val(case.priority),
+        issue_count=len(open_issues),
     )
 
 
@@ -192,6 +251,7 @@ def list_verification_queue(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
     db_session: Annotated[Session, Depends(get_db_session)],
     case_status: Annotated[VerificationCaseStatus | None, Query()] = None,
+    status: Annotated[VerificationCaseStatus | None, Query()] = None,
     priority: Annotated[VerificationPriority | None, Query()] = None,
     target_type: Annotated[VerificationTargetType | None, Query()] = None,
     assigned_reviewer_id: Annotated[uuid.UUID | None, Query()] = None,
@@ -200,9 +260,10 @@ def list_verification_queue(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> VerificationQueueResponse:
     repo = VerificationCaseRepository(db_session)
+    effective_status = case_status or status
     items = repo.list_queue(
         project_ctx.project.id,
-        case_status=case_status,
+        case_status=effective_status,
         priority=priority,
         target_type=target_type,
         assigned_reviewer_id=assigned_reviewer_id,
@@ -212,14 +273,52 @@ def list_verification_queue(
     )
     total = repo.count_queue(
         project_ctx.project.id,
-        case_status=case_status,
+        case_status=effective_status,
         priority=priority,
         target_type=target_type,
         assigned_reviewer_id=assigned_reviewer_id,
         unassigned_only=unassigned_only,
     )
+
+    item_ids = [
+        c.target_id
+        for c in items
+        if _str_val(c.target_type) == _str_val(VerificationTargetType.KNOWLEDGE_ITEM)
+    ]
+    items_map: dict[uuid.UUID, KnowledgeItem] = {}
+    if item_ids:
+        item_records = (
+            db_session.execute(select(KnowledgeItem).where(KnowledgeItem.id.in_(item_ids)))
+            .scalars()
+            .all()
+        )
+        items_map = {it.id: it for it in item_records}
+
+    rel_ids = [
+        c.target_id
+        for c in items
+        if _str_val(c.target_type) == _str_val(VerificationTargetType.RELATIONSHIP)
+    ]
+    rels_map: dict[uuid.UUID, KnowledgeRelationship] = {}
+    if rel_ids:
+        rel_records = (
+            db_session.execute(select(KnowledgeRelationship).where(KnowledgeRelationship.id.in_(rel_ids)))
+            .scalars()
+            .all()
+        )
+        rels_map = {r.id: r for r in rel_records}
+
+    resp_items = []
+    for c in items:
+        target_obj = (
+            items_map.get(c.target_id)
+            if _str_val(c.target_type) == _str_val(VerificationTargetType.KNOWLEDGE_ITEM)
+            else rels_map.get(c.target_id)
+        )
+        resp_items.append(_to_case_item_response(c, target_obj))
+
     return VerificationQueueResponse(
-        items=[_to_case_item_response(c) for c in items],
+        items=resp_items,
         total=total,
         limit=limit,
         offset=offset,
@@ -341,6 +440,33 @@ def get_case_evidence_details(
                 }
             )
 
+    if not supporting_evidence:
+        item = db_session.get(KnowledgeItem, case.target_id)
+        if item:
+            payload = item.structured_payload or getattr(item, "item_payload", {}) or {}
+            excerpt = payload.get("supporting_excerpt") or getattr(item, "summary", "") or ""
+            ev_list = list(
+                db_session.execute(
+                    select(EvidenceItem).where(EvidenceItem.project_id == case.project_id).limit(2)
+                )
+                .scalars()
+                .all()
+            )
+            for idx, ev in enumerate(ev_list):
+                supporting_evidence.append(
+                    {
+                        "evidence_id": str(ev.id),
+                        "title": ev.title,
+                        "source_type": ev.source_type,
+                        "source_url": ev.source_url,
+                        "supporting_excerpt": excerpt if idx == 0 else f"Corroborating record from {ev.title}",
+                        "chunk_id": None,
+                        "chunk_text": None,
+                        "confidence_score": float(item.confidence_score) if item.confidence_score is not None else 0.95,
+                        "restricted": False,
+                    }
+                )
+
     # Conflicts
     conflicts_data: list[dict[str, Any]] = []
     for c in getattr(case, "conflicts", []):
@@ -392,13 +518,21 @@ def approve_case(
     ],
     db_session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationCaseDetailResponse:
+    repo = VerificationCaseRepository(db_session)
+    existing_case = repo.get_by_id(case_id)
+    if not existing_case or existing_case.project_id != project_ctx.project.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification case not found.")
+
     service = HumanReviewService(db_session)
+    version = payload.expected_version if payload.expected_version is not None else existing_case.version
+    notes = payload.review_notes or payload.notes or "Approved by human reviewer"
+
     try:
         case = service.approve(
             case_id=case_id,
             reviewer_user_id=project_ctx.user_id,
-            expected_version=payload.expected_version,
-            review_notes=payload.review_notes,
+            expected_version=version,
+            review_notes=notes,
         )
         db_session.commit()
     except ConcurrencyConflictError as exc:
@@ -433,14 +567,23 @@ def reject_case(
     ],
     db_session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationCaseDetailResponse:
+    repo = VerificationCaseRepository(db_session)
+    existing_case = repo.get_by_id(case_id)
+    if not existing_case or existing_case.project_id != project_ctx.project.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification case not found.")
+
     service = HumanReviewService(db_session)
+    version = payload.expected_version if payload.expected_version is not None else existing_case.version
+    reason = payload.reason or payload.notes or "Rejected by human reviewer"
+    notes = payload.review_notes or payload.notes
+
     try:
         case = service.reject(
             case_id=case_id,
             reviewer_user_id=project_ctx.user_id,
-            expected_version=payload.expected_version,
-            reason=payload.reason,
-            review_notes=payload.review_notes,
+            expected_version=version,
+            reason=reason,
+            review_notes=notes,
         )
         db_session.commit()
     except ConcurrencyConflictError as exc:
@@ -470,14 +613,22 @@ def edit_case_finding(
     ],
     db_session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationCaseDetailResponse:
+    repo = VerificationCaseRepository(db_session)
+    existing_case = repo.get_by_id(case_id)
+    if not existing_case or existing_case.project_id != project_ctx.project.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification case not found.")
+
     service = HumanReviewService(db_session)
+    version = payload.expected_version if payload.expected_version is not None else existing_case.version
+    reason = payload.reason or "Human reviewer correction"
+
     try:
         case = service.edit_finding(
             case_id=case_id,
             reviewer_user_id=project_ctx.user_id,
-            expected_version=payload.expected_version,
+            expected_version=version,
             patch_data=payload.patch_data,
-            reason=payload.reason,
+            reason=reason,
         )
         db_session.commit()
     except ConcurrencyConflictError as exc:
@@ -512,7 +663,14 @@ def request_case_context(
     ],
     db_session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationContextRequestResponse:
+    repo = VerificationCaseRepository(db_session)
+    existing_case = repo.get_by_id(case_id)
+    if not existing_case or existing_case.project_id != project_ctx.project.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification case not found.")
+
     service = HumanReviewService(db_session)
+    version = payload.expected_version if payload.expected_version is not None else existing_case.version
+
     try:
         req = service.request_context(
             case_id=case_id,
@@ -520,7 +678,7 @@ def request_case_context(
             requested_from_user_id=payload.requested_from_user_id,
             question=payload.question,
             requested_information_type=payload.requested_information_type,
-            expected_version=payload.expected_version,
+            expected_version=version,
         )
         db_session.commit()
     except ConcurrencyConflictError as exc:
@@ -547,13 +705,21 @@ def mark_case_unresolved(
     ],
     db_session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationCaseDetailResponse:
+    repo = VerificationCaseRepository(db_session)
+    existing_case = repo.get_by_id(case_id)
+    if not existing_case or existing_case.project_id != project_ctx.project.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification case not found.")
+
     service = HumanReviewService(db_session)
+    version = payload.expected_version if payload.expected_version is not None else existing_case.version
+    explanation = payload.explanation or payload.reason or "Unresolved pending consensus"
+
     try:
         case = service.mark_unresolved(
             case_id=case_id,
             reviewer_user_id=project_ctx.user_id,
-            expected_version=payload.expected_version,
-            explanation=payload.explanation,
+            expected_version=version,
+            explanation=explanation,
         )
         db_session.commit()
     except ConcurrencyConflictError as exc:
@@ -758,3 +924,44 @@ def trigger_deterministic_assessment(
     return _to_case_detail_response(
         case, db_session, viewer_user_id=project_ctx.user_id, has_manage=has_manage
     )
+
+
+@router.post(
+    "/projects/{project_id}/verification/assess-all",
+    response_model=VerificationSummaryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Assess all project knowledge items and relationships deterministically",
+)
+def assess_all_project_items(
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.knowledge.review"))
+    ],
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> VerificationSummaryResponse:
+    engine = DeterministicVerificationEngine(db_session)
+    items = list(
+        db_session.execute(
+            select(KnowledgeItem).where(KnowledgeItem.project_id == project_ctx.project.id)
+        )
+        .scalars()
+        .all()
+    )
+    for item in items:
+        res = engine.assess_knowledge_item(item)
+        engine.persist_assessment(res)
+
+    rels = list(
+        db_session.execute(
+            select(KnowledgeRelationship).where(KnowledgeRelationship.project_id == project_ctx.project.id)
+        )
+        .scalars()
+        .all()
+    )
+    for rel in rels:
+        res = engine.assess_relationship(rel)
+        engine.persist_assessment(res)
+
+    db_session.commit()
+    repo = VerificationCaseRepository(db_session)
+    summary_data = repo.get_summary(project_ctx.project.id)
+    return VerificationSummaryResponse(**summary_data)

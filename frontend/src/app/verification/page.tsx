@@ -1,7 +1,8 @@
 "use client";
 
-import { Phase2ModuleView } from "../../components/views/Phase2ModuleView";
+import React from "react";
+import { VerificationCenterWorkspace } from "../../components/verification/VerificationCenterWorkspace";
 
 export default function VerificationPage() {
-  return <Phase2ModuleView moduleKey="verification" />;
+  return <VerificationCenterWorkspace />;
 }

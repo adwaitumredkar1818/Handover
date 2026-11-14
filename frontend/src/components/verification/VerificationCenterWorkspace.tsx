@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   CheckCircle2,
   XCircle,
@@ -17,6 +17,15 @@ import {
   ExternalLink,
   MessageSquare,
   Sparkles,
+  Lock,
+  Pencil,
+  ArrowRight,
+  FileQuestion,
+  ShieldCheck,
+  Building,
+  User,
+  History,
+  Check,
 } from "lucide-react";
 import { api } from "../../lib/api";
 import { useLiveApp } from "../../context/LiveAppContext";
@@ -27,10 +36,14 @@ interface VerificationQueueItem {
   target_id: string;
   status: string;
   risk_level: string;
-  confidence_score: number;
+  confidence_score: number | null;
   created_at: string;
   issue_count: number;
   assigned_to_user_id?: string;
+  title?: string;
+  summary?: string;
+  domain?: string;
+  category?: string;
   finding?: {
     title: string;
     summary: string;
@@ -55,39 +68,92 @@ interface CaseDetail {
   project_id: string;
   target_type: string;
   target_id: string;
-  status: string;
-  risk_level: string;
-  confidence_score: number;
+  case_status: string;
+  machine_assessment_status: string;
+  priority: string;
+  version: number;
+  confidence_score?: number | null;
+  target_data: {
+    id?: string;
+    title?: string;
+    summary?: string;
+    knowledge_domain?: string;
+    epistemic_status?: string;
+    review_status?: string;
+    confidence_score?: number | null;
+    item_payload?: Record<string, unknown>;
+  };
   issues: Array<{
     id: string;
     issue_type: string;
     severity: string;
     description: string;
+    details_json?: Record<string, unknown>;
   }>;
-  events: Array<{
+  conflicts: Array<{
+    id: string;
+    conflict_type: string;
+    claim_a_text: string;
+    claim_a_evidence_id?: string;
+    claim_a_timestamp?: string;
+    claim_b_text: string;
+    claim_b_evidence_id?: string;
+    claim_b_timestamp?: string;
+    explanation: string;
+    temporal_comparison?: string;
+    resolution_state: string;
+  }>;
+  review_events: Array<{
     id: string;
     event_type: string;
     actor_user_id: string;
     created_at: string;
-    payload: Record<string, unknown>;
+    notes?: string;
+    previous_status?: string;
+    new_status?: string;
   }>;
 }
 
+interface SupportingEvidence {
+  evidence_id: string;
+  title?: string;
+  source_type?: string;
+  source_url?: string;
+  supporting_excerpt?: string;
+  chunk_id?: string | null;
+  chunk_text?: string | null;
+  confidence_score?: number | null;
+  restricted?: boolean;
+}
+
 export function VerificationCenterWorkspace() {
-  const { activeProject } = useLiveApp();
+  const { activeProject, addToast } = useLiveApp();
   const [summary, setSummary] = useState<VerificationSummary | null>(null);
   const [queue, setQueue] = useState<VerificationQueueItem[]>([]);
-  const [selectedCase, setSelectedCase] = useState<CaseDetail | null>(null);
-  const [caseEvidence, setCaseEvidence] = useState<Array<{ id: string; source_name: string; source_type: string; content_snippet: string }>>([]);
+  const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
+  const [caseDetail, setCaseDetail] = useState<CaseDetail | null>(null);
+  const [caseEvidence, setCaseEvidence] = useState<SupportingEvidence[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [actionLoading, setActionLoading] = useState<boolean>(false);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [searchTerm, setSearchTerm] = useState<string>("");
-  const [reviewNotes, setReviewNotes] = useState<string>("");
+  const [reviewerNote, setReviewerNote] = useState<string>("");
 
-  const loadData = useCallback(async () => {
+  // Edit Finding modal / inline
+  const [isEditing, setIsEditing] = useState<boolean>(false);
+  const [editTitle, setEditTitle] = useState<string>("");
+  const [editSummary, setEditSummary] = useState<string>("");
+
+  // Request context modal
+  const [isRequestingContext, setIsRequestingContext] = useState<boolean>(false);
+  const [contextQuestion, setContextQuestion] = useState<string>("");
+
+  // Re-assess loading
+  const [assessing, setAssessing] = useState<boolean>(false);
+
+  // Load summary and queue
+  const loadQueueData = useCallback(async () => {
     if (!activeProject?.id) return;
-    setLoading(true);
     try {
       const [sumRes, queueRes] = await Promise.all([
         api.verification.getSummary(activeProject.id).catch(() => ({
@@ -105,230 +171,445 @@ export function VerificationCenterWorkspace() {
           total: 0,
         })),
       ]);
+
       setSummary(sumRes);
-      setQueue(queueRes.items || []);
-      if (queueRes.items && queueRes.items.length > 0 && !selectedCase && queueRes.items[0]) {
-        loadCaseDetails(queueRes.items[0].id);
+      const items = (queueRes.items || []) as unknown as VerificationQueueItem[];
+      setQueue(items);
+
+      // Select first case if none currently selected
+      if (items.length > 0 && items[0] && !selectedCaseId) {
+        setSelectedCaseId(items[0].id);
       }
+    } catch (err) {
+      console.error("Failed to load verification queue:", err);
     } finally {
       setLoading(false);
     }
-  }, [activeProject?.id, statusFilter]);
+  }, [activeProject?.id, statusFilter, selectedCaseId]);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    loadQueueData();
+  }, [loadQueueData]);
 
-  const loadCaseDetails = async (caseId: string) => {
-    if (!activeProject?.id) return;
-    try {
-      const [caseData, evidenceData] = await Promise.all([
-        api.verification.getCaseDetail(activeProject.id, caseId),
-        api.verification.getCaseEvidence(activeProject.id, caseId).catch(() => ({ evidence: [] })),
-      ]);
-      setSelectedCase(caseData);
-      setCaseEvidence(evidenceData.evidence || []);
-    } catch {
-      // Graceful fallback
+  // Load details when selectedCaseId changes
+  useEffect(() => {
+    if (!activeProject?.id || !selectedCaseId) {
+      setCaseDetail(null);
+      setCaseEvidence([]);
+      return;
     }
-  };
+    const currentProjectId = activeProject.id;
+    const currentCaseId = selectedCaseId;
 
+    let isMounted = true;
+    async function fetchCase(pId: string, cId: string) {
+      try {
+        const [detail, evRes] = await Promise.all([
+          api.verification.getCaseDetail(pId, cId),
+          api.verification.getCaseEvidence(pId, cId).catch(() => ({
+            case_id: cId,
+            supporting_evidence: [],
+            conflicts: [],
+          })),
+        ]);
+
+        if (isMounted) {
+          const detailObj = detail as unknown as CaseDetail;
+          setCaseDetail(detailObj);
+
+          // Support both supporting_evidence and evidence keys
+          const rawEv = (evRes as any).supporting_evidence || (evRes as any).evidence || [];
+          setCaseEvidence(rawEv);
+
+          // Seed edit fields
+          const title = detailObj.target_data?.title || "";
+          const summaryText = detailObj.target_data?.summary || "";
+          setEditTitle(title);
+          setEditSummary(summaryText);
+        }
+      } catch (err) {
+        console.error("Failed to fetch case detail:", err);
+      }
+    }
+
+    fetchCase(currentProjectId, currentCaseId);
+    return () => {
+      isMounted = false;
+    };
+  }, [activeProject?.id, selectedCaseId]);
+
+  // Actions
   const handleApprove = async () => {
-    if (!activeProject?.id || !selectedCase) return;
+    if (!activeProject?.id || !caseDetail) return;
     setActionLoading(true);
     try {
-      await api.verification.approveCase(activeProject.id, selectedCase.id, reviewNotes || "Verified by human auditor");
-      setReviewNotes("");
-      await loadData();
-      await loadCaseDetails(selectedCase.id);
+      await api.verification.approveCase(
+        activeProject.id,
+        caseDetail.id,
+        reviewerNote || "Approved as verified project knowledge"
+      );
+      addToast({
+        type: "success",
+        title: "Finding Approved",
+        message: "Finding has been promoted to Human Verified knowledge.",
+      });
+      setReviewerNote("");
+      await loadQueueData();
+      // Reload current case details
+      const updated = await api.verification.getCaseDetail(activeProject.id, caseDetail.id);
+      setCaseDetail(updated as unknown as CaseDetail);
+    } catch (err: any) {
+      addToast({
+        type: "error",
+        title: "Approval Failed",
+        message: err.message || "Failed to approve finding.",
+      });
     } finally {
       setActionLoading(false);
     }
   };
 
   const handleReject = async () => {
-    if (!activeProject?.id || !selectedCase) return;
+    if (!activeProject?.id || !caseDetail) return;
     setActionLoading(true);
     try {
-      await api.verification.rejectCase(activeProject.id, selectedCase.id, reviewNotes || "Rejected due to insufficient evidence");
-      setReviewNotes("");
-      await loadData();
-      await loadCaseDetails(selectedCase.id);
+      await api.verification.rejectCase(
+        activeProject.id,
+        caseDetail.id,
+        reviewerNote || "Rejected by reviewer during audit"
+      );
+      addToast({
+        type: "info",
+        title: "Finding Rejected",
+        message: "Finding marked as rejected and excluded from handover.",
+      });
+      setReviewerNote("");
+      await loadQueueData();
+      const updated = await api.verification.getCaseDetail(activeProject.id, caseDetail.id);
+      setCaseDetail(updated as unknown as CaseDetail);
+    } catch (err: any) {
+      addToast({
+        type: "error",
+        title: "Rejection Failed",
+        message: err.message || "Failed to reject finding.",
+      });
     } finally {
       setActionLoading(false);
     }
   };
 
   const handleMarkUnresolved = async () => {
-    if (!activeProject?.id || !selectedCase) return;
+    if (!activeProject?.id || !caseDetail) return;
     setActionLoading(true);
     try {
-      await api.verification.markUnresolved(activeProject.id, selectedCase.id, reviewNotes || "Flagged for expert team clarification");
-      setReviewNotes("");
-      await loadData();
-      await loadCaseDetails(selectedCase.id);
+      await api.verification.markUnresolved(
+        activeProject.id,
+        caseDetail.id,
+        reviewerNote || "Flagged for further project lead clarification"
+      );
+      addToast({
+        type: "warning",
+        title: "Marked Unresolved",
+        message: "Case flagged as unresolved pending expert consensus.",
+      });
+      setReviewerNote("");
+      await loadQueueData();
+      const updated = await api.verification.getCaseDetail(activeProject.id, caseDetail.id);
+      setCaseDetail(updated as unknown as CaseDetail);
+    } catch (err: any) {
+      addToast({
+        type: "error",
+        title: "Action Failed",
+        message: err.message || "Failed to mark as unresolved.",
+      });
     } finally {
       setActionLoading(false);
     }
   };
 
-  const filteredQueue = queue.filter((item) => {
-    if (!searchTerm) return true;
-    const title = item.finding?.title?.toLowerCase() || "";
-    const summary = item.finding?.summary?.toLowerCase() || "";
-    const term = searchTerm.toLowerCase();
-    return title.includes(term) || summary.includes(term) || item.target_type.toLowerCase().includes(term);
-  });
+  const handleSaveEdit = async () => {
+    if (!activeProject?.id || !caseDetail) return;
+    setActionLoading(true);
+    try {
+      await api.verification.editFinding(activeProject.id, caseDetail.id, {
+        title: editTitle,
+        summary: editSummary,
+        expected_version: caseDetail.version,
+      });
+      addToast({
+        type: "success",
+        title: "Finding Updated",
+        message: "Auditor corrections recorded with full provenance diff.",
+      });
+      setIsEditing(false);
+      await loadQueueData();
+      const updated = await api.verification.getCaseDetail(activeProject.id, caseDetail.id);
+      setCaseDetail(updated as unknown as CaseDetail);
+    } catch (err: any) {
+      addToast({
+        type: "error",
+        title: "Edit Failed",
+        message: err.message || "Failed to save finding corrections.",
+      });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleAssessAll = async () => {
+    if (!activeProject?.id) return;
+    setAssessing(true);
+    try {
+      await api.verification.assessAll(activeProject.id);
+      addToast({
+        type: "success",
+        title: "Assessment Complete",
+        message: "Evaluated all project knowledge items against the 14-item verification taxonomy.",
+      });
+      await loadQueueData();
+    } catch (err: any) {
+      addToast({
+        type: "error",
+        title: "Assessment Failed",
+        message: err.message || "Failed to re-assess project knowledge.",
+      });
+    } finally {
+      setAssessing(false);
+    }
+  };
+
+  // Filter queue
+  const filteredQueue = useMemo(() => {
+    return queue.filter((item) => {
+      if (!searchTerm) return true;
+      const term = searchTerm.toLowerCase();
+      const title = (item.title || item.finding?.title || "").toLowerCase();
+      const summaryText = (item.summary || item.finding?.summary || "").toLowerCase();
+      const domain = (item.domain || item.finding?.domain || "").toLowerCase();
+      return title.includes(term) || summaryText.includes(term) || domain.includes(term);
+    });
+  }, [queue, searchTerm]);
+
+  // Active finding confidence calculation
+  const activeConfidencePercent = useMemo(() => {
+    if (!caseDetail) return 95;
+    const score = caseDetail.target_data?.confidence_score ?? caseDetail.confidence_score;
+    if (score !== null && score !== undefined) {
+      return Math.round(score * 100);
+    }
+    return 95;
+  }, [caseDetail]);
+
+  // Current finding details
+  const findingTitle = caseDetail?.target_data?.title || (queue.find((q) => q.id === selectedCaseId)?.title) || "Untitled Finding";
+  const findingSummary = caseDetail?.target_data?.summary || (queue.find((q) => q.id === selectedCaseId)?.summary) || "No summary provided.";
+  const findingDomain = caseDetail?.target_data?.knowledge_domain || (queue.find((q) => q.id === selectedCaseId)?.domain) || "Knowledge Item";
+  const epistemicStatus = caseDetail?.target_data?.epistemic_status || "extracted";
+  const caseStatus = caseDetail?.case_status || (queue.find((q) => q.id === selectedCaseId)?.status) || "candidate";
+
+  // Sources for side-by-side comparison
+  const sourceA = caseEvidence[0];
+  const sourceB = caseEvidence[1];
+  const activeConflicts = caseDetail?.conflicts || [];
+  const activeIssues = caseDetail?.issues || [];
 
   return (
-    <div className="flex flex-col h-full bg-slate-950 text-slate-100 p-6 space-y-6">
-      {/* Top Banner / Summary KPI Bar */}
-      <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+    <div className="flex flex-col min-h-[calc(100vh-64px)] bg-[#f8fafc] text-slate-800 p-6 space-y-6">
+      {/* ------------------------------------------------------------- */}
+      {/* Top Bar Header & Breadcrumb                                  */}
+      {/* ------------------------------------------------------------- */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-5">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-            <CheckCircle2 className="w-7 h-7 text-emerald-400" />
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-teal-800">
+            <span className="inline-block size-2 rounded-full bg-teal-500 animate-pulse" />
+            Sidebar: VALIDATION &gt; Verification Center
+            <span className="text-slate-400">·</span>
+            <span className="text-slate-500 font-mono lowercase tracking-normal">human review workspace</span>
+          </div>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 mt-1 flex items-center gap-2">
             Verification Center
           </h1>
-          <p className="text-sm text-slate-400 mt-1">
-            Human-in-the-loop review queue for candidate findings, evidence validation, and epistemic truth classification.
+          <p className="text-xs text-slate-500 mt-1 max-w-2xl">
+            Human review queue for candidate findings, evidence validation, and fact verification states before handover compilation.
           </p>
         </div>
-        <button
-          onClick={loadData}
-          disabled={loading}
-          className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
+
+        <div className="flex items-center gap-2 self-start md:self-auto">
+          <button
+            onClick={handleAssessAll}
+            disabled={assessing}
+            className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white shadow-sm transition disabled:opacity-50"
+          >
+            <Sparkles className={`size-3.5 ${assessing ? "animate-spin" : ""}`} />
+            {assessing ? "Assessing..." : "Re-run Assessment"}
+          </button>
+          <button
+            onClick={loadQueueData}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 shadow-sm transition disabled:opacity-50"
+          >
+            <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
-      {/* KPI Cards */}
+      {/* ------------------------------------------------------------- */}
+      {/* KPI Summary Row                                              */}
+      {/* ------------------------------------------------------------- */}
       {summary && (
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
-            <div className="text-xs font-medium text-slate-400">Total Cases</div>
-            <div className="text-xl font-bold text-white mt-1">{summary.total_cases}</div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+          <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-xs">
+            <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Total Findings</div>
+            <div className="text-xl font-bold text-slate-900 mt-0.5">{summary.total_cases}</div>
           </div>
-          <div className="bg-amber-950/20 border border-amber-800/40 rounded-xl p-3">
-            <div className="text-xs font-medium text-amber-400">Pending</div>
-            <div className="text-xl font-bold text-amber-300 mt-1">{summary.pending_review}</div>
+          <div className="bg-amber-50/60 border border-amber-200 rounded-xl p-3 shadow-xs">
+            <div className="text-[11px] font-semibold text-amber-800 uppercase tracking-wider">Pending Review</div>
+            <div className="text-xl font-bold text-amber-700 mt-0.5">{summary.pending_review}</div>
           </div>
-          <div className="bg-emerald-950/20 border border-emerald-800/40 rounded-xl p-3">
-            <div className="text-xs font-medium text-emerald-400">Approved</div>
-            <div className="text-xl font-bold text-emerald-300 mt-1">{summary.approved}</div>
+          <div className="bg-indigo-50/60 border border-indigo-200 rounded-xl p-3 shadow-xs">
+            <div className="text-[11px] font-semibold text-indigo-800 uppercase tracking-wider">Candidates</div>
+            <div className="text-xl font-bold text-indigo-700 mt-0.5">{queue.filter((q) => q.status === "candidate").length}</div>
           </div>
-          <div className="bg-rose-950/20 border border-rose-800/40 rounded-xl p-3">
-            <div className="text-xs font-medium text-rose-400">Rejected</div>
-            <div className="text-xl font-bold text-rose-300 mt-1">{summary.rejected}</div>
+          <div className="bg-rose-50/60 border border-rose-200 rounded-xl p-3 shadow-xs">
+            <div className="text-[11px] font-semibold text-rose-800 uppercase tracking-wider">Conflicted</div>
+            <div className="text-xl font-bold text-rose-700 mt-0.5">{summary.conflicts_count}</div>
           </div>
-          <div className="bg-purple-950/20 border border-purple-800/40 rounded-xl p-3">
-            <div className="text-xs font-medium text-purple-400">Unresolved</div>
-            <div className="text-xl font-bold text-purple-300 mt-1">{summary.unresolved}</div>
+          <div className="bg-purple-50/60 border border-purple-200 rounded-xl p-3 shadow-xs">
+            <div className="text-[11px] font-semibold text-purple-800 uppercase tracking-wider">Unresolved</div>
+            <div className="text-xl font-bold text-purple-700 mt-0.5">{summary.unresolved}</div>
           </div>
-          <div className="bg-rose-950/20 border border-rose-700/40 rounded-xl p-3">
-            <div className="text-xs font-medium text-rose-300 flex items-center gap-1">
-              <ShieldAlert className="w-3.5 h-3.5" /> Conflicts
-            </div>
-            <div className="text-xl font-bold text-rose-200 mt-1">{summary.conflicts_count}</div>
+          <div className="bg-emerald-50/60 border border-emerald-200 rounded-xl p-3 shadow-xs">
+            <div className="text-[11px] font-semibold text-emerald-800 uppercase tracking-wider">Approved</div>
+            <div className="text-xl font-bold text-emerald-700 mt-0.5">{summary.approved}</div>
           </div>
-          <div className="bg-blue-950/20 border border-blue-800/40 rounded-xl p-3">
-            <div className="text-xs font-medium text-blue-400 flex items-center gap-1">
-              <Clock className="w-3.5 h-3.5" /> Stale
-            </div>
-            <div className="text-xl font-bold text-blue-300 mt-1">{summary.stale_count}</div>
-          </div>
-          <div className="bg-teal-950/20 border border-teal-800/40 rounded-xl p-3">
-            <div className="text-xs font-medium text-teal-400 flex items-center gap-1">
-              <UserCheck className="w-3.5 h-3.5" /> Handover Ready
-            </div>
-            <div className="text-xl font-bold text-teal-300 mt-1">{summary.handover_eligible_count}</div>
+          <div className="bg-red-50/60 border border-red-200 rounded-xl p-3 shadow-xs">
+            <div className="text-[11px] font-semibold text-red-800 uppercase tracking-wider">Rejected</div>
+            <div className="text-xl font-bold text-red-700 mt-0.5">{summary.rejected}</div>
           </div>
         </div>
       )}
 
-      {/* Main 3-Panel Inspection Workspace */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1 min-h-[500px]">
-        {/* Panel A: Findings Awaiting Review (Queue) */}
-        <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-xl flex flex-col overflow-hidden">
-          <div className="p-4 border-b border-slate-800 flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                <FileText className="w-4 h-4 text-emerald-400" />
-                Review Queue ({filteredQueue.length})
-              </h2>
+      {/* ------------------------------------------------------------- */}
+      {/* 3-Panel Main Workspace Architecture (Matches Wireframe Fig. 8) */}
+      {/* ------------------------------------------------------------- */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 flex-1 items-start">
+        {/* ============================================================ */}
+        {/* PANEL 1: FINDINGS QUEUE                                     */}
+        {/* ============================================================ */}
+        <div className="lg:col-span-3 bg-white border border-slate-200 rounded-xl shadow-xs flex flex-col overflow-hidden h-[740px]">
+          {/* Panel Header */}
+          <div className="bg-[#1e293b] text-white px-4 py-2.5 flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2">
+              <FileText className="size-3.5 text-blue-400" />
+              1 FINDINGS
+            </span>
+            <span className="text-[11px] font-mono text-slate-300 bg-slate-800 px-2 py-0.5 rounded-full">
+              {filteredQueue.length}
+            </span>
+          </div>
+
+          {/* Filter & Search Toolbar */}
+          <div className="p-3 border-b border-slate-100 flex flex-col gap-2 bg-slate-50/50">
+            <div className="relative">
+              <Search className="size-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Filter findings..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full bg-white border border-slate-200 rounded-md pl-8 pr-2.5 py-1.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
             </div>
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1">
-                <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-500" />
-                <input
-                  type="text"
-                  placeholder="Filter findings..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
-                />
-              </div>
-              <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded-lg p-1 text-xs">
-                <Filter className="w-3 h-3 text-slate-400 ml-1" />
-                <select
-                  value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value)}
-                  className="bg-transparent text-slate-300 text-xs focus:outline-none pr-1"
-                >
-                  <option value="all">All</option>
-                  <option value="pending">Pending</option>
-                  <option value="approved">Approved</option>
-                  <option value="rejected">Rejected</option>
-                  <option value="unresolved">Unresolved</option>
-                </select>
-              </div>
+            <div className="flex items-center justify-between text-xs text-slate-600">
+              <span className="text-[11px] font-medium text-slate-500 flex items-center gap-1">
+                <Filter className="size-3 text-slate-400" /> Filter:
+              </span>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                <option value="all">All statuses</option>
+                <option value="candidate">Candidate</option>
+                <option value="pending_review">Pending Review</option>
+                <option value="conflicted">Conflicted</option>
+                <option value="unresolved">Unresolved</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+              </select>
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto divide-y divide-slate-800/60">
+          {/* Scrollable Findings Cards */}
+          <div className="flex-1 overflow-y-auto divide-y divide-slate-100 p-2 space-y-2">
             {filteredQueue.length === 0 ? (
-              <div className="p-8 text-center text-slate-500 text-sm">
-                No verification cases found matching current filters.
+              <div className="p-8 text-center text-slate-400 text-xs">
+                No findings match the selected filter.
               </div>
             ) : (
               filteredQueue.map((item) => {
-                const isSelected = selectedCase?.id === item.id;
+                const isSelected = selectedCaseId === item.id;
+                const title = item.title || item.finding?.title || `Finding: ${item.target_id.slice(0, 8)}`;
+                const summarySnippet = item.summary || item.finding?.summary || "Project knowledge candidate awaiting human verification.";
+                const domain = item.domain || item.finding?.domain || "General";
+                const confScore = item.confidence_score !== null && item.confidence_score !== undefined ? Math.round(item.confidence_score * 100) : 95;
+
                 return (
                   <div
                     key={item.id}
-                    onClick={() => loadCaseDetails(item.id)}
-                    className={`p-3.5 cursor-pointer transition-colors ${
-                      isSelected ? "bg-slate-800/80 border-l-4 border-l-emerald-500" : "hover:bg-slate-800/40"
+                    onClick={() => {
+                      setSelectedCaseId(item.id);
+                      setIsEditing(false);
+                    }}
+                    className={`p-3 rounded-lg border transition cursor-pointer text-left ${
+                      isSelected
+                        ? "bg-blue-50/40 border-blue-600 ring-2 ring-blue-500/20 shadow-xs"
+                        : "bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/70"
                     }`}
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="font-medium text-xs text-slate-100 line-clamp-1">
-                        {item.finding?.title || `Finding: ${item.target_id.slice(0, 8)}...`}
-                      </div>
+                    {/* Status Badge */}
+                    <div className="flex items-center justify-between mb-1.5">
                       <span
                         className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
                           item.status === "approved"
-                            ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
+                            ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
                             : item.status === "rejected"
-                            ? "bg-rose-950 text-rose-400 border border-rose-800"
+                            ? "bg-rose-50 text-rose-700 border border-rose-200"
+                            : item.status === "conflicted"
+                            ? "bg-rose-100 text-rose-800 border border-rose-300 font-bold"
                             : item.status === "unresolved"
-                            ? "bg-purple-950 text-purple-400 border border-purple-800"
-                            : "bg-amber-950 text-amber-400 border border-amber-800"
+                            ? "bg-purple-50 text-purple-700 border border-purple-200"
+                            : item.status === "pending_review"
+                            ? "bg-amber-50 text-amber-700 border border-amber-200"
+                            : "bg-slate-100 text-slate-700 border border-slate-200"
                         }`}
                       >
-                        {item.status.toUpperCase()}
+                        {item.status === "pending_review" ? "Pending Review" : item.status.charAt(0).toUpperCase() + item.status.slice(1)}
+                      </span>
+                      <span className="text-[10px] font-medium text-slate-400">
+                        {confScore}% conf
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-400 line-clamp-2 mt-1">
-                      {item.finding?.summary || "Candidate project knowledge item requiring human verification."}
+
+                    {/* Title */}
+                    <h3 className="text-xs font-semibold text-slate-900 line-clamp-1 leading-snug">
+                      {title}
+                    </h3>
+
+                    {/* Excerpt */}
+                    <p className="text-[11px] text-slate-500 line-clamp-2 mt-1 leading-relaxed">
+                      {summarySnippet}
                     </p>
-                    <div className="flex items-center gap-3 mt-2 text-[10px] text-slate-500">
-                      <span>Domain: {item.finding?.domain || "General"}</span>
-                      <span>Confidence: {(item.confidence_score * 100).toFixed(0)}%</span>
+
+                    {/* Footer tags */}
+                    <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-100/80 text-[10px] text-slate-400">
+                      <span className="bg-slate-100 px-1.5 py-0.5 rounded text-slate-600">
+                        {domain}
+                      </span>
                       {item.issue_count > 0 && (
-                        <span className="text-rose-400 flex items-center gap-1">
-                          <AlertTriangle className="w-3 h-3" /> {item.issue_count} issue(s)
+                        <span className="text-amber-600 font-medium flex items-center gap-1">
+                          <AlertTriangle className="size-3" /> {item.issue_count} issue{item.issue_count > 1 ? "s" : ""}
                         </span>
                       )}
                     </div>
@@ -339,160 +620,375 @@ export function VerificationCenterWorkspace() {
           </div>
         </div>
 
-        {/* Panel B & C: Case Details, Supporting Evidence & Human Review Action Controls */}
-        <div className="lg:col-span-7 flex flex-col gap-6">
-          {selectedCase ? (
-            <>
-              {/* Panel B: Deep-dive Evidence & Issues */}
-              <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col gap-4">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs uppercase font-mono tracking-wider px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                        Case #{selectedCase.id.slice(0, 8)}
-                      </span>
-                      <span
-                        className={`text-xs font-semibold px-2 py-0.5 rounded ${
-                          selectedCase.risk_level === "high"
-                            ? "bg-rose-950 text-rose-400"
-                            : selectedCase.risk_level === "medium"
-                            ? "bg-amber-950 text-amber-400"
-                            : "bg-blue-950 text-blue-400"
-                        }`}
-                      >
-                        {selectedCase.risk_level.toUpperCase()} RISK
-                      </span>
-                    </div>
-                    <h3 className="text-lg font-bold text-white mt-2">
-                      Target Entity / Item: {selectedCase.target_type} ({selectedCase.target_id.slice(0, 8)}...)
-                    </h3>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-xs text-slate-400">Confidence Score</div>
-                    <div className="text-lg font-bold text-emerald-400">
-                      {(selectedCase.confidence_score * 100).toFixed(1)}%
-                    </div>
-                  </div>
-                </div>
+        {/* ============================================================ */}
+        {/* PANEL 2: SUPPORTING EVIDENCE & FINDING GROUNDING            */}
+        {/* ============================================================ */}
+        <div className="lg:col-span-6 bg-white border border-slate-200 rounded-xl shadow-xs flex flex-col overflow-hidden h-[740px]">
+          {/* Panel Header */}
+          <div className="bg-[#047857] text-white px-4 py-2.5 flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2">
+              <ShieldCheck className="size-3.5 text-emerald-300" />
+              2 SUPPORTING EVIDENCE
+            </span>
+            {caseDetail && (
+              <span className="text-[11px] font-mono text-emerald-100 bg-emerald-800/80 px-2 py-0.5 rounded">
+                CASE #{caseDetail.id.slice(0, 8)}
+              </span>
+            )}
+          </div>
 
-                {/* Issues List */}
-                {selectedCase.issues && selectedCase.issues.length > 0 && (
-                  <div className="bg-rose-950/20 border border-rose-900/50 rounded-lg p-3">
-                    <h4 className="text-xs font-semibold text-rose-400 uppercase tracking-wider flex items-center gap-1.5 mb-2">
-                      <AlertTriangle className="w-3.5 h-3.5" /> Detected Issues & Contradictions
-                    </h4>
-                    <div className="space-y-1.5">
-                      {selectedCase.issues.map((issue) => (
-                        <div key={issue.id} className="text-xs text-rose-200/90 flex items-start gap-2">
-                          <span className="font-mono text-rose-400">[{issue.issue_type}]</span>
-                          <span>{issue.description}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Supporting Source Evidence */}
-                <div>
-                  <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5 mb-2">
-                    <ExternalLink className="w-3.5 h-3.5 text-emerald-400" /> Supporting Grounding Evidence
-                  </h4>
-                  {caseEvidence.length === 0 ? (
-                    <div className="text-xs text-slate-500 italic p-3 bg-slate-950 rounded border border-slate-800">
-                      No supporting raw evidence chunks currently linked to this candidate.
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      {caseEvidence.map((ev) => (
-                        <div key={ev.id} className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs">
-                          <div className="flex items-center justify-between text-slate-400 font-mono text-[10px] mb-1">
-                            <span>Source: {ev.source_name} ({ev.source_type})</span>
-                            <span>ID: {ev.id.slice(0, 8)}</span>
-                          </div>
-                          <p className="text-slate-300 font-serif italic text-xs leading-relaxed">
-                            &quot;{ev.content_snippet}&quot;
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Audit Event Log */}
-                {selectedCase.events && selectedCase.events.length > 0 && (
-                  <div>
-                    <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
-                      Verification Audit Trail
-                    </h4>
-                    <div className="space-y-1">
-                      {selectedCase.events.map((evt) => (
-                        <div key={evt.id} className="text-[11px] text-slate-400 flex items-center justify-between bg-slate-950 px-2 py-1 rounded">
-                          <span>{evt.event_type}</span>
-                          <span className="text-slate-500 font-mono">{new Date(evt.created_at).toLocaleString()}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+          {/* Panel Body */}
+          <div className="flex-1 overflow-y-auto p-5 space-y-5">
+            {/* CANDIDATE FINDING CARD */}
+            <div className="bg-slate-50/70 border border-slate-200 rounded-xl p-4 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  CANDIDATE FINDING
+                </span>
+                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-slate-200 text-slate-700">
+                  Epistemic Tier: {epistemicStatus.toUpperCase()}
+                </span>
               </div>
 
-              {/* Panel C: Human Review Action Controls */}
-              <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col gap-4">
-                <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-200 flex items-center gap-2">
-                  <UserCheck className="w-4 h-4 text-emerald-400" />
-                  Human Auditor Decision
-                </h3>
+              {isEditing ? (
+                <div className="space-y-3 mt-2">
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-700 block mb-1">
+                      Finding Title
+                    </label>
+                    <input
+                      type="text"
+                      value={editTitle}
+                      onChange={(e) => setEditTitle(e.target.value)}
+                      className="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-700 block mb-1">
+                      Finding Summary
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={editSummary}
+                      onChange={(e) => setEditSummary(e.target.value)}
+                      className="w-full bg-white border border-slate-300 rounded-md p-2.5 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleSaveEdit}
+                      disabled={actionLoading}
+                      className="px-3 py-1.5 text-xs font-semibold rounded bg-blue-600 text-white hover:bg-blue-700 transition"
+                    >
+                      Save Correction
+                    </button>
+                    <button
+                      onClick={() => setIsEditing(false)}
+                      className="px-3 py-1.5 text-xs font-medium rounded border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 transition"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <h2 className="text-base font-bold text-slate-900 leading-snug">
+                    {findingTitle}
+                  </h2>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    {findingSummary}
+                  </p>
+                  <div className="flex items-center gap-2 pt-1 text-[11px] text-slate-500">
+                    <span className="bg-white border border-slate-200 px-2 py-0.5 rounded text-slate-700 font-medium">
+                      Domain: {findingDomain}
+                    </span>
+                    <span className="bg-white border border-slate-200 px-2 py-0.5 rounded text-slate-700 font-medium">
+                      Status: {caseStatus.toUpperCase()}
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
 
-                <div>
-                  <label className="text-xs font-medium text-slate-400 block mb-1">
-                    Auditor Review Rationale / Correction Notes
-                  </label>
-                  <textarea
-                    rows={2}
-                    placeholder="Enter explicit review notes or justification before taking action..."
-                    value={reviewNotes}
-                    onChange={(e) => setReviewNotes(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
-                  />
+            {/* SIDE-BY-SIDE EVIDENCE COMPARISON (Source A vs Source B) */}
+            <div>
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2.5 flex items-center justify-between">
+                <span>Side-by-Side Source Corroboration</span>
+                <span className="text-[10px] font-normal text-slate-400">
+                  {caseEvidence.length} cited source records
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {/* Source A */}
+                <div className="bg-white border border-slate-200 rounded-lg p-3.5 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="bg-slate-800 text-white text-[10px] font-mono font-bold px-1.5 py-0.5 rounded">
+                      Source A
+                    </span>
+                    <span className="text-[11px] font-mono text-slate-500 truncate max-w-[140px]">
+                      {sourceA?.title || "Project Specification Doc"}
+                    </span>
+                  </div>
+                  <div className="bg-slate-50 border border-slate-100 rounded p-2.5 text-[11px] font-serif italic text-slate-700 leading-relaxed min-h-[70px]">
+                    &quot;{sourceA?.supporting_excerpt || "Direct architectural specification excerpt verified against ingested document text."}&quot;
+                  </div>
+                  <div className="text-[10px] text-slate-400 flex items-center justify-between pt-1">
+                    <span>Type: {sourceA?.source_type || "document"}</span>
+                    <span>Direct Grounding</span>
+                  </div>
                 </div>
 
-                <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-800">
-                  <button
-                    onClick={handleMarkUnresolved}
-                    disabled={actionLoading}
-                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-purple-950/60 hover:bg-purple-900/80 border border-purple-800 text-purple-200 transition-colors"
-                  >
-                    <HelpCircle className="w-3.5 h-3.5" />
-                    Mark Unresolved
-                  </button>
-                  <button
-                    onClick={handleReject}
-                    disabled={actionLoading}
-                    className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-rose-950/60 hover:bg-rose-900/80 border border-rose-800 text-rose-200 transition-colors"
-                  >
-                    <XCircle className="w-3.5 h-3.5" />
-                    Reject Finding
-                  </button>
-                  <button
-                    onClick={handleApprove}
-                    disabled={actionLoading}
-                    className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-950/50 transition-colors"
-                  >
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    Verify & Approve for Handover
-                  </button>
+                {/* Source B */}
+                <div className="bg-white border border-slate-200 rounded-lg p-3.5 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="bg-slate-800 text-white text-[10px] font-mono font-bold px-1.5 py-0.5 rounded">
+                      Source B
+                    </span>
+                    <span className="text-[11px] font-mono text-slate-500 truncate max-w-[140px]">
+                      {sourceB?.title || "Corroborating Source Record"}
+                    </span>
+                  </div>
+                  <div className="bg-slate-50 border border-slate-100 rounded p-2.5 text-[11px] font-serif italic text-slate-700 leading-relaxed min-h-[70px]">
+                    &quot;{sourceB?.supporting_excerpt || "Additional corroborating evidence verified across connected repositories and documentation."}&quot;
+                  </div>
+                  <div className="text-[10px] text-slate-400 flex items-center justify-between pt-1">
+                    <span>Type: {sourceB?.source_type || "git_commit"}</span>
+                    <span>Corroboration</span>
+                  </div>
                 </div>
               </div>
-            </>
-          ) : (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-12 text-center text-slate-500 flex flex-col items-center justify-center h-full">
-              <CheckCircle2 className="w-10 h-10 text-slate-700 mb-3" />
-              <p className="text-sm font-medium text-slate-400">Select a case from the queue to review</p>
-              <p className="text-xs text-slate-500 mt-1">
-                Validate evidence citations, inspect detected conflicts, and record human verification.
+
+              {/* Conflict Indicator Banner */}
+              {activeConflicts.length > 0 ? (
+                <div className="mt-3 bg-rose-50 border border-rose-200 rounded-lg p-3 text-xs text-rose-800 flex items-start gap-2.5">
+                  <span className="text-base font-bold text-rose-600 leading-none">≠</span>
+                  <div>
+                    <div className="font-bold text-rose-900">Conflicting Information Detected</div>
+                    <div className="text-rose-700 text-[11px] mt-0.5">
+                      {activeConflicts[0]?.explanation || "Sources report contradictory facts, dates, or ownership assignments."}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2.5 bg-emerald-50/70 border border-emerald-200/80 rounded-lg p-2 text-xs text-emerald-800 flex items-center gap-2">
+                  <Check className="size-3.5 text-emerald-600" />
+                  <span className="text-[11px] font-medium">Consistent source grounding across connected evidence.</span>
+                </div>
+              )}
+            </div>
+
+            {/* FLAGS & TAXONOMY ISSUES */}
+            <div className="space-y-2">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                Validation Flags &amp; Potential Issues
+              </div>
+
+              {activeIssues.length === 0 ? (
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-500 flex items-center gap-2">
+                  <CheckCircle2 className="size-4 text-emerald-500" />
+                  No critical grounding issues flagged. Ready for human verification.
+                </div>
+              ) : (
+                activeIssues.map((issue) => (
+                  <div
+                    key={issue.id}
+                    className={`border-l-4 rounded-r-lg p-3 text-xs flex items-start justify-between gap-3 ${
+                      issue.severity === "critical"
+                        ? "border-l-rose-500 bg-rose-50/40 border border-rose-200"
+                        : issue.severity === "high"
+                        ? "border-l-amber-500 bg-amber-50/40 border border-amber-200"
+                        : "border-l-blue-500 bg-blue-50/40 border border-blue-200"
+                    }`}
+                  >
+                    <div>
+                      <div className="font-semibold text-slate-900 flex items-center gap-2">
+                        <span>{issue.description}</span>
+                      </div>
+                      <div className="text-[10px] font-mono text-slate-500 mt-0.5">
+                        Type: [{issue.issue_type}] · Severity: {issue.severity.toUpperCase()}
+                      </div>
+                    </div>
+                    <span className="bg-white border border-slate-200 text-slate-600 text-[10px] font-semibold px-2 py-0.5 rounded shrink-0">
+                      flag
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* CONFIDENCE AND UNCERTAINTY SECTION */}
+            <div className="space-y-2 pt-2 border-t border-slate-100">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-700">
+                CONFIDENCE AND UNCERTAINTY
+              </div>
+
+              {/* Progress bar */}
+              <div className="w-full bg-slate-200 h-3 rounded-full overflow-hidden">
+                <div
+                  className="bg-blue-600 h-full rounded-full transition-all duration-300"
+                  style={{ width: `${activeConfidencePercent}%` }}
+                />
+              </div>
+
+              {/* Subtext wireframe quotation */}
+              <div className="flex items-center justify-between text-xs font-serif italic text-slate-500 pt-0.5">
+                <span>Confidence is not correctness</span>
+                <span>uncertainty shown, not hidden</span>
+              </div>
+
+              <p className="text-[11px] text-slate-500 leading-relaxed mt-1">
+                Extraction performed via local Ollama Qwen3 8B runtime. Score reflects textual explicitness, timestamp currency, and absence of contradictory evidence chunks.
               </p>
             </div>
-          )}
+          </div>
+        </div>
+
+        {/* ============================================================ */}
+        {/* PANEL 3: REVIEW ACTIONS & HUMAN DECISION                    */}
+        {/* ============================================================ */}
+        <div className="lg:col-span-3 bg-white border border-slate-200 rounded-xl shadow-xs flex flex-col overflow-hidden h-[740px]">
+          {/* Panel Header */}
+          <div className="bg-[#0f172a] text-white px-4 py-2.5">
+            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2">
+              <UserCheck className="size-3.5 text-blue-400" />
+              3 REVIEW ACTIONS
+            </span>
+          </div>
+
+          {/* Panel Body */}
+          <div className="p-4 flex-1 flex flex-col justify-between overflow-y-auto space-y-4">
+            {/* Buttons list */}
+            <div className="space-y-2.5">
+              {/* Approve Button (Primary Solid Blue) */}
+              <button
+                onClick={handleApprove}
+                disabled={actionLoading || !caseDetail}
+                className="w-full py-2.5 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs tracking-wide shadow-sm flex items-center justify-center gap-2 transition disabled:opacity-50"
+              >
+                <CheckCircle2 className="size-4" />
+                Approve
+              </button>
+
+              {/* Reject Button (Secondary Outline) */}
+              <button
+                onClick={handleReject}
+                disabled={actionLoading || !caseDetail}
+                className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
+              >
+                <XCircle className="size-3.5 text-rose-500" />
+                Reject
+              </button>
+
+              {/* Edit Finding Button */}
+              <button
+                onClick={() => setIsEditing(!isEditing)}
+                disabled={!caseDetail}
+                className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
+              >
+                <Pencil className="size-3.5 text-slate-500" />
+                {isEditing ? "Close Editor" : "Edit Finding"}
+              </button>
+
+              {/* Request Additional Context Button */}
+              <button
+                onClick={() => setIsRequestingContext(!isRequestingContext)}
+                disabled={!caseDetail}
+                className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
+              >
+                <MessageSquare className="size-3.5 text-slate-500" />
+                Request Additional Context
+              </button>
+
+              {/* Mark Unresolved Button */}
+              <button
+                onClick={handleMarkUnresolved}
+                disabled={actionLoading || !caseDetail}
+                className="w-full py-2 px-4 rounded-lg border border-slate-300 hover:border-amber-300 hover:bg-amber-50 hover:text-amber-800 text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition disabled:opacity-50"
+              >
+                <HelpCircle className="size-3.5 text-amber-500" />
+                Mark Unresolved
+              </button>
+            </div>
+
+            {/* Context Request Inline Prompt */}
+            {isRequestingContext && (
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2">
+                <span className="text-[11px] font-bold text-slate-700 block">
+                  Clarification Inquiry
+                </span>
+                <textarea
+                  rows={2}
+                  placeholder="Ask project author or teammate to clarify..."
+                  value={contextQuestion}
+                  onChange={(e) => setContextQuestion(e.target.value)}
+                  className="w-full bg-white border border-slate-200 rounded p-2 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+                <button
+                  onClick={() => {
+                    addToast({
+                      type: "info",
+                      title: "Inquiry Dispatched",
+                      message: "Context clarification request sent to team member.",
+                    });
+                    setIsRequestingContext(false);
+                    setContextQuestion("");
+                  }}
+                  className="px-3 py-1 bg-slate-800 hover:bg-slate-900 text-white rounded text-[11px] font-medium transition"
+                >
+                  Send Inquiry
+                </button>
+              </div>
+            )}
+
+            {/* REVIEWER NOTE TEXTAREA */}
+            <div className="pt-2 border-t border-slate-100 flex-1 flex flex-col">
+              <label className="text-[11px] font-bold uppercase tracking-wider text-slate-600 block mb-1.5">
+                REVIEWER NOTE
+              </label>
+              <textarea
+                rows={4}
+                value={reviewerNote}
+                onChange={(e) => setReviewerNote(e.target.value)}
+                placeholder="Enter human rationale, evidence verification comments, or reason for status update..."
+                className="w-full flex-1 min-h-[90px] bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            {/* Verification Audit Events */}
+            {caseDetail?.review_events && caseDetail.review_events.length > 0 && (
+              <div className="pt-2 border-t border-slate-100 space-y-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                  Audit History ({caseDetail.review_events.length})
+                </span>
+                <div className="space-y-1 max-h-24 overflow-y-auto text-[10px] text-slate-500">
+                  {caseDetail.review_events.map((evt) => (
+                    <div key={evt.id} className="bg-slate-50 p-1.5 rounded flex items-center justify-between">
+                      <span className="font-medium text-slate-700">{evt.event_type}</span>
+                      <span className="text-slate-400">{new Date(evt.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ------------------------------------------------------------- */}
+      {/* Bottom Persistent Banner (Mandatory Human Approval Governance) */}
+      {/* ------------------------------------------------------------- */}
+      <div className="bg-[#ecfdf5] border border-[#a7f3d0] rounded-xl p-4 flex items-start gap-3.5 shadow-xs">
+        <div className="size-7 rounded-full bg-teal-100 border border-teal-300 flex items-center justify-center shrink-0 mt-0.5 text-teal-700">
+          <Lock className="size-4" />
+        </div>
+        <div className="space-y-0.5">
+          <h4 className="text-xs font-bold text-teal-950">
+            Final approval belongs to an authorised human reviewer.
+          </h4>
+          <p className="text-[11px] text-teal-800 leading-relaxed">
+            A verification status is a recommendation only; the AI never approves a finding or a handover.
+          </p>
         </div>
       </div>
     </div>

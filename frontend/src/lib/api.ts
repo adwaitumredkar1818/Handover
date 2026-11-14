@@ -890,6 +890,11 @@ export const api = {
     async getHandoverEligibility(projectId: string, caseId: string): Promise<{ is_eligible: boolean; reason?: string }> {
       return request(`/projects/${projectId}/verification/cases/${caseId}/eligibility`);
     },
+    async assessAll(projectId: string): Promise<Record<string, unknown>> {
+      return request(`/projects/${projectId}/verification/assess-all`, {
+        method: "POST",
+      });
+    },
   },
   handover: {
     async listCases(projectId: string): Promise<{

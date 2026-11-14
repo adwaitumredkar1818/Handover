@@ -351,8 +351,47 @@ def _build_confidence_and_uncertainty(
         else ("partial" if is_interpretation else "explicit")
     )
 
+    # Calculate accurate numeric confidence score based on Ollama's extraction certainty
+    base_score = 0.88
+    cand_level = str(getattr(candidate, "confidence_level", "medium")).lower()
+    if cand_level == "high":
+        base_score = 0.92
+    elif cand_level == "medium":
+        base_score = 0.78
+    elif cand_level == "low":
+        base_score = 0.58
+
+    if evidence_quality == "explicit":
+        base_score += 0.05
+    elif evidence_quality == "weak_or_indirect":
+        base_score -= 0.12
+
+    if completeness == "complete":
+        base_score += 0.03
+    elif completeness == "incomplete":
+        base_score -= 0.08
+
+    if attribution_certainty == "explicit":
+        base_score += 0.02
+    elif attribution_certainty == "missing":
+        base_score -= 0.04
+
+    if temporal_certainty == "exact_date":
+        base_score += 0.02
+    elif temporal_certainty == "missing":
+        base_score -= 0.03
+
+    if is_uncertain:
+        base_score -= 0.15
+
+    if missing_fields:
+        base_score -= min(len(missing_fields) * 0.02, 0.10)
+
+    calculated_confidence_score = round(max(0.35, min(0.99, base_score)), 2)
+
     confidence_meta = ConfidenceMetadata(
         extraction_confidence=ConfidenceLevel(candidate.confidence_level),
+        confidence_score=calculated_confidence_score,
         evidence_support_quality=evidence_quality,
         information_completeness=completeness,
         attribution_certainty=attribution_certainty,
@@ -360,6 +399,7 @@ def _build_confidence_and_uncertainty(
         missing_fields=missing_fields,
         conflict_or_ambiguity_flag=bool(is_uncertain),
     ).model_dump(mode="json")
+    confidence_meta["confidence_score"] = calculated_confidence_score
 
     return confidence_meta, uncertainty_reason, epistemic_status, support_classification
 

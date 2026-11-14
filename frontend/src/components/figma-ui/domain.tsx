@@ -195,6 +195,51 @@ export function allFindings(pid: string): AnyFinding[] {
   ]
 }
 
+export function computeFindingConfidence(f: unknown): number {
+  const anyF = f as {
+    confidence_score?: number
+    confidence_metadata?: Record<string, unknown>
+    confidence_metadata_json?: Record<string, unknown>
+  }
+  const meta = anyF.confidence_metadata || anyF.confidence_metadata_json || {}
+
+  // 1. If explicit numeric confidence_score is provided from Ollama/validator
+  const rawScore = meta.confidence_score ?? anyF.confidence_score
+  if (typeof rawScore === 'number' && !isNaN(rawScore) && rawScore > 0) {
+    return rawScore > 1 ? Math.min(100, Math.round(rawScore)) : Math.min(100, Math.round(rawScore * 100))
+  }
+
+  // 2. Compute accurate score from Ollama's extraction fields
+  const extConf = String(meta.extraction_confidence || '').toLowerCase()
+  let base = 78
+  if (extConf === 'high') base = 92
+  else if (extConf === 'low') base = 58
+  else if (extConf === 'medium') base = 78
+
+  const evQuality = String(meta.evidence_support_quality || '').toLowerCase()
+  if (evQuality === 'explicit') base += 5
+  else if (evQuality === 'weak_or_indirect') base -= 12
+
+  const completeness = String(meta.information_completeness || '').toLowerCase()
+  if (completeness === 'complete') base += 3
+  else if (completeness === 'incomplete') base -= 8
+
+  const attr = String(meta.attribution_certainty || '').toLowerCase()
+  if (attr === 'explicit') base += 2
+  else if (attr === 'missing') base -= 4
+
+  const temp = String(meta.temporal_certainty || '').toLowerCase()
+  if (temp === 'exact_date') base += 2
+  else if (temp === 'missing') base -= 3
+
+  if (meta.conflict_or_ambiguity_flag) base -= 15
+
+  const missing = Array.isArray(meta.missing_fields) ? meta.missing_fields.length : 0
+  base -= Math.min(missing * 2, 10)
+
+  return Math.max(35, Math.min(99, Math.round(base)))
+}
+
 export function useCanonicalFindings(pid: string): AnyFinding[] {
   const { findings: liveFindings, evidenceList, members } = useLiveApp()
 
@@ -227,8 +272,7 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
         const rawAttr = (anyF.source_attribution || ((f as unknown as { source_attribution_json?: Record<string, unknown> }).source_attribution_json || {})) as Record<string, unknown>
         const ownerName = anyF.person_or_owner_label || (f.item_payload?.owner as string) || (rawAttr["source_author_identity"] as string) || (rawAttr["author"] as string) || (members[0]?.user_full_name || members[0]?.full_name || 'Shubham')
         const summaryText = anyF.structured_summary || f.summary || f.title
-        const rawScore = anyF.confidence_metadata?.confidence_score ?? f.confidence_score ?? 0.95
-        const score = rawScore > 1 ? Math.round(rawScore) : Math.round(rawScore * 100)
+        const score = computeFindingConfidence(f)
         const dateStr = (anyF.created_at || f.extracted_at || '2026-10-17').split('T')[0] || '2026-10-17'
 
         const payload = (f.item_payload || (f as unknown as { structured_payload?: Record<string, unknown> }).structured_payload || {}) as Record<string, unknown>

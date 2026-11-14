@@ -116,6 +116,17 @@ class VerificationCaseItemResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # Rich finding metadata for list browsing
+    title: str | None = None
+    summary: str | None = None
+    domain: str | None = None
+    category: str | None = None
+    confidence_score: float | None = None
+    finding: dict[str, Any] | None = None
+    status: str | None = None
+    risk_level: str | None = None
+    issue_count: int | None = None
+
 
 class VerificationCaseDetailResponse(BaseModel):
     """Complete detail schema for inspecting and reviewing a case."""
@@ -174,26 +185,28 @@ class VerificationSummaryResponse(BaseModel):
 class ApproveCaseRequest(BaseModel):
     """Request payload to approve a finding or relationship."""
 
-    expected_version: int = Field(ge=1, description="Current optimistic version of the case.")
+    expected_version: int | None = Field(default=None, description="Current optimistic version of the case.")
     review_notes: str | None = Field(default=None, max_length=2000)
+    notes: str | None = Field(default=None, max_length=2000)
 
 
 class RejectCaseRequest(BaseModel):
     """Request payload to reject a candidate finding or relationship."""
 
-    expected_version: int = Field(ge=1)
-    reason: str = Field(min_length=3, max_length=500)
+    expected_version: int | None = Field(default=None)
+    reason: str = Field(default="Rejected during review", max_length=500)
     review_notes: str | None = Field(default=None, max_length=2000)
+    notes: str | None = Field(default=None, max_length=2000)
 
 
 class EditFindingRequest(BaseModel):
     """Request payload to correct finding details with diff tracking."""
 
-    expected_version: int = Field(ge=1)
+    expected_version: int | None = Field(default=None)
     patch_data: dict[str, Any] = Field(
         description="Fields to patch (title, summary, item_payload)."
     )
-    reason: str = Field(min_length=3, max_length=500)
+    reason: str = Field(default="Auditor correction", max_length=500)
 
 
 class RequestContextRequest(BaseModel):
@@ -208,8 +221,9 @@ class RequestContextRequest(BaseModel):
 class MarkUnresolvedRequest(BaseModel):
     """Request payload to mark a case as unresolved."""
 
-    expected_version: int = Field(ge=1)
-    explanation: str = Field(min_length=5, max_length=2000)
+    expected_version: int | None = Field(default=None)
+    explanation: str = Field(default="Unresolved - consensus not established", max_length=2000)
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class AssignReviewerRequest(BaseModel):
