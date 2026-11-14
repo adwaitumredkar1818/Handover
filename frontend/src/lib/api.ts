@@ -896,6 +896,89 @@ export const api = {
       });
     },
   },
+  conflicts: {
+    async getSummary(projectId: string): Promise<{
+      total_conflicts: number;
+      unresolved_count: number;
+      reconciled_count: number;
+      superseded_count: number;
+      dismissed_count: number;
+      by_type: Record<string, number>;
+    }> {
+      return request(`/projects/${projectId}/conflicts/summary`);
+    },
+    async list(
+      projectId: string,
+      resolutionState?: string,
+      conflictType?: string,
+      limit: number = 50,
+      offset: number = 0
+    ): Promise<{
+      items: Array<{
+        id: string;
+        case_id: string;
+        conflict_type: string;
+        claim_a_text: string;
+        claim_a_source_evidence_id: string;
+        claim_a_chunk_id?: string | null;
+        claim_a_source_timestamp?: string | null;
+        claim_a_source_title?: string | null;
+        claim_a_source_type?: string | null;
+        claim_b_text: string;
+        claim_b_source_evidence_id: string;
+        claim_b_chunk_id?: string | null;
+        claim_b_source_timestamp?: string | null;
+        claim_b_source_title?: string | null;
+        claim_b_source_type?: string | null;
+        explanation: string;
+        temporal_comparison: string;
+        resolution_state: string;
+        resolution_notes?: string | null;
+        resolved_by_user_id?: string | null;
+        resolved_at?: string | null;
+        created_at: string;
+        target_id?: string | null;
+        target_type?: string | null;
+        target_title?: string | null;
+        target_category?: string | null;
+      }>;
+      total: number;
+      unresolved_count: number;
+      reconciled_count: number;
+      superseded_count: number;
+      dismissed_count: number;
+    }> {
+      const qs = new URLSearchParams();
+      if (resolutionState && resolutionState !== "all") qs.append("resolution_state", resolutionState);
+      if (conflictType && conflictType !== "all") qs.append("conflict_type", conflictType);
+      qs.append("limit", limit.toString());
+      qs.append("offset", offset.toString());
+      return request(`/projects/${projectId}/conflicts?${qs.toString()}`);
+    },
+    async resolve(
+      projectId: string,
+      conflictId: string,
+      payload: {
+        resolution_state: string;
+        resolution_notes: string;
+        preferred_claim?: string;
+      }
+    ): Promise<Record<string, unknown>> {
+      return request(`/projects/${projectId}/conflicts/${conflictId}/resolve`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    async detect(projectId: string): Promise<{
+      detected_count: number;
+      new_conflicts_count: number;
+      message: string;
+    }> {
+      return request(`/projects/${projectId}/conflicts/detect`, {
+        method: "POST",
+      });
+    },
+  },
   handover: {
     async listCases(projectId: string): Promise<{
       items: Array<{

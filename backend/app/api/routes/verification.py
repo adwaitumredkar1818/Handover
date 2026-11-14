@@ -19,6 +19,8 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_db_session, require_project_permission
 from app.models.enums import (
+    ConflictResolutionState,
+    ConflictType,
     ContextRequestStatus,
     VerificationCaseStatus,
     VerificationPriority,
@@ -27,19 +29,24 @@ from app.models.enums import (
 from app.models.evidence import EvidenceItem
 from app.models.knowledge import KnowledgeEvidenceLink, KnowledgeItem
 from app.models.relationship import KnowledgeRelationship
-from app.models.verification import VerificationCase
+from app.models.verification import VerificationCase, VerificationConflict
 from app.repositories.verification import (
     VerificationCaseRepository,
+    VerificationConflictRepository,
     VerificationContextRequestRepository,
 )
 from app.schemas.verification import (
     ApproveCaseRequest,
     AssignReviewerRequest,
+    ConflictListResponse,
+    ConflictSummaryResponse,
+    DetectConflictsResponse,
     EditFindingRequest,
     HandoverEligibilityResponse,
     MarkUnresolvedRequest,
     RejectCaseRequest,
     RequestContextRequest,
+    ResolveConflictRequest,
     RespondContextRequest,
     VerificationCaseDetailResponse,
     VerificationCaseItemResponse,
@@ -50,6 +57,7 @@ from app.schemas.verification import (
     VerificationReviewEventResponse,
     VerificationSummaryResponse,
 )
+from app.services.conflict_detection import ConflictDetectionEngine
 from app.services.handover_eligibility import (
     HandoverEligibilityService,
     check_evidence_accessibility,
@@ -965,3 +973,183 @@ def assess_all_project_items(
     repo = VerificationCaseRepository(db_session)
     summary_data = repo.get_summary(project_ctx.project.id)
     return VerificationSummaryResponse(**summary_data)
+
+
+# ==============================================================================
+# Conflicts & Contradictions Endpoints
+# ==============================================================================
+
+
+def _enrich_conflict_response(c: VerificationConflict, db_session: Session) -> VerificationConflictResponse:
+    target_id: uuid.UUID | None = None
+    target_type: str | None = None
+    target_title: str | None = None
+    target_category: str | None = None
+
+    if c.case:
+        target_id = c.case.target_id
+        target_type = _str_val(c.case.target_type)
+        if c.case.target_type == VerificationTargetType.KNOWLEDGE_ITEM:
+            ki = db_session.get(KnowledgeItem, c.case.target_id)
+            if ki:
+                target_title = ki.title
+                target_category = _str_val(ki.category)
+        elif c.case.target_type == VerificationTargetType.RELATIONSHIP:
+            rel = db_session.get(KnowledgeRelationship, c.case.target_id)
+            if rel:
+                target_title = f"{rel.relationship_type.replace('_', ' ').title()}"
+                target_category = "relationship"
+
+    a_ev = c.claim_a_evidence
+    b_ev = c.claim_b_evidence
+
+    return VerificationConflictResponse(
+        id=c.id,
+        case_id=c.case_id,
+        conflict_type=_str_val(c.conflict_type),
+        claim_a_text=c.claim_a_text,
+        claim_a_source_evidence_id=c.claim_a_source_evidence_id,
+        claim_a_chunk_id=c.claim_a_chunk_id,
+        claim_a_source_timestamp=c.claim_a_source_timestamp,
+        claim_a_source_title=a_ev.title if a_ev else None,
+        claim_a_source_type=_str_val(a_ev.source_type) if a_ev else None,
+        claim_b_text=c.claim_b_text,
+        claim_b_source_evidence_id=c.claim_b_source_evidence_id,
+        claim_b_chunk_id=c.claim_b_chunk_id,
+        claim_b_source_timestamp=c.claim_b_source_timestamp,
+        claim_b_source_title=b_ev.title if b_ev else None,
+        claim_b_source_type=_str_val(b_ev.source_type) if b_ev else None,
+        explanation=c.explanation,
+        temporal_comparison=_str_val(c.temporal_comparison),
+        resolution_state=_str_val(c.resolution_state),
+        resolution_notes=c.resolution_notes,
+        resolved_by_user_id=c.resolved_by_user_id,
+        resolved_at=c.resolved_at,
+        created_at=c.created_at,
+        target_id=target_id,
+        target_type=target_type,
+        target_title=target_title,
+        target_category=target_category,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/conflicts",
+    response_model=ConflictListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List all detected cross-source conflicts for the project",
+)
+def list_project_conflicts(
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
+    db_session: Annotated[Session, Depends(get_db_session)],
+    resolution_state: Annotated[str | None, Query()] = None,
+    conflict_type: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ConflictListResponse:
+    repo = VerificationConflictRepository(db_session)
+    items, total = repo.list_by_project(
+        project_ctx.project.id,
+        resolution_state=resolution_state,
+        conflict_type=conflict_type,
+        limit=limit,
+        offset=offset,
+    )
+    summary = repo.get_summary_by_project(project_ctx.project.id)
+
+    enriched_items = [_enrich_conflict_response(c, db_session) for c in items]
+
+    return ConflictListResponse(
+        items=enriched_items,
+        total=total,
+        unresolved_count=summary["unresolved_count"],
+        reconciled_count=summary["reconciled_count"],
+        superseded_count=summary["superseded_count"],
+        dismissed_count=summary["dismissed_count"],
+    )
+
+
+@router.get(
+    "/projects/{project_id}/conflicts/summary",
+    response_model=ConflictSummaryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get aggregated conflict summary for the project",
+)
+def get_project_conflict_summary(
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> ConflictSummaryResponse:
+    repo = VerificationConflictRepository(db_session)
+    summary = repo.get_summary_by_project(project_ctx.project.id)
+    return ConflictSummaryResponse(**summary)
+
+
+@router.post(
+    "/projects/{project_id}/conflicts/{conflict_id}/resolve",
+    response_model=VerificationConflictResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Adjudicate a cross-source conflict with mandatory human notes",
+)
+def resolve_conflict_endpoint(
+    conflict_id: uuid.UUID,
+    payload: ResolveConflictRequest,
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.knowledge.review"))
+    ],
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> VerificationConflictResponse:
+    service = HumanReviewService(db_session)
+    try:
+        norm_state = payload.resolution_state.lower().strip()
+        if norm_state not in ("reconciled", "superseded", "dismissed"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="resolution_state must be 'reconciled', 'superseded', or 'dismissed'",
+            )
+        res_state = ConflictResolutionState(norm_state)
+        conflict = service.resolve_conflict(
+            conflict_id=conflict_id,
+            reviewer_user_id=project_ctx.user_id,
+            resolution_state=res_state,
+            resolution_notes=payload.resolution_notes,
+            preferred_claim=payload.preferred_claim,
+        )
+        db_session.commit()
+    except ReviewValidationError as exc:
+        db_session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    except Exception as exc:
+        db_session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+
+    return _enrich_conflict_response(conflict, db_session)
+
+
+@router.post(
+    "/projects/{project_id}/conflicts/detect",
+    response_model=DetectConflictsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Run cross-source conflict detection on project knowledge items",
+)
+def detect_project_conflicts_endpoint(
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.knowledge.review"))
+    ],
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> DetectConflictsResponse:
+    engine = ConflictDetectionEngine(db_session)
+    new_conflicts = engine.detect_project_conflicts(project_ctx.project.id)
+    db_session.commit()
+
+    repo = VerificationConflictRepository(db_session)
+    summary = repo.get_summary_by_project(project_ctx.project.id)
+
+    return DetectConflictsResponse(
+        detected_count=summary["total_conflicts"],
+        new_conflicts_count=len(new_conflicts),
+        message=f"Conflict detection completed. Found {summary['total_conflicts']} total contradictions across project sources.",
+    )

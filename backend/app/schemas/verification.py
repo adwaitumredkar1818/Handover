@@ -46,15 +46,29 @@ class VerificationConflictResponse(BaseModel):
     claim_a_source_evidence_id: uuid.UUID
     claim_a_chunk_id: uuid.UUID | None = None
     claim_a_source_timestamp: datetime | None = None
+    claim_a_source_title: str | None = None
+    claim_a_source_type: str | None = None
+
     claim_b_text: str
     claim_b_source_evidence_id: uuid.UUID
     claim_b_chunk_id: uuid.UUID | None = None
     claim_b_source_timestamp: datetime | None = None
+    claim_b_source_title: str | None = None
+    claim_b_source_type: str | None = None
+
     explanation: str
     temporal_comparison: str
     resolution_state: str
     resolution_notes: str | None = None
+    resolved_by_user_id: uuid.UUID | None = None
+    resolved_at: datetime | None = None
     created_at: datetime
+
+    # Contextual target metadata
+    target_id: uuid.UUID | None = None
+    target_type: str | None = None
+    target_title: str | None = None
+    target_category: str | None = None
 
 
 class VerificationReviewEventResponse(BaseModel):
@@ -250,3 +264,50 @@ class HandoverEligibilityResponse(BaseModel):
     epistemic_status: str
     blockers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class ConflictListResponse(BaseModel):
+    """Paginated list of detected cross-source conflicts."""
+
+    items: list[VerificationConflictResponse]
+    total: int
+    unresolved_count: int
+    reconciled_count: int
+    superseded_count: int
+    dismissed_count: int
+
+
+class ConflictSummaryResponse(BaseModel):
+    """Aggregated conflict statistics for the project."""
+
+    total_conflicts: int
+    unresolved_count: int
+    reconciled_count: int
+    superseded_count: int
+    dismissed_count: int
+    by_type: dict[str, int] = Field(default_factory=dict)
+
+
+class ResolveConflictRequest(BaseModel):
+    """Request payload to adjudicate a contradiction record."""
+
+    resolution_state: str = Field(
+        description="Resolution state: 'reconciled' | 'superseded' | 'dismissed'"
+    )
+    resolution_notes: str = Field(
+        min_length=3,
+        max_length=2000,
+        description="Mandatory reviewer rationale explaining the adjudication decision",
+    )
+    preferred_claim: str | None = Field(
+        default=None,
+        description="Which claim was accepted: 'a' | 'b' | 'both' | 'dismissed'",
+    )
+
+
+class DetectConflictsResponse(BaseModel):
+    """Response returned after running cross-source conflict detection."""
+
+    detected_count: int
+    new_conflicts_count: int
+    message: str

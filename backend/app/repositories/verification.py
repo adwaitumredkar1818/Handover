@@ -323,6 +323,66 @@ class VerificationConflictRepository:
         self.session.flush()
         return conflict
 
+    def list_by_project(
+        self,
+        project_id: uuid.UUID,
+        *,
+        resolution_state: str | None = None,
+        conflict_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[VerificationConflict], int]:
+        stmt = select(VerificationConflict).where(VerificationConflict.project_id == project_id)
+        if resolution_state and resolution_state.lower() != "all":
+            stmt = stmt.where(VerificationConflict.resolution_state == resolution_state)
+        if conflict_type and conflict_type.lower() != "all":
+            stmt = stmt.where(VerificationConflict.conflict_type == conflict_type)
+
+        count_stmt = select(func.count(VerificationConflict.id)).where(VerificationConflict.project_id == project_id)
+        if resolution_state and resolution_state.lower() != "all":
+            count_stmt = count_stmt.where(VerificationConflict.resolution_state == resolution_state)
+        if conflict_type and conflict_type.lower() != "all":
+            count_stmt = count_stmt.where(VerificationConflict.conflict_type == conflict_type)
+        total = self.session.execute(count_stmt).scalar() or 0
+
+        stmt = (
+            stmt.options(
+                selectinload(VerificationConflict.claim_a_evidence),
+                selectinload(VerificationConflict.claim_b_evidence),
+                selectinload(VerificationConflict.case),
+            )
+            .order_by(VerificationConflict.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        items = list(self.session.execute(stmt).scalars().all())
+        return items, total
+
+    def get_summary_by_project(self, project_id: uuid.UUID) -> dict[str, Any]:
+        """Aggregate counts of conflicts by resolution state and type."""
+        stmt = select(VerificationConflict).where(VerificationConflict.project_id == project_id)
+        all_conflicts = list(self.session.execute(stmt).scalars().all())
+
+        total = len(all_conflicts)
+        unresolved = sum(1 for c in all_conflicts if str(getattr(c, "resolution_state", "")).lower() == "unresolved")
+        reconciled = sum(1 for c in all_conflicts if str(getattr(c, "resolution_state", "")).lower() == "reconciled")
+        superseded = sum(1 for c in all_conflicts if str(getattr(c, "resolution_state", "")).lower() == "superseded")
+        dismissed = sum(1 for c in all_conflicts if str(getattr(c, "resolution_state", "")).lower() == "dismissed")
+
+        by_type: dict[str, int] = {}
+        for c in all_conflicts:
+            ct = str(getattr(c, "conflict_type", ""))
+            by_type[ct] = by_type.get(ct, 0) + 1
+
+        return {
+            "total_conflicts": total,
+            "unresolved_count": unresolved,
+            "reconciled_count": reconciled,
+            "superseded_count": superseded,
+            "dismissed_count": dismissed,
+            "by_type": by_type,
+        }
+
 
 class VerificationReviewEventRepository:
     """Repository for appending and reading VerificationReviewEvent records."""

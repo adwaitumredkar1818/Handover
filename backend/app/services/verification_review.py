@@ -20,9 +20,11 @@ from sqlalchemy.orm import Session
 from app.core.logging import get_correlation_id
 from app.core.security import utc_now
 from app.models.enums import (
+    ConflictResolutionState,
     ContextRequestStatus,
     EpistemicStatus,
     KnowledgeReviewStatus,
+    MachineAssessmentStatus,
     RelationshipVerificationStatus,
     ReviewActionType,
     VerificationCaseStatus,
@@ -33,12 +35,14 @@ from app.models.knowledge import KnowledgeItem
 from app.models.relationship import KnowledgeRelationship
 from app.models.verification import (
     VerificationCase,
+    VerificationConflict,
     VerificationContextRequest,
     VerificationReviewEvent,
 )
 from app.repositories.audit import AuditLogRepository
 from app.repositories.verification import (
     VerificationCaseRepository,
+    VerificationConflictRepository,
     VerificationContextRequestRepository,
     VerificationIssueRepository,
     VerificationReviewEventRepository,
@@ -539,3 +543,85 @@ class HumanReviewService:
         self.session.flush()
         self.session.refresh(case)
         return case
+
+    def resolve_conflict(
+        self,
+        *,
+        conflict_id: uuid.UUID,
+        reviewer_user_id: uuid.UUID,
+        resolution_state: ConflictResolutionState,
+        resolution_notes: str,
+        preferred_claim: str | None = None,
+    ) -> VerificationConflict:
+        """Adjudicate a cross-source contradiction with mandatory human audit notes."""
+        conflict_repo = VerificationConflictRepository(self.session)
+        conflict = conflict_repo.get_by_id(conflict_id)
+        if conflict is None:
+            raise VerificationReviewError(f"Verification conflict {conflict_id} not found.")
+
+        case = conflict.case
+        if case is None:
+            case = self._get_case_or_raise(conflict.case_id)
+
+        # Update conflict record
+        conflict.resolution_state = resolution_state
+        conflict.resolution_notes = resolution_notes
+        conflict.resolved_by_user_id = reviewer_user_id
+        conflict.resolved_at = utc_now()
+
+        # Check remaining unresolved conflicts on this case
+        other_unresolved = [
+            c
+            for c in case.conflicts
+            if c.id != conflict.id and c.resolution_state == ConflictResolutionState.UNRESOLVED
+        ]
+        if not other_unresolved:
+            if case.case_status == VerificationCaseStatus.CONFLICTED:
+                case.case_status = VerificationCaseStatus.PENDING_REVIEW
+            if case.machine_assessment_status == MachineAssessmentStatus.CONFLICT_DETECTED:
+                case.machine_assessment_status = (
+                    MachineAssessmentStatus.ISSUES_DETECTED
+                    if case.issues
+                    else MachineAssessmentStatus.PASSED
+                )
+
+        case.version += 1
+        case.last_reviewed_at = utc_now()
+
+        correlation_id = get_correlation_id()
+        event = VerificationReviewEvent(
+            organisation_id=case.organisation_id,
+            project_id=case.project_id,
+            case=case,
+            case_id=case.id,
+            reviewer_user_id=reviewer_user_id,
+            action=ReviewActionType.EDIT,
+            previous_status=_val(case.case_status),
+            new_status=_val(case.case_status),
+            review_notes=f"Resolved conflict ({conflict.conflict_type}): {resolution_notes}",
+            finding_patch_json={
+                "conflict_id": str(conflict.id),
+                "resolution_state": _val(resolution_state),
+                "preferred_claim": preferred_claim,
+            },
+            correlation_id=correlation_id if correlation_id != "-" else str(uuid.uuid4()),
+        )
+        self.event_repo.create(event)
+
+        self.audit.record_event(
+            actor_user_id=reviewer_user_id,
+            organisation_id=case.organisation_id,
+            project_id=case.project_id,
+            event_type="verification.conflict.resolved",
+            resource_type="verification_conflict",
+            resource_id=str(conflict.id),
+            metadata={
+                "case_id": str(case.id),
+                "resolution_state": _val(resolution_state),
+                "preferred_claim": preferred_claim,
+                "notes": resolution_notes,
+            },
+        )
+
+        self.session.flush()
+        return conflict
