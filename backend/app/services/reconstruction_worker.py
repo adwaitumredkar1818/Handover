@@ -152,6 +152,14 @@ class ReconstructionWorkerService:
         if claimed is None:
             return False
 
+        logger.info(
+            "Claimed knowledge reconstruction run %s for project %s (%d evidence items, categories: %s).",
+            claimed.run_id,
+            claimed.project_id,
+            len(claimed.evidence_ids),
+            [c.value for c in claimed.categories],
+        )
+
         started_perf = time.perf_counter()
         try:
             self._execute_claimed_run(claimed=claimed, started_perf=started_perf)
@@ -210,6 +218,22 @@ class ReconstructionWorkerService:
                     continue
             if not ev_ids and run.evidence_id is not None:
                 ev_ids.append(run.evidence_id)
+            if not ev_ids:
+                from sqlalchemy import case, select
+                from app.models.evidence import EvidenceItem
+                items = session.execute(
+                    select(EvidenceItem.id)
+                    .where(
+                        EvidenceItem.project_id == run.project_id,
+                        EvidenceItem.deleted_at.is_(None),
+                        EvidenceItem.processing_status.in_(tuple(_ELIGIBLE_EVIDENCE_STATUSES)),
+                    )
+                    .order_by(
+                        case((EvidenceItem.source_type == "document_upload", 0), else_=1),
+                        EvidenceItem.created_at.asc(),
+                    )
+                ).scalars().all()
+                ev_ids = list(items)
 
             categories: list[KnowledgeCategory] = []
             seen_cats: set[str] = set()
@@ -375,6 +399,21 @@ class ReconstructionWorkerService:
             raise RuntimeError("Unreachable LLM retry state.")
         raise last_exc
 
+    def _renew_job_lease(self, job_id: uuid.UUID) -> None:
+        """Heartbeat renewal of job lease so it does not expire while waiting on Ollama."""
+        now = utc_now()
+        try:
+            with self._session_factory() as session:
+                job_repo = BackgroundJobRepository(session)
+                job = job_repo.get_by_id(job_id)
+                if job is not None and job.status == BackgroundJobStatus.RUNNING.value:
+                    lease_secs = max(3600, self._ingestion_settings.worker_lease_seconds)
+                    job.lease_expires_at = now + timedelta(seconds=lease_secs)
+                    job.locked_at = now
+                    session.commit()
+        except Exception as exc:
+            logger.debug("Failed to refresh job lease heartbeat: %s", exc)
+
     def _execute_claimed_run(
         self,
         *,
@@ -396,7 +435,14 @@ class ReconstructionWorkerService:
             return
 
         acc = _RunAccumulator()
-        for evidence_id in claimed.evidence_ids:
+        total_ev = len(claimed.evidence_ids)
+        for idx, evidence_id in enumerate(claimed.evidence_ids, start=1):
+            logger.info(
+                "Processing evidence item %s (%d/%d) for knowledge reconstruction...",
+                evidence_id,
+                idx,
+                total_ev,
+            )
             # 1. Load authorised snapshot strictly for ONE evidence item at a time.
             with self._session_factory() as session:
                 ev = EvidenceRepository(session).get_by_id(evidence_id, include_deleted=False)
@@ -441,8 +487,17 @@ class ReconstructionWorkerService:
 
             accepted_drafts: list[Any] = []
             evidence_had_error = False
-            for batch in batches:
+            for b_idx, batch in enumerate(batches, start=1):
                 for category in claimed.categories:
+                    self._renew_job_lease(claimed.job_id)
+                    logger.info(
+                        "Calling Ollama %s for category '%s' (batch %d/%d, %d chunks)...",
+                        self._llm.model_name,
+                        category.value,
+                        b_idx,
+                        len(batches),
+                        len(batch),
+                    )
                     try:
                         llm_res = self._call_llm_with_json_retry(
                             category=category,
@@ -465,6 +520,12 @@ class ReconstructionWorkerService:
                         parsed_json=llm_res.parsed_json,
                         supplied_chunks=batch,
                         is_synthetic=is_synthetic,
+                    )
+                    logger.info(
+                        "Ollama category '%s' returned %d candidate(s), %d grounded & validated.",
+                        category.value,
+                        val_report.candidates_received,
+                        len(val_report.accepted_items),
                     )
                     acc.candidates_generated += val_report.candidates_received
                     acc.claims_rejected_ungrounded += (
@@ -504,7 +565,29 @@ class ReconstructionWorkerService:
             else:
                 acc.processed_items += 1
 
+            try:
+                with self._session_factory() as session:
+                    k_repo = KnowledgeRepository(session)
+                    run_row = k_repo.get_run_by_id(claimed.run_id)
+                    if run_row is not None:
+                        run_row.processed_evidence_items = acc.processed_items
+                        run_row.failed_evidence_items = acc.failed_items
+                        run_row.skipped_evidence_items = acc.skipped_items
+                        run_row.candidates_generated = acc.candidates_generated
+                        run_row.batches_executed = acc.batches_executed
+                        session.commit()
+            except Exception as prog_exc:
+                logger.debug("Failed to record extraction run progress: %s", prog_exc)
+
         elapsed_ms = int((time.perf_counter() - started_perf) * 1000)
+        logger.info(
+            "Knowledge reconstruction run %s finished in %d ms: %d items persisted, %d candidates, %d chunks evaluated.",
+            claimed.run_id,
+            elapsed_ms,
+            acc.claims_persisted,
+            acc.candidates_generated,
+            acc.chunks_evaluated,
+        )
         self._finalize_run(claimed=claimed, acc=acc, duration_ms=elapsed_ms)
 
     def _finalize_denied_run(

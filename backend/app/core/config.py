@@ -258,11 +258,11 @@ class OllamaSettings(BaseModel):
     llm_num_ctx: int = Field(default=8192, ge=2048, le=40960)
     llm_num_predict: int = Field(default=2048, ge=256, le=8192)
     llm_temperature: float = Field(default=0.1, ge=0.0, le=1.0)
-    llm_timeout_seconds: float = Field(default=120.0, gt=1.0, le=600.0)
+    llm_timeout_seconds: float | None = Field(default=None, ge=0.0)
     llm_think: bool = False
     ocr_num_ctx: int = Field(default=8192, ge=2048, le=65536)
     ocr_num_predict: int = Field(default=4096, ge=256, le=16384)
-    ocr_timeout_seconds: float = Field(default=120.0, gt=1.0, le=600.0)
+    ocr_timeout_seconds: float | None = Field(default=None, ge=0.0)
 
     @field_validator("base_url")
     @classmethod
@@ -296,7 +296,7 @@ class IngestionSettings(BaseModel):
     worker_poll_interval_seconds: float = Field(default=5.0, ge=0.2, le=300.0)
     worker_max_attempts: int = Field(default=3, ge=1, le=10)
     worker_retry_base_seconds: int = Field(default=15, ge=1, le=3600)
-    worker_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    worker_lease_seconds: int = Field(default=7200, ge=30, le=86400)
 
     @property
     def max_upload_size_bytes(self) -> int:
@@ -501,11 +501,11 @@ class Settings(BaseSettings):
     ollama_llm_num_ctx: int = Field(default=8192, ge=2048, le=40960)
     ollama_llm_num_predict: int = Field(default=2048, ge=256, le=8192)
     ollama_llm_temperature: float = Field(default=0.1, ge=0.0, le=1.0)
-    ollama_llm_timeout_seconds: float = Field(default=120.0, gt=1.0, le=600.0)
+    ollama_llm_timeout_seconds: float | None = Field(default=None, ge=0.0)
     ollama_llm_think: bool = False
     ollama_ocr_num_ctx: int = Field(default=8192, ge=2048, le=65536)
     ollama_ocr_num_predict: int = Field(default=4096, ge=256, le=16384)
-    ollama_ocr_timeout_seconds: float = Field(default=120.0, gt=1.0, le=600.0)
+    ollama_ocr_timeout_seconds: float | None = Field(default=None, ge=0.0)
 
     # Knowledge reconstruction fields (`settings.extraction`)
     extraction_prompt_version: str = Field(default="p2.6-v1", min_length=1, max_length=64)
@@ -524,7 +524,7 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: float = Field(default=5.0, ge=0.2, le=300.0)
     worker_max_attempts: int = Field(default=3, ge=1, le=10)
     worker_retry_base_seconds: int = Field(default=15, ge=1, le=3600)
-    worker_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    worker_lease_seconds: int = Field(default=7200, ge=30, le=86400)
 
     # Security & storage configuration fields (grouped into `settings.security`)
     jwt_secret_key: SecretStr

@@ -56,11 +56,11 @@ def create_db_engine(settings: Settings) -> Engine:
 
     return create_engine(
         raw_url,
-        pool_pre_ping=False,
+        pool_pre_ping=True,
         pool_size=15,
         max_overflow=25,
         pool_timeout=30,
-        pool_recycle=300,
+        pool_recycle=120,
         connect_args=connect_args,
     )
 

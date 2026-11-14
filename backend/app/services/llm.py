@@ -90,6 +90,8 @@ class StructuredLLMClient(Protocol):
 def parse_llm_json_object(raw_text: str) -> dict[str, Any]:
     """Extract and parse a JSON object cleanly from LLM output text."""
     cleaned = _THINK_BLOCK_RE.sub("", raw_text).strip()
+    if not cleaned:
+        cleaned = raw_text.strip()
     fence_match = _CODE_FENCE_RE.match(cleaned)
     if fence_match:
         cleaned = fence_match.group(1).strip()
@@ -142,7 +144,7 @@ class OllamaLLMClient:
         num_ctx: int = 8192,
         num_predict: int = 2048,
         temperature: float = 0.1,
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float | None = None,
         think: bool = False,
         http_client: httpx.Client | None = None,
         http_transport: httpx.BaseTransport | None = None,
@@ -152,7 +154,9 @@ class OllamaLLMClient:
         self._num_ctx = max(2048, int(num_ctx))
         self._num_predict = max(256, int(num_predict))
         self._temperature = float(temperature)
-        self._timeout_seconds = max(1.0, float(timeout_seconds))
+        self._timeout_seconds = (
+            None if timeout_seconds is None or timeout_seconds <= 0 else float(timeout_seconds)
+        )
         self._think = bool(think)
         self._http_client = http_client
         self._http_transport = http_transport
@@ -260,9 +264,11 @@ class OllamaLLMClient:
         message_obj = raw_json.get("message")
         raw_content = ""
         if isinstance(message_obj, dict):
-            raw_content = str(message_obj.get("content") or "")
+            raw_content = str(message_obj.get("content") or "").strip()
+            if (not raw_content or "{" not in raw_content) and message_obj.get("thinking"):
+                raw_content = str(message_obj.get("thinking") or "").strip()
         elif "response" in raw_json:
-            raw_content = str(raw_json.get("response") or "")
+            raw_content = str(raw_json.get("response") or "").strip()
 
         try:
             parsed = parse_llm_json_object(raw_content)

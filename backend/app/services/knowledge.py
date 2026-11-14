@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -466,7 +466,11 @@ class KnowledgeReconstructionService:
                     EvidenceItem.deleted_at.is_(None),
                     EvidenceItem.processing_status.in_(tuple(_ELIGIBLE_EVIDENCE_STATUSES)),
                 )
-                .order_by(EvidenceItem.created_at.asc(), EvidenceItem.id.asc())
+                .order_by(
+                    case((EvidenceItem.source_type == "document_upload", 0), else_=1),
+                    EvidenceItem.created_at.asc(),
+                    EvidenceItem.id.asc(),
+                )
             )
             all_project_items = list(self._session.execute(stmt).scalars().all())
             for ev in all_project_items:

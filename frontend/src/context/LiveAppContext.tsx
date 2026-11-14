@@ -652,20 +652,33 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const triggerReconstruction = useCallback(async () => {
     if (!activeProject) return;
     try {
+      setIsLoadingFindings(true);
       await api.knowledgeIntelligence.triggerExtraction(activeProject.id);
       addToast({
         type: "success",
-        title: "Reconstruction Triggered",
-        message: "Ollama Qwen3 8B knowledge extraction job queued across canonical domains.",
+        title: "AI Knowledge Reconstruction Started",
+        message: "Ollama Qwen3 8B is reconstructing project knowledge from all gathered sources without timeout.",
       });
       await refreshFindings();
       await refreshOverview();
+
+      // Poll periodically to stream in new findings as Ollama generates them
+      let pollCount = 0;
+      const pollInterval = setInterval(async () => {
+        pollCount += 1;
+        await refreshFindings();
+        if (pollCount >= 12) {
+          clearInterval(pollInterval);
+        }
+      }, 5000);
     } catch (err: unknown) {
       addToast({
         type: "error",
         title: "Reconstruction Failed",
         message: err instanceof Error ? err.message : "Failed to trigger knowledge extraction",
       });
+    } finally {
+      setIsLoadingFindings(false);
     }
   }, [activeProject, refreshFindings, refreshOverview, addToast]);
 
