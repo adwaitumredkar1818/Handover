@@ -16,6 +16,7 @@ import type {
   AssistantConversation,
   AssistantConversationDetail,
   AssistantAnswerResponse,
+  AssistantResponseMode,
 } from "./types";
 
 export function getApiBaseUrl(): string {
@@ -1371,6 +1372,7 @@ export const api = {
       data: {
         question: string;
         mode?: "hybrid" | "keyword" | "semantic";
+        response_mode?: AssistantResponseMode;
         include_domains?: string[];
         max_citations?: number;
       }
@@ -1382,6 +1384,7 @@ export const api = {
           body: JSON.stringify({
             question: data.question,
             mode: data.mode || "hybrid",
+            response_mode: data.response_mode || "standard",
             include_domains: data.include_domains,
             max_citations: data.max_citations || 8,
           }),
@@ -1394,6 +1397,7 @@ export const api = {
       contentOrQuestion: string,
       options?: {
         mode?: "hybrid" | "keyword" | "semantic";
+        response_mode?: AssistantResponseMode;
         include_domains?: string[];
         max_citations?: number;
       }
@@ -1401,6 +1405,7 @@ export const api = {
       return this.askQuestion(projectId, conversationId, {
         question: contentOrQuestion,
         mode: options?.mode,
+        response_mode: options?.response_mode,
         include_domains: options?.include_domains,
         max_citations: options?.max_citations,
       });

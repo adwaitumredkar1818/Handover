@@ -425,11 +425,65 @@ export interface AuditEventItem {
 
 export type AssistantAnswerStatus =
   | "answered"
+  | "partially_answered"
   | "insufficient_evidence"
-  | "conflicting_evidence"
+  | "conflicted_evidence"
+  | "outdated_evidence"
+  | "access_restricted"
+  | "unsupported_query"
+  | "processing_error"
   | "declined";
 
+export type AssistantResponseMode = "standard" | "deep_research" | "deep_think" | "deep_extract";
+
 export type AssistantSenderType = "user" | "assistant";
+
+export interface ResearchReportSection {
+  section_title: string;
+  content: string;
+  citation_labels: string[];
+  key_takeaways: string[];
+}
+
+export interface ResearchReportPayload {
+  executive_summary: string;
+  sections: ResearchReportSection[];
+  cross_source_corroboration: string[];
+  recommendations: string[];
+  coverage_assessment?: string | null;
+}
+
+export interface CausalStep {
+  step_number: number;
+  event_or_decision: string;
+  actor_or_source?: string | null;
+  consequences: string[];
+  citation_labels: string[];
+}
+
+export interface DeepThinkPayload {
+  core_hypothesis: string;
+  causal_chain: CausalStep[];
+  alternative_explanations: string[];
+  tradeoffs_and_risks: string[];
+  synthesis_reasoning: string;
+}
+
+export interface ExtractedRecord {
+  entity_name: string;
+  category: string;
+  attributes: Record<string, unknown>;
+  field_citations: Record<string, string[]>;
+  status_or_state?: string | null;
+}
+
+export interface DeepExtractPayload {
+  target_schema: string;
+  columns: string[];
+  records: ExtractedRecord[];
+  missing_fields: string[];
+  summary: string;
+}
 
 export interface AssistantCitation {
   id?: string;
@@ -474,6 +528,7 @@ export interface AssistantMessage {
   sender_type: AssistantSenderType;
   content: string;
   answer_status?: AssistantAnswerStatus | null;
+  response_mode?: AssistantResponseMode;
   structured_payload_json?: {
     claims?: AssistantClaim[];
     conflicts?: string[];
@@ -481,6 +536,10 @@ export interface AssistantMessage {
     missing_information?: string[];
     suggested_followup_questions?: string[];
     query_type?: string;
+    response_mode?: AssistantResponseMode;
+    research_report?: ResearchReportPayload | null;
+    deep_think?: DeepThinkPayload | null;
+    deep_extract?: DeepExtractPayload | null;
   } | null;
   citations: AssistantCitation[];
   model_name?: string | null;
@@ -501,6 +560,7 @@ export interface AssistantAnswerResponse {
   conversation_id: string;
   answer: string;
   answer_status: AssistantAnswerStatus;
+  response_mode?: AssistantResponseMode;
   query_type: string;
   claims: AssistantClaim[];
   citations: AssistantCitation[];
@@ -508,6 +568,9 @@ export interface AssistantAnswerResponse {
   conflicts: string[];
   missing_information: string[];
   suggested_followup_questions: string[];
+  research_report?: ResearchReportPayload | null;
+  deep_think?: DeepThinkPayload | null;
+  deep_extract?: DeepExtractPayload | null;
   model_name: string;
   retrieval_run_id?: string | null;
   duration_ms: number;

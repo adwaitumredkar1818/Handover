@@ -17,6 +17,7 @@ from app.models.enums import (
     AssistantConversationStatus,
     AssistantFeedbackType,
     AssistantQueryType,
+    AssistantResponseMode,
     AssistantSenderType,
     KnowledgeCategory,
 )
@@ -95,6 +96,70 @@ class AssistantCitationResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Mode-Specific Structured Payloads (Deep Research, Deep Think, Deep Extract)
+# ---------------------------------------------------------------------------
+
+
+class ResearchReportSection(BaseModel):
+    """A major topical section in a Deep Research report."""
+
+    section_title: str
+    content: str
+    citation_labels: list[str] = Field(default_factory=list)
+    key_takeaways: list[str] = Field(default_factory=list)
+
+
+class ResearchReportPayload(BaseModel):
+    """Comprehensive multi-section synthesis produced in DEEP RESEARCH mode."""
+
+    executive_summary: str
+    sections: list[ResearchReportSection] = Field(default_factory=list)
+    cross_source_corroboration: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    coverage_assessment: str | None = None
+
+
+class CausalStep(BaseModel):
+    """A single link in a causal or dependency chain produced in DEEP THINK mode."""
+
+    step_number: int
+    event_or_decision: str
+    actor_or_source: str | None = None
+    consequences: list[str] = Field(default_factory=list)
+    citation_labels: list[str] = Field(default_factory=list)
+
+
+class DeepThinkPayload(BaseModel):
+    """Causal, multi-hop, and counterfactual analysis produced in DEEP THINK mode."""
+
+    core_hypothesis: str
+    causal_chain: list[CausalStep] = Field(default_factory=list)
+    alternative_explanations: list[str] = Field(default_factory=list)
+    tradeoffs_and_risks: list[str] = Field(default_factory=list)
+    synthesis_reasoning: str
+
+
+class ExtractedRecord(BaseModel):
+    """A structured entity record with field-level provenance in DEEP EXTRACT mode."""
+
+    entity_name: str
+    category: str
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    field_citations: dict[str, list[str]] = Field(default_factory=dict)
+    status_or_state: str | None = None
+
+
+class DeepExtractPayload(BaseModel):
+    """Structured entity and tabular extraction produced in DEEP EXTRACT mode."""
+
+    target_schema: str
+    columns: list[str] = Field(default_factory=list)
+    records: list[ExtractedRecord] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    summary: str
+
+
+# ---------------------------------------------------------------------------
 # Message & Q&A Schemas
 # ---------------------------------------------------------------------------
 
@@ -104,6 +169,10 @@ class QuestionRequest(BaseModel):
 
     question: str = Field(..., min_length=2, max_length=10000, description="The user's natural language question")
     mode: str = Field(default="hybrid", description="Retrieval mode: hybrid, keyword, semantic")
+    response_mode: AssistantResponseMode = Field(
+        default=AssistantResponseMode.STANDARD,
+        description="Response reasoning mode: standard, deep_research, deep_think, deep_extract",
+    )
     include_domains: list[KnowledgeCategory] | None = Field(
         default=None,
         description="Optional filter to restrict retrieval to specific Knowledge Intelligence domains",
@@ -119,6 +188,10 @@ class AssistantAnswerPayload(BaseModel):
         default=AssistantAnswerStatus.ANSWERED,
         description="Epistemic status of the answer",
     )
+    response_mode: AssistantResponseMode = Field(
+        default=AssistantResponseMode.STANDARD,
+        description="Active response mode",
+    )
     claims: list[FactualClaim] = Field(default_factory=list, description="Atomic factual claims making up the answer")
     uncertainty: str | None = Field(default=None, description="Explicit uncertainty statement if evidence is partial")
     conflicts: list[str] = Field(default_factory=list, description="Conflicting facts or inconsistencies across sources")
@@ -126,6 +199,18 @@ class AssistantAnswerPayload(BaseModel):
     suggested_followup_questions: list[str] = Field(
         default_factory=list,
         description="Relevant follow-up questions to help the user dive deeper",
+    )
+    research_report: ResearchReportPayload | None = Field(
+        default=None,
+        description="Structured report generated in DEEP RESEARCH mode",
+    )
+    deep_think: DeepThinkPayload | None = Field(
+        default=None,
+        description="Causal analysis generated in DEEP THINK mode",
+    )
+    deep_extract: DeepExtractPayload | None = Field(
+        default=None,
+        description="Structured table/records generated in DEEP EXTRACT mode",
     )
 
 
@@ -136,6 +221,7 @@ class AssistantAnswerResponse(BaseModel):
     conversation_id: uuid.UUID
     answer: str
     answer_status: AssistantAnswerStatus
+    response_mode: AssistantResponseMode = AssistantResponseMode.STANDARD
     query_type: AssistantQueryType
     claims: list[FactualClaim] = Field(default_factory=list)
     citations: list[AssistantCitationResponse] = Field(default_factory=list)
@@ -143,6 +229,9 @@ class AssistantAnswerResponse(BaseModel):
     conflicts: list[str] = Field(default_factory=list)
     missing_information: list[str] = Field(default_factory=list)
     suggested_followup_questions: list[str] = Field(default_factory=list)
+    research_report: ResearchReportPayload | None = None
+    deep_think: DeepThinkPayload | None = None
+    deep_extract: DeepExtractPayload | None = None
     model_name: str
     retrieval_run_id: uuid.UUID | None = None
     duration_ms: int = 0

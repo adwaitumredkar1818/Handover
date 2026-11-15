@@ -970,5 +970,15 @@ class AssistantFeedbackType(StrEnum):
     INCOMPLETE = "incomplete"
 
 
+class AssistantResponseMode(StrEnum):
+    """Execution and presentation mode for assistant question answering."""
+
+    STANDARD = "standard"
+    DEEP_RESEARCH = "deep_research"
+    DEEP_THINK = "deep_think"
+    DEEP_EXTRACT = "deep_extract"
+
+
+
 
 

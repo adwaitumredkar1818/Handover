@@ -277,6 +277,7 @@ class ProjectKnowledgeAssistantService:
             project_ctx=project_ctx,
             classified_query=classified,
             search_mode=request.mode,
+            response_mode=request.response_mode,
             include_domains=request.include_domains,
             max_citations=request.max_citations,
         )
@@ -300,6 +301,7 @@ class ProjectKnowledgeAssistantService:
         payload, llm_telemetry = self.llm_reasoner.generate_answer(
             question=request.question,
             evidence_prompt=retrieval_res.evidence_prompt,
+            response_mode=request.response_mode,
             conversation_history=chat_history,
             available_citation_labels=available_labels,
         )
@@ -315,11 +317,15 @@ class ProjectKnowledgeAssistantService:
         # 9. Persist Assistant Message Turn
         structured_payload = {
             "query_type": classified.query_type.value,
+            "response_mode": validated.response_mode.value,
             "claims": [c.model_dump() for c in validated.claims],
             "uncertainty": validated.uncertainty,
             "conflicts": validated.conflicts,
             "missing_information": validated.missing_information,
             "suggested_followup_questions": validated.suggested_followup_questions,
+            "research_report": validated.research_report.model_dump() if validated.research_report else None,
+            "deep_think": validated.deep_think.model_dump() if validated.deep_think else None,
+            "deep_extract": validated.deep_extract.model_dump() if validated.deep_extract else None,
         }
 
         assistant_message = self.message_repo.create(
@@ -372,6 +378,7 @@ class ProjectKnowledgeAssistantService:
             conversation_id=conversation_id,
             answer=validated.answer,
             answer_status=validated.answer_status,
+            response_mode=validated.response_mode,
             query_type=classified.query_type,
             claims=validated.claims,
             citations=response_citations,
@@ -379,6 +386,9 @@ class ProjectKnowledgeAssistantService:
             conflicts=validated.conflicts,
             missing_information=validated.missing_information,
             suggested_followup_questions=validated.suggested_followup_questions,
+            research_report=validated.research_report,
+            deep_think=validated.deep_think,
+            deep_extract=validated.deep_extract,
             model_name=llm_telemetry.get("model_name", "qwen3:8b"),
             retrieval_run_id=retrieval_run.id,
             duration_ms=total_duration_ms,

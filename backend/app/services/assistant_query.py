@@ -26,6 +26,7 @@ class ClassifiedQuery:
     extracted_mentions: list[str] = field(default_factory=list)
     target_categories: list[KnowledgeCategory] = field(default_factory=list)
     search_keywords: list[str] = field(default_factory=list)
+    expanded_queries: list[str] = field(default_factory=list)
 
 
 # Mapping of AssistantQueryType to related KnowledgeCategory values
@@ -353,6 +354,12 @@ class AssistantQueryClassifier:
             KnowledgeCategory.PROJECT_OVERVIEW_CONTEXT,
         ])
 
+        expanded_queries = self._generate_expanded_queries(
+            raw_query=query_text,
+            query_type=selected_type,
+            keywords=search_keywords,
+        )
+
         return ClassifiedQuery(
             raw_query=query_text,
             query_type=selected_type,
@@ -364,4 +371,67 @@ class AssistantQueryClassifier:
             extracted_mentions=mentions,
             target_categories=target_categories,
             search_keywords=search_keywords,
+            expanded_queries=expanded_queries,
         )
+
+    def _generate_expanded_queries(
+        self,
+        *,
+        raw_query: str,
+        query_type: AssistantQueryType,
+        keywords: list[str],
+    ) -> list[str]:
+        """Generate targeted subqueries and domain synonyms to maximize retrieval recall."""
+        expansions: list[str] = [raw_query]
+        kw_set = {k.lower() for k in keywords}
+
+        # 1. Cleaned keyword sequence and OR disjunction for high recall
+        if len(keywords) >= 2:
+            expansions.append(" ".join(keywords))
+            expansions.append(" OR ".join(keywords[:3]))
+
+        # 2. Domain-targeted conceptual expansion
+        if kw_set.intersection({"citation", "citations", "priority", "priorities", "ranking", "evidence", "scoring", "types"}):
+            expansions.append("citation priority ranking algorithm evidence scoring reciprocal rank fusion authority")
+            expansions.append("evidence retrieval ranking weighting source authority verified status")
+
+        if kw_set.intersection({"auth", "authentication", "login", "identity", "jwt", "session", "token", "tokens"}):
+            expansions.append("platform identity authentication argon2id jwt access token refreshsession rbac")
+
+        if kw_set.intersection({"storage", "provider", "upload", "encryption", "s3", "supabase", "bucket", "file"}):
+            expansions.append("storage provider local encrypted supabase aes-256-gcm private bucket envelope encryption")
+
+        if kw_set.intersection({"vram", "ollama", "rtx", "4050", "gpu", "inference", "concurrency", "contention"}):
+            expansions.append("rtx 4050 vram contention ollama inference scheduler qwen3 glm-ocr concurrency")
+
+        if kw_set.intersection({"database", "postgres", "postgresql", "chroma", "chromadb", "vector", "fts", "search"}):
+            expansions.append("postgresql canonical database chromadb vector store fts tsvector hybrid retrieval")
+
+        if kw_set.intersection({"handover", "package", "transfer", "signoff", "approval", "checklist", "export"}):
+            expansions.append("handover package approval workflow human reviewer signoff checklist receipt acknowledgement")
+
+        # 3. Query-type structural variation
+        if query_type == AssistantQueryType.DECISION_RATIONALE:
+            expansions.append(f"{' '.join(keywords[:4])} architectural decision rationale trade-offs")
+        elif query_type == AssistantQueryType.TECHNICAL_ARCHITECTURE:
+            expansions.append(f"{' '.join(keywords[:4])} technical architecture implementation specification")
+        elif query_type == AssistantQueryType.DEPENDENCY_RELATIONSHIP:
+            expansions.append(f"{' '.join(keywords[:4])} relationship dependencies graph connections")
+        elif query_type == AssistantQueryType.RISK_PROBLEM:
+            expansions.append(f"{' '.join(keywords[:4])} blockers risks issues bugs mitigation")
+        elif query_type == AssistantQueryType.WORK_PROGRESS:
+            expansions.append(f"{' '.join(keywords[:4])} unfinished tasks progress milestones status")
+
+        # Deduplicate while preserving order, cap at 5
+        seen = set()
+        unique_expansions = []
+        for q in expansions:
+            cleaned = q.strip()
+            if cleaned and cleaned.lower() not in seen:
+                seen.add(cleaned.lower())
+                unique_expansions.append(cleaned)
+                if len(unique_expansions) >= 5:
+                    break
+
+        return unique_expansions
+

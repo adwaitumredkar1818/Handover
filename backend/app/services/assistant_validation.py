@@ -11,11 +11,14 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from app.models.enums import AssistantAnswerStatus
+from app.models.enums import AssistantAnswerStatus, AssistantResponseMode
 from app.schemas.assistant import (
     AssistantAnswerPayload,
     AssistantCitationResponse,
+    DeepExtractPayload,
+    DeepThinkPayload,
     FactualClaim,
+    ResearchReportPayload,
 )
 
 logger = logging.getLogger("app.services.assistant_validation")
@@ -35,6 +38,11 @@ class ValidatedAssistantAnswer:
     conflicts: list[str]
     missing_information: list[str]
     suggested_followup_questions: list[str]
+    response_mode: AssistantResponseMode = AssistantResponseMode.STANDARD
+    research_report: ResearchReportPayload | None = None
+    deep_think: DeepThinkPayload | None = None
+    deep_extract: DeepExtractPayload | None = None
+
 
 
 class AssistantAnswerValidator:
@@ -82,6 +90,10 @@ class AssistantAnswerValidator:
                 conflicts=payload.conflicts,
                 missing_information=payload.missing_information or ["Supporting documentation or source records."],
                 suggested_followup_questions=payload.suggested_followup_questions,
+                response_mode=payload.response_mode,
+                research_report=payload.research_report,
+                deep_think=payload.deep_think,
+                deep_extract=payload.deep_extract,
             )
 
         # 1. Extract all citation labels mentioned in answer text
@@ -145,4 +157,8 @@ class AssistantAnswerValidator:
             conflicts=payload.conflicts,
             missing_information=payload.missing_information,
             suggested_followup_questions=payload.suggested_followup_questions,
+            response_mode=payload.response_mode,
+            research_report=payload.research_report,
+            deep_think=payload.deep_think,
+            deep_extract=payload.deep_extract,
         )

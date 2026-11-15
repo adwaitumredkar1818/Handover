@@ -30,6 +30,11 @@ import {
   Hash,
   Clock,
   Check,
+  BookOpen,
+  Brain,
+  Table,
+  Copy,
+  CheckCheck,
 } from "lucide-react";
 import Link from "next/link";
 import { api } from "../../lib/api";
@@ -40,6 +45,7 @@ import type {
   AssistantCitation,
   AssistantClaim,
   AssistantAnswerStatus,
+  AssistantResponseMode,
 } from "../../lib/types";
 
 // Starter prompt recommendations
@@ -99,6 +105,7 @@ export function AssistantWorkspaceView() {
   const [inputValue, setInputValue] = useState<string>("");
   const [selectedDomain, setSelectedDomain] = useState<string>("all");
   const [retrievalMode, setRetrievalMode] = useState<"hybrid" | "keyword" | "semantic">("hybrid");
+  const [responseMode, setResponseMode] = useState<AssistantResponseMode>("standard");
 
   // Interaction
   const [activeCitationLabel, setActiveCitationLabel] = useState<string | null>(null);
@@ -106,6 +113,7 @@ export function AssistantWorkspaceView() {
   const [expandedClaims, setExpandedClaims] = useState<Record<string, boolean>>({});
   const [feedbackGiven, setFeedbackGiven] = useState<Record<string, "helpful" | "unhelpful">>({});
   const [searchThreadQuery, setSearchThreadQuery] = useState<string>("");
+  const [copiedExtractId, setCopiedExtractId] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const citationRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -275,11 +283,13 @@ export function AssistantWorkspaceView() {
 
     try {
       const domainsFilter = selectedDomain === "all" ? undefined : [selectedDomain];
+      const maxCits = responseMode === "deep_research" ? 14 : responseMode === "deep_think" ? 12 : 8;
       const answerRes = await api.assistant.askQuestion(activeProject.id, targetConvId, {
         question: q,
         mode: retrievalMode,
+        response_mode: responseMode,
         include_domains: domainsFilter,
-        max_citations: 8,
+        max_citations: maxCits,
       });
 
       // Append assistant message from answer response
@@ -289,6 +299,7 @@ export function AssistantWorkspaceView() {
         sender_type: "assistant",
         content: answerRes.answer,
         answer_status: answerRes.answer_status,
+        response_mode: answerRes.response_mode || responseMode,
         structured_payload_json: {
           claims: answerRes.claims,
           conflicts: answerRes.conflicts,
@@ -296,6 +307,10 @@ export function AssistantWorkspaceView() {
           missing_information: answerRes.missing_information,
           suggested_followup_questions: answerRes.suggested_followup_questions,
           query_type: answerRes.query_type,
+          response_mode: answerRes.response_mode || responseMode,
+          research_report: answerRes.research_report,
+          deep_think: answerRes.deep_think,
+          deep_extract: answerRes.deep_extract,
         },
         citations: answerRes.citations || [],
         model_name: answerRes.model_name,
@@ -444,6 +459,25 @@ export function AssistantWorkspaceView() {
       }
       return <span key={idx}>{part}</span>;
     });
+  };
+
+  const handleCopyJson = (data: unknown, id: string) => {
+    try {
+      navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+      setCopiedExtractId(id);
+      setTimeout(() => setCopiedExtractId(null), 2000);
+      addToast({
+        type: "success",
+        title: "Copied",
+        message: "Extracted data copied to clipboard as JSON.",
+      });
+    } catch {
+      addToast({
+        type: "error",
+        title: "Copy Failed",
+        message: "Failed to copy to clipboard.",
+      });
+    }
   };
 
   // Filtered threads list
@@ -723,25 +757,53 @@ export function AssistantWorkspaceView() {
                 }
 
                 // Assistant message turn
-                const isInsufficient =
-                  msg.answer_status === "insufficient_evidence" ||
-                  Boolean(msg.structured_payload_json?.uncertainty);
+                const isInsufficient = msg.answer_status === "insufficient_evidence";
+                const isPartial = msg.answer_status === "partially_answered" || Boolean(msg.structured_payload_json?.uncertainty);
                 const hasConflicts =
                   (msg.structured_payload_json?.conflicts &&
                     msg.structured_payload_json.conflicts.length > 0) ||
-                  msg.answer_status === "conflicting_evidence";
+                  msg.answer_status === "conflicted_evidence";
                 const claims = msg.structured_payload_json?.claims || [];
                 const followups = msg.structured_payload_json?.suggested_followup_questions || [];
                 const isClaimsExpanded = expandedClaims[msg.id];
                 const currentFeedback = feedbackGiven[msg.id];
+                const msgMode = msg.structured_payload_json?.response_mode || msg.response_mode || "standard";
+
+                const researchReport = msg.structured_payload_json?.research_report;
+                const deepThink = msg.structured_payload_json?.deep_think;
+                const deepExtract = msg.structured_payload_json?.deep_extract;
 
                 return (
                   <div key={msg.id || index} className="flex flex-col items-start w-full">
                     <div className="flex items-center gap-1.5 text-[10px] text-slate-500 uppercase font-semibold mb-1 ml-1">
                       <Bot className="size-3 text-teal-600" />
                       <span className="text-teal-900 font-bold">ANSWER</span>
+
+                      {/* Response Mode Badge */}
+                      {msgMode === "deep_research" ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-800 border border-indigo-200 rounded text-[9px] font-bold">
+                          <BookOpen className="size-2.5" />
+                          Deep Research
+                        </span>
+                      ) : msgMode === "deep_think" ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-800 border border-purple-200 rounded text-[9px] font-bold">
+                          <Brain className="size-2.5" />
+                          Deep Think
+                        </span>
+                      ) : msgMode === "deep_extract" ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-sky-100 text-sky-800 border border-sky-200 rounded text-[9px] font-bold">
+                          <Table className="size-2.5" />
+                          Deep Extract
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-teal-100 text-teal-800 border border-teal-200 rounded text-[9px] font-bold">
+                          <Sparkles className="size-2.5" />
+                          Standard
+                        </span>
+                      )}
+
                       {msg.structured_payload_json?.query_type && (
-                        <span className="px-1.5 py-0.2 bg-teal-100 text-teal-800 rounded text-[9px] font-mono">
+                        <span className="px-1.5 py-0.2 bg-slate-100 text-slate-700 rounded text-[9px] font-mono">
                           {msg.structured_payload_json.query_type}
                         </span>
                       )}
@@ -757,6 +819,265 @@ export function AssistantWorkspaceView() {
                       <div className="text-slate-800 leading-relaxed space-y-2 whitespace-pre-wrap">
                         {renderFormattedAnswer(msg.content)}
                       </div>
+
+                      {/* ======================================================== */}
+                      {/* DEEP RESEARCH STRUCTURED REPORT                          */}
+                      {/* ======================================================== */}
+                      {researchReport && (
+                        <div className="mt-3 p-3.5 bg-indigo-50/40 border border-indigo-200 rounded-xl space-y-3">
+                          <div className="flex items-center justify-between border-b border-indigo-100 pb-2">
+                            <span className="flex items-center gap-1.5 font-bold text-indigo-900 text-[11px] uppercase tracking-wider">
+                              <BookOpen className="size-3.5 text-indigo-600" />
+                              Multi-Source Research Report
+                            </span>
+                            {researchReport.coverage_assessment && (
+                              <span className="px-2 py-0.5 text-[10px] font-medium bg-indigo-100 text-indigo-800 rounded-full border border-indigo-200">
+                                Coverage: {researchReport.coverage_assessment}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Executive Summary */}
+                          <div className="p-2.5 bg-white rounded-lg border border-indigo-100 text-[11px] text-slate-800 leading-relaxed">
+                            <div className="font-bold text-indigo-950 mb-1">Executive Summary:</div>
+                            {researchReport.executive_summary}
+                          </div>
+
+                          {/* Report Sections */}
+                          {researchReport.sections && researchReport.sections.length > 0 && (
+                            <div className="space-y-2">
+                              {researchReport.sections.map((sec, sIdx) => (
+                                <div key={sIdx} className="p-2.5 bg-white rounded-lg border border-slate-200 text-[11px] space-y-1.5">
+                                  <div className="flex items-center justify-between">
+                                    <span className="font-bold text-slate-900">{sec.section_title}</span>
+                                    <div className="flex items-center gap-1 font-mono">
+                                      {sec.citation_labels.map((cl, cli) => (
+                                        <button
+                                          key={cli}
+                                          type="button"
+                                          onClick={() => handleCitationClick(cl)}
+                                          className="text-[10px] text-indigo-700 hover:underline"
+                                        >
+                                          [{cl}]
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                  <div className="text-slate-700 leading-relaxed">{renderFormattedAnswer(sec.content)}</div>
+                                  {sec.key_takeaways && sec.key_takeaways.length > 0 && (
+                                    <div className="pt-1 border-t border-slate-100 text-[10px] text-slate-600 space-y-0.5">
+                                      <span className="font-semibold text-slate-700">Key Takeaways:</span>
+                                      {sec.key_takeaways.map((kt, kti) => (
+                                        <div key={kti} className="flex items-center gap-1 text-slate-600 pl-1">
+                                          <span>•</span>
+                                          <span>{kt}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Cross-Source Corroboration */}
+                          {researchReport.cross_source_corroboration && researchReport.cross_source_corroboration.length > 0 && (
+                            <div className="p-2.5 bg-white rounded-lg border border-slate-200 text-[11px]">
+                              <div className="font-bold text-slate-900 mb-1">Cross-Source Corroboration:</div>
+                              <ul className="list-disc pl-4 space-y-0.5 text-slate-700 text-[10px]">
+                                {researchReport.cross_source_corroboration.map((c, ci) => (
+                                  <li key={ci}>{c}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                          {/* Actionable Recommendations */}
+                          {researchReport.recommendations && researchReport.recommendations.length > 0 && (
+                            <div className="p-2.5 bg-indigo-100/50 rounded-lg border border-indigo-200 text-[11px]">
+                              <div className="font-bold text-indigo-950 mb-1">Successor Recommendations:</div>
+                              <ul className="list-disc pl-4 space-y-0.5 text-indigo-900 text-[10px]">
+                                {researchReport.recommendations.map((r, ri) => (
+                                  <li key={ri}>{r}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* ======================================================== */}
+                      {/* DEEP THINK CAUSAL REASONING                              */}
+                      {/* ======================================================== */}
+                      {deepThink && (
+                        <div className="mt-3 p-3.5 bg-purple-50/40 border border-purple-200 rounded-xl space-y-3">
+                          <div className="flex items-center gap-1.5 border-b border-purple-100 pb-2 font-bold text-purple-900 text-[11px] uppercase tracking-wider">
+                            <Brain className="size-3.5 text-purple-600" />
+                            Causal &amp; Architecture Reasoning Chain
+                          </div>
+
+                          {/* Core Hypothesis */}
+                          <div className="p-2.5 bg-white rounded-lg border border-purple-100 text-[11px] text-slate-800">
+                            <span className="font-bold text-purple-950">Core Hypothesis: </span>
+                            {deepThink.core_hypothesis}
+                          </div>
+
+                          {/* Causal Chain Steps */}
+                          {deepThink.causal_chain && deepThink.causal_chain.length > 0 && (
+                            <div className="space-y-2">
+                              <div className="text-[10px] font-bold text-purple-950 uppercase tracking-wider">
+                                Causal Progression:
+                              </div>
+                              {deepThink.causal_chain.map((step, stIdx) => (
+                                <div key={stIdx} className="p-2.5 bg-white rounded-lg border border-purple-100 text-[11px] space-y-1">
+                                  <div className="flex items-center justify-between">
+                                    <span className="inline-flex items-center gap-1 font-bold text-purple-900">
+                                      <span className="size-4 rounded-full bg-purple-100 text-purple-800 text-[10px] flex items-center justify-center font-bold">
+                                        {step.step_number}
+                                      </span>
+                                      {step.event_or_decision}
+                                    </span>
+                                    {step.actor_or_source && (
+                                      <span className="text-[10px] font-mono text-slate-500 bg-slate-50 px-1.5 py-0.5 rounded border border-slate-200">
+                                        {step.actor_or_source}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {step.consequences && step.consequences.length > 0 && (
+                                    <div className="pl-5 text-[10px] text-slate-600 space-y-0.5">
+                                      <span className="font-semibold text-slate-700">Consequences:</span>
+                                      {step.consequences.map((c, ci) => (
+                                        <div key={ci} className="text-slate-600">→ {c}</div>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {step.citation_labels && step.citation_labels.length > 0 && (
+                                    <div className="pl-5 flex items-center gap-1 font-mono text-[10px]">
+                                      <span className="text-slate-400">Supporting:</span>
+                                      {step.citation_labels.map((cl, cli) => (
+                                        <button
+                                          key={cli}
+                                          type="button"
+                                          onClick={() => handleCitationClick(cl)}
+                                          className="text-purple-700 hover:underline"
+                                        >
+                                          [{cl}]
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Tradeoffs & Risks */}
+                          {deepThink.tradeoffs_and_risks && deepThink.tradeoffs_and_risks.length > 0 && (
+                            <div className="p-2.5 bg-amber-50/60 rounded-lg border border-amber-200 text-[11px]">
+                              <div className="font-bold text-amber-950 mb-1">Architectural Trade-offs &amp; Risks:</div>
+                              <ul className="list-disc pl-4 space-y-0.5 text-amber-900 text-[10px]">
+                                {deepThink.tradeoffs_and_risks.map((t, ti) => (
+                                  <li key={ti}>{t}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* ======================================================== */}
+                      {/* DEEP EXTRACT STRUCTURED TABULAR DATA                     */}
+                      {/* ======================================================== */}
+                      {deepExtract && (
+                        <div className="mt-3 p-3.5 bg-sky-50/40 border border-sky-200 rounded-xl space-y-3">
+                          <div className="flex items-center justify-between border-b border-sky-100 pb-2">
+                            <span className="flex items-center gap-1.5 font-bold text-sky-900 text-[11px] uppercase tracking-wider">
+                              <Table className="size-3.5 text-sky-600" />
+                              Structured Entity Extraction: {deepExtract.target_schema}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleCopyJson(deepExtract, msg.id)}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white hover:bg-sky-100 border border-sky-200 text-sky-800 text-[10px] font-semibold transition shadow-2xs"
+                              title="Copy structured records as JSON"
+                            >
+                              {copiedExtractId === msg.id ? (
+                                <>
+                                  <CheckCheck className="size-3 text-emerald-600" />
+                                  <span>Copied JSON</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="size-3" />
+                                  <span>Copy JSON</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+
+                          {/* Extracted Table */}
+                          {deepExtract.records && deepExtract.records.length > 0 && (
+                            <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-2xs">
+                              <table className="w-full text-left border-collapse text-[11px]">
+                                <thead>
+                                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold">
+                                    <th className="p-2">Entity</th>
+                                    <th className="p-2">Category</th>
+                                    <th className="p-2">Status</th>
+                                    <th className="p-2">Attributes &amp; Provenance</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                  {deepExtract.records.map((rec, rIdx) => (
+                                    <tr key={rIdx} className="hover:bg-slate-50/50">
+                                      <td className="p-2 font-semibold text-slate-900 whitespace-nowrap">{rec.entity_name}</td>
+                                      <td className="p-2 text-slate-600 whitespace-nowrap">
+                                        <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 text-[10px]">
+                                          {rec.category}
+                                        </span>
+                                      </td>
+                                      <td className="p-2 whitespace-nowrap">
+                                        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                          {rec.status_or_state || "Recorded"}
+                                        </span>
+                                      </td>
+                                      <td className="p-2 text-slate-700 space-y-1">
+                                        {Object.entries(rec.attributes || {}).map(([k, v], ki) => {
+                                          const cits = rec.field_citations?.[k] || [];
+                                          return (
+                                            <div key={ki} className="flex items-center gap-1.5">
+                                              <span className="font-semibold text-slate-600">{k}:</span>
+                                              <span>{String(v)}</span>
+                                              {cits.map((cl, cli) => (
+                                                <button
+                                                  key={cli}
+                                                  type="button"
+                                                  onClick={() => handleCitationClick(cl)}
+                                                  className="text-[10px] font-mono text-sky-700 hover:underline"
+                                                >
+                                                  [{cl}]
+                                                </button>
+                                              ))}
+                                            </div>
+                                          );
+                                        })}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+
+                          {/* Missing Fields Notice */}
+                          {deepExtract.missing_fields && deepExtract.missing_fields.length > 0 && (
+                            <div className="p-2 bg-amber-50/70 border border-amber-200 rounded text-[10px] text-amber-900">
+                              <span className="font-bold">Missing Fields in Evidence: </span>
+                              {deepExtract.missing_fields.join(", ")}
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {/* Citation summary pills row */}
                       {msg.citations && msg.citations.length > 0 && (
@@ -786,7 +1107,7 @@ export function AssistantWorkspaceView() {
                         </div>
                       )}
 
-                      {/* INSUFFICIENT-EVIDENCE STATE ALERT */}
+                      {/* INSUFFICIENT-EVIDENCE STATE ALERT (Zero Matches) */}
                       {isInsufficient && (
                         <div className="p-3 bg-amber-50/70 border border-dashed border-amber-300 rounded-lg text-amber-900 text-xs space-y-1">
                           <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-[11px] text-amber-800">
@@ -800,6 +1121,28 @@ export function AssistantWorkspaceView() {
                           {msg.structured_payload_json?.missing_information &&
                             msg.structured_payload_json.missing_information.length > 0 && (
                               <div className="text-[10px] text-amber-700 mt-1 pl-4 list-disc">
+                                {msg.structured_payload_json.missing_information.map((m, mi) => (
+                                  <div key={mi}>• Missing context: {m}</div>
+                                ))}
+                              </div>
+                            )}
+                        </div>
+                      )}
+
+                      {/* PARTIAL EVIDENCE & UNCERTAINTY DISCLOSURE */}
+                      {!isInsufficient && isPartial && (
+                        <div className="p-3 bg-teal-50/50 border border-teal-200 rounded-lg text-teal-950 text-xs space-y-1">
+                          <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-[11px] text-teal-800">
+                            <ShieldCheck className="size-3.5 text-teal-600" />
+                            PARTIAL EVIDENCE &amp; CONTEXT DISCLOSURE
+                          </div>
+                          <p className="text-[11px] text-teal-900/90 leading-relaxed">
+                            {msg.structured_payload_json?.uncertainty ||
+                              "The answer above synthesizes available project records. Some detailed parameters or specific formulas remain unverified or missing from current sources."}
+                          </p>
+                          {msg.structured_payload_json?.missing_information &&
+                            msg.structured_payload_json.missing_information.length > 0 && (
+                              <div className="text-[10px] text-teal-800 mt-1 pl-4 list-disc">
                                 {msg.structured_payload_json.missing_information.map((m, mi) => (
                                   <div key={mi}>• Missing context: {m}</div>
                                 ))}
@@ -954,34 +1297,93 @@ export function AssistantWorkspaceView() {
 
           {/* Bottom Question Input Bar */}
           <div className="p-3 bg-white border-t border-slate-200 space-y-2">
-            {/* Filter controls row */}
-            <div className="flex items-center justify-between text-xs gap-2">
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] font-bold text-slate-400 uppercase">Domain:</span>
-                <select
-                  value={selectedDomain}
-                  onChange={(e) => setSelectedDomain(e.target.value)}
-                  className="text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-0.5 text-slate-700 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
+            {/* Filter controls and Mode Selector row */}
+            <div className="flex flex-wrap items-center justify-between text-xs gap-2 pt-1 pb-1">
+              {/* Intelligent Mode Selector Tabs */}
+              <div className="flex items-center gap-1 p-0.5 bg-slate-100 rounded-lg">
+                <button
+                  type="button"
+                  onClick={() => setResponseMode("standard")}
+                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
+                    responseMode === "standard"
+                      ? "bg-white text-teal-900 shadow-2xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                  title="Direct hybrid RAG answer with atomic citations"
                 >
-                  {DOMAINS_LIST.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.label}
-                    </option>
-                  ))}
-                </select>
+                  <Sparkles className="size-3 text-teal-600" />
+                  <span>Standard</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setResponseMode("deep_research")}
+                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
+                    responseMode === "deep_research"
+                      ? "bg-white text-indigo-900 shadow-2xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                  title="Comprehensive multi-source research report with recommendations"
+                >
+                  <BookOpen className="size-3 text-indigo-600" />
+                  <span>Deep Research</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setResponseMode("deep_think")}
+                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
+                    responseMode === "deep_think"
+                      ? "bg-white text-purple-900 shadow-2xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                  title="Causal and dependency reasoning with trade-offs"
+                >
+                  <Brain className="size-3 text-purple-600" />
+                  <span>Deep Think</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setResponseMode("deep_extract")}
+                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
+                    responseMode === "deep_extract"
+                      ? "bg-white text-sky-900 shadow-2xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                  title="Structured schema extraction into tables with JSON export"
+                >
+                  <Table className="size-3 text-sky-600" />
+                  <span>Deep Extract</span>
+                </button>
               </div>
 
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] font-bold text-slate-400 uppercase">Mode:</span>
-                <select
-                  value={retrievalMode}
-                  onChange={(e) => setRetrievalMode(e.target.value as "hybrid" | "keyword" | "semantic")}
-                  className="text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-0.5 text-slate-700 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
-                >
-                  <option value="hybrid">Hybrid (Vector + FTS)</option>
-                  <option value="keyword">Keyword (FTS)</option>
-                  <option value="semantic">Semantic (Vector)</option>
-                </select>
+              {/* Domain & Search Mode Selectors */}
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase">Domain:</span>
+                  <select
+                    value={selectedDomain}
+                    onChange={(e) => setSelectedDomain(e.target.value)}
+                    className="text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-0.5 text-slate-700 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
+                  >
+                    {DOMAINS_LIST.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase">Search:</span>
+                  <select
+                    value={retrievalMode}
+                    onChange={(e) => setRetrievalMode(e.target.value as "hybrid" | "keyword" | "semantic")}
+                    className="text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-0.5 text-slate-700 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
+                  >
+                    <option value="hybrid">Hybrid (Vector + FTS)</option>
+                    <option value="keyword">Keyword (FTS)</option>
+                    <option value="semantic">Semantic (Vector)</option>
+                  </select>
+                </div>
               </div>
             </div>
 

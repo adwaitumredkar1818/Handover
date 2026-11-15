@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import Settings
 from app.models.enums import (
+    AssistantResponseMode,
     KnowledgeCategory,
     KnowledgeReviewStatus,
     SearchMode,
@@ -25,6 +26,7 @@ from app.models.enums import (
 from app.models.evidence import EvidenceChunk, EvidenceItem
 from app.models.knowledge import KnowledgeEvidenceLink, KnowledgeItem
 from app.models.relationship import KnowledgeEntity, KnowledgeRelationship, KnowledgeTimelineEvent
+from app.models.verification import VerificationCase, VerificationConflict
 from app.schemas.assistant import AssistantCitationResponse
 from app.schemas.retrieval import ProjectSearchRequest, SearchFiltersRequest
 from app.services.assistant_query import ClassifiedQuery
@@ -91,6 +93,7 @@ class AssistantRetrievalService:
         project_ctx: ProjectContext,
         classified_query: ClassifiedQuery,
         search_mode: str = "hybrid",
+        response_mode: AssistantResponseMode = AssistantResponseMode.STANDARD,
         include_domains: list[KnowledgeCategory] | None = None,
         max_citations: int = 8,
     ) -> AssistantRetrievalResult:
@@ -100,39 +103,65 @@ class AssistantRetrievalService:
         has_manage = project_ctx.has_permission("project.manage")
         project_id = project_ctx.project.id
 
+        # Adjust citation limits based on response mode depth
+        if response_mode == AssistantResponseMode.DEEP_RESEARCH:
+            effective_max_citations = max(max_citations, 14)
+        elif response_mode == AssistantResponseMode.DEEP_THINK:
+            effective_max_citations = max(max_citations, 12)
+        elif response_mode == AssistantResponseMode.DEEP_EXTRACT:
+            effective_max_citations = max(max_citations, 10)
+        else:
+            effective_max_citations = max_citations
+
         candidates: list[RetrievedEvidenceCandidate] = []
         candidates_found = 0
         candidates_authorized = 0
 
         # -------------------------------------------------------------------
-        # 1. Hybrid Search across Document & Integration Chunks
+        # 1. Multi-Pass Hybrid Search across Expanded Queries
         # -------------------------------------------------------------------
         chunk_hits: list[RetrievedEvidenceCandidate] = []
         if self.hybrid_service is not None:
-            try:
-                mode_enum = SearchMode.HYBRID
-                if search_mode == "keyword":
-                    mode_enum = SearchMode.KEYWORD
-                elif search_mode == "semantic":
-                    mode_enum = SearchMode.SEMANTIC
+            queries_to_run = [classified_query.raw_query]
+            if classified_query.expanded_queries:
+                for eq in classified_query.expanded_queries:
+                    if eq.lower() != classified_query.raw_query.lower() and eq not in queries_to_run:
+                        queries_to_run.append(eq)
+                        if len(queries_to_run) >= 3:
+                            break
 
-                search_req = ProjectSearchRequest(
-                    query=classified_query.raw_query,
-                    mode=mode_enum,
-                    top_k=min(20, max_citations * 2),
-                    filters=SearchFiltersRequest(),
-                )
-                search_resp = self.hybrid_service.search_project(
-                    project_ctx=project_ctx,
-                    payload=search_req,
-                )
-                candidates_found += search_resp.total_returned
-                candidates_authorized += len(search_resp.results)
+            chunk_by_id: dict[uuid.UUID, RetrievedEvidenceCandidate] = {}
+            for q_idx, q_str in enumerate(queries_to_run):
+                try:
+                    mode_enum = SearchMode.HYBRID
+                    if search_mode == "keyword":
+                        mode_enum = SearchMode.KEYWORD
+                    elif search_mode == "semantic":
+                        mode_enum = SearchMode.SEMANTIC
 
-                for item in search_resp.results:
-                    cit = item.citation
-                    chunk_hits.append(
-                        RetrievedEvidenceCandidate(
+                    search_req = ProjectSearchRequest(
+                        query=q_str,
+                        mode=mode_enum,
+                        top_k=min(20, effective_max_citations * 2),
+                        filters=SearchFiltersRequest(),
+                    )
+                    search_resp = self.hybrid_service.search_project(
+                        project_ctx=project_ctx,
+                        payload=search_req,
+                    )
+                    candidates_found += search_resp.total_returned
+                    candidates_authorized += len(search_resp.results)
+
+                    for item in search_resp.results:
+                        cit = item.citation
+                        if not cit.chunk_id:
+                            continue
+                        # If seen before, boost score (RRF accumulation)
+                        if cit.chunk_id in chunk_by_id:
+                            chunk_by_id[cit.chunk_id].score += 0.35
+                            continue
+
+                        cand = RetrievedEvidenceCandidate(
                             evidence_id=cit.evidence_id,
                             chunk_id=cit.chunk_id,
                             knowledge_item_id=None,
@@ -146,13 +175,15 @@ class AssistantRetrievalService:
                             section_title=cit.section_title,
                             excerpt=item.excerpt or item.chunk_text[:300],
                             content=item.chunk_text,
-                            score=item.scores.hybrid_score if item.scores else 1.0,
+                            score=(item.scores.hybrid_score if item.scores else 1.0) * (1.0 - (0.1 * q_idx)),
                             is_verified=True,
                             candidate_type="chunk",
                         )
-                    )
-            except Exception as ex:
-                logger.warning("Hybrid search step in assistant retrieval failed: %s", ex, exc_info=True)
+                        chunk_by_id[cit.chunk_id] = cand
+                except Exception as ex:
+                    logger.warning("Hybrid search pass for '%s' failed: %s", q_str, ex)
+
+            chunk_hits = list(chunk_by_id.values())
 
         candidates.extend(chunk_hits)
 
@@ -349,7 +380,71 @@ class AssistantRetrievalService:
                 )
 
         # -------------------------------------------------------------------
-        # 4. Fusion, Deduplication, and Bounding
+        # 4. Active Verification Conflicts Search
+        # -------------------------------------------------------------------
+        try:
+            v_stmt = (
+                select(VerificationConflict)
+                .where(
+                    VerificationConflict.project_id == project_id,
+                )
+                .limit(5)
+            )
+            conflicts = list(self.session.scalars(v_stmt).all())
+            candidates_found += len(conflicts)
+            for conf in conflicts:
+                conf_text = (
+                    f"**Contradiction Detected**: {conf.explanation}\n"
+                    f"- Perspective A: {conf.claim_a_text or 'N/A'}\n"
+                    f"- Perspective B: {conf.claim_b_text or 'N/A'}"
+                )
+                candidates_authorized += 1
+                candidates.append(
+                    RetrievedEvidenceCandidate(
+                        evidence_id=conf.id,
+                        chunk_id=None,
+                        knowledge_item_id=None,
+                        source_title=f"Conflict: {conf.explanation[:50]}",
+                        source_provider="verification_conflict",
+                        source_url=None,
+                        source_external_id=None,
+                        author="Verification Center",
+                        source_timestamp=getattr(conf, "created_at", None),
+                        page_number=None,
+                        section_title="Evidence Inconsistency",
+                        excerpt=conf_text[:300],
+                        content=conf_text,
+                        score=0.92,
+                        is_verified=True,
+                        candidate_type="conflict",
+                    )
+                )
+        except Exception as ex:
+            logger.warning("Verification conflict search in assistant retrieval failed: %s", ex)
+
+        # -------------------------------------------------------------------
+        # 5. Authority Weighting & Relevance Boosting
+        # -------------------------------------------------------------------
+        for c in candidates:
+            # Verified items have authoritative status
+            if c.is_verified:
+                c.score *= 1.25
+            # Structured knowledge items get knowledge boost
+            if c.candidate_type == "knowledge_item":
+                c.score *= 1.15
+            # Keywords match in title or section gives relevance boost
+            if classified_query.search_keywords:
+                title_lower = (c.source_title or "").lower()
+                sec_lower = (c.section_title or "").lower()
+                matches = sum(
+                    1 for kw in classified_query.search_keywords
+                    if kw in title_lower or kw in sec_lower
+                )
+                if matches > 0:
+                    c.score *= (1.0 + min(0.4, 0.12 * matches))
+
+        # -------------------------------------------------------------------
+        # 6. Fusion, Deduplication, and Bounding
         # -------------------------------------------------------------------
         # Sort candidates by score descending
         candidates.sort(key=lambda c: c.score, reverse=True)
@@ -363,7 +458,7 @@ class AssistantRetrievalService:
                 continue
             seen_keys.add(key)
             deduped.append(c)
-            if len(deduped) >= max_citations:
+            if len(deduped) >= effective_max_citations:
                 break
 
         # -------------------------------------------------------------------
@@ -412,6 +507,7 @@ class AssistantRetrievalService:
         diagnostics = {
             "query_type": classified_query.query_type.value,
             "search_mode": search_mode,
+            "response_mode": response_mode.value,
             "target_categories": [c.value for c in target_cats],
             "extracted_jira_keys": classified_query.extracted_jira_keys,
             "extracted_pr_numbers": classified_query.extracted_pr_numbers,
