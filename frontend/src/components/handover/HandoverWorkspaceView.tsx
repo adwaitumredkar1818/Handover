@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { Button } from "../ui";
+import { api } from "../../lib/api";
 
 export function HandoverWorkspaceView() {
   const { activeProject, user } = useLiveApp();
@@ -36,41 +37,54 @@ export function HandoverWorkspaceView() {
   const loadHandoverData = async (projectId: string) => {
     setIsLoading(true);
     try {
-      const token = localStorage.getItem("auth_token");
-      const headers = { Authorization: `Bearer ${token}` };
-
       // Load handover cases
-      const res = await fetch(`http://127.0.0.1:8000/api/v1/cases?project_id=${projectId}`, {
-        headers,
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const items = data.items || [];
-        setCases(items);
-        if (items.length > 0) {
-          const current = items[0];
-          setSelectedCase(current);
+      const res = await api.handover.listCases(projectId);
+      const items = res.items || [];
+      setCases(items);
+      if (items.length > 0) {
+        const current = items[0];
+        setSelectedCase(current);
 
-          // Load readiness
-          const rRes = await fetch(
-            `http://127.0.0.1:8000/api/v1/cases/${current.id}/readiness`,
-            {
-              method: "POST",
-              headers,
+        // Load versions
+        try {
+          const vList = await api.handover.getVersions(projectId, current.id);
+          setVersions(vList || []);
+          if (vList && vList.length > 0) {
+            const currentVer = vList[0];
+            try {
+              const rData = await api.handover.getReadiness(projectId, current.id, currentVer.id);
+              setReadiness(rData);
+            } catch {
+              setReadiness(null);
             }
-          );
-          if (rRes.ok) setReadiness(await rRes.json());
-
-          // Load checklists
-          const cRes = await fetch(
-            `http://127.0.0.1:8000/api/v1/cases/${current.id}/checklists`,
-            { headers }
-          );
-          if (cRes.ok) setChecklists(await cRes.json());
+          } else {
+            setReadiness(null);
+          }
+        } catch {
+          setVersions([]);
+          setReadiness(null);
         }
+
+        // Load checklists
+        try {
+          const cData = await api.handover.getChecklists(projectId, current.id);
+          setChecklists(cData || []);
+        } catch {
+          setChecklists([]);
+        }
+      } else {
+        setSelectedCase(null);
+        setVersions([]);
+        setReadiness(null);
+        setChecklists([]);
       }
     } catch (err) {
       console.error("Failed to load handover data:", err);
+      setCases([]);
+      setSelectedCase(null);
+      setVersions([]);
+      setReadiness(null);
+      setChecklists([]);
     } finally {
       setIsLoading(false);
     }
@@ -79,19 +93,23 @@ export function HandoverWorkspaceView() {
   useEffect(() => {
     if (activeProject) {
       loadHandoverData(activeProject.id);
+    } else {
+      setCases([]);
+      setSelectedCase(null);
+      setVersions([]);
+      setReadiness(null);
+      setChecklists([]);
     }
   }, [activeProject]);
 
   const handleAssemble = async () => {
-    if (!selectedCase) return;
+    if (!selectedCase || !activeProject) return;
     setIsAssembling(true);
     try {
-      const token = localStorage.getItem("auth_token");
-      await fetch(`http://127.0.0.1:8000/api/v1/cases/${selectedCase.id}/assemble`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+      await api.handover.assemblePackage(activeProject.id, selectedCase.id as string, {
+        assembly_notes: "Assembled from Handover Workspace",
       });
-      if (activeProject) await loadHandoverData(activeProject.id);
+      await loadHandoverData(activeProject.id);
     } catch (err) {
       console.error("Failed to assemble handover package:", err);
     } finally {

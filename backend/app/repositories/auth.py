@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.auth import RefreshSession
+from app.models.auth import PasswordResetToken, RefreshSession
 
 
 class RefreshSessionRepository:
@@ -143,3 +143,55 @@ class RefreshSessionRepository:
             stmt = stmt.where(RefreshSession.revoked_at.is_(None))
         stmt = stmt.order_by(RefreshSession.created_at.desc()).limit(limit)
         return list(self._session.scalars(stmt).all())
+
+
+class PasswordResetTokenRepository:
+    """Data-access operations for `password_reset_tokens`."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(
+        self,
+        *,
+        user_id: uuid.UUID,
+        token_hash: str,
+        expires_at: datetime,
+        request_metadata: dict[str, str] | None = None,
+    ) -> PasswordResetToken:
+        record = PasswordResetToken(
+            user_id=user_id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+            request_metadata=request_metadata,
+        )
+        self._session.add(record)
+        self._session.flush()
+        return record
+
+    def get_by_token_hash_for_update(self, token_hash: str) -> PasswordResetToken | None:
+        stmt = (
+            select(PasswordResetToken)
+            .where(PasswordResetToken.token_hash == token_hash)
+            .options(selectinload(PasswordResetToken.user))
+            .with_for_update()
+        )
+        return self._session.scalar(stmt)
+
+    def mark_used(self, token: PasswordResetToken, used_at: datetime) -> None:
+        token.used_at = used_at
+        self._session.flush()
+
+    def invalidate_active_tokens_for_user(self, user_id: uuid.UUID, now: datetime) -> int:
+        stmt = (
+            update(PasswordResetToken)
+            .where(
+                PasswordResetToken.user_id == user_id,
+                PasswordResetToken.used_at.is_(None),
+            )
+            .values(used_at=now)
+        )
+        result = cast(CursorResult[Any], self._session.execute(stmt))
+        self._session.flush()
+        return int(result.rowcount or 0)
+

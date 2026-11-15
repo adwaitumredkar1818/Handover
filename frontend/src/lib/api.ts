@@ -299,6 +299,12 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
+    async exchangeSupabaseToken(accessToken: string): Promise<AuthSessionResponse> {
+      return request<AuthSessionResponse>("/auth/supabase/exchange", {
+        method: "POST",
+        body: JSON.stringify({ access_token: accessToken }),
+      });
+    },
     async refreshToken(): Promise<AuthSessionResponse> {
       return request<AuthSessionResponse>("/auth/refresh", {
         method: "POST",
@@ -316,6 +322,18 @@ export const api = {
     },
     async me(): Promise<User> {
       return request<User>("/auth/me");
+    },
+    async forgotPassword(data: { email: string }): Promise<{ message: string; reset_token?: string | null }> {
+      return request<{ message: string; reset_token?: string | null }>("/auth/forgot-password", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async resetPassword(data: { token: string; new_password: string }): Promise<{ message: string }> {
+      return request<{ message: string }>("/auth/reset-password", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
     },
   },
 
@@ -644,25 +662,35 @@ export const api = {
     },
   },
   relationships: {
-    async getGraph(projectId: string, limit: number = 100): Promise<{
+    async getGraph(projectId: string, limit: number = 250): Promise<{
       nodes: Array<{
         id: string;
         label: string;
-        type: string;
-        canonical_name: string;
-        confidence: number;
-        resolution_status: string;
+        type?: string;
+        entity_type?: string;
+        canonical_name?: string;
+        description?: string | null;
+        confidence?: number;
+        resolution_status?: string;
+        status?: string;
+        verification_status?: string;
+        source_provider?: string | null;
       }>;
       edges: Array<{
         id: string;
         source: string;
         target: string;
-        type: string;
-        verification_status: string;
-        confidence: number;
+        type?: string;
+        relationship_type?: string;
+        label?: string;
+        verification_status?: string;
+        confidence?: number;
+        evidence_count?: number;
       }>;
+      total_nodes?: number;
+      total_edges?: number;
     }> {
-      return request(`/projects/${projectId}/relationships/graph?limit=${limit}`);
+      return request(`/projects/${projectId}/relationships/graph?limit_nodes=${limit}&limit_edges=${limit * 2}`);
     },
     async listEntities(projectId: string, type?: string, page: number = 1, pageSize: number = 50): Promise<{
       items: Array<{
@@ -684,7 +712,22 @@ export const api = {
       return request(`/projects/${projectId}/relationships/entities/${entityId}`);
     },
     async getTraceability(projectId: string): Promise<{
-      chains: Array<{
+      items?: Array<{
+        id: string;
+        decision_entity_id: string;
+        decision_name?: string;
+        completeness_status: string;
+        work_item_count?: number;
+        pr_count?: number;
+        commit_count?: number;
+        component_count?: number;
+        work_item_ids?: string[];
+        pull_request_ids?: string[];
+        commit_ids?: string[];
+        component_ids?: string[];
+        missing_links: string[];
+      }>;
+      chains?: Array<{
         id: string;
         decision_entity_id: string;
         decision_name: string;
@@ -702,6 +745,7 @@ export const api = {
       nodes: Array<{ id: string; label: string; entity_type: string; is_root_blocker: boolean; in_degree: number; out_degree: number }>;
       edges: Array<{ source: string; target: string; relationship_type: string }>;
       cycles: string[][];
+      detected_cycles?: string[][];
       root_blockers: string[];
     }> {
       const qs = rootId ? `?root_entity_id=${rootId}` : "";
@@ -894,16 +938,67 @@ export const api = {
         body: JSON.stringify(payload),
       });
     },
-    async approveCase(projectId: string, caseId: string, notes?: string): Promise<Record<string, unknown>> {
+    async approveCase(
+      projectId: string,
+      caseId: string,
+      notesOrVersion?: string | number,
+      maybeNotes?: string
+    ): Promise<Record<string, unknown>> {
+      let expectedVersion: number | undefined;
+      let reviewNotes: string | undefined;
+
+      if (typeof notesOrVersion === "number") {
+        expectedVersion = notesOrVersion;
+        reviewNotes = maybeNotes;
+      } else if (typeof notesOrVersion === "string") {
+        reviewNotes = notesOrVersion;
+      }
+
+      const body: Record<string, unknown> = {
+        review_notes: reviewNotes || "Approved in Verification Center review",
+        notes: reviewNotes || "Approved in Verification Center review",
+      };
+      if (expectedVersion !== undefined) {
+        body.expected_version = expectedVersion;
+      }
+
       return request(`/projects/${projectId}/verification/cases/${caseId}/approve`, {
         method: "POST",
-        body: JSON.stringify({ notes }),
+        body: JSON.stringify(body),
       });
     },
-    async rejectCase(projectId: string, caseId: string, reason?: string): Promise<Record<string, unknown>> {
+    async rejectCase(
+      projectId: string,
+      caseId: string,
+      reasonOrVersion?: string | number,
+      maybeReason?: string,
+      maybeNotes?: string
+    ): Promise<Record<string, unknown>> {
+      let expectedVersion: number | undefined;
+      let reason: string = "Rejected by reviewer";
+      let reviewNotes: string | undefined;
+
+      if (typeof reasonOrVersion === "number") {
+        expectedVersion = reasonOrVersion;
+        reason = maybeReason || "Rejected by reviewer";
+        reviewNotes = maybeNotes;
+      } else if (typeof reasonOrVersion === "string") {
+        reason = reasonOrVersion;
+        reviewNotes = maybeReason;
+      }
+
+      const body: Record<string, unknown> = {
+        reason,
+        review_notes: reviewNotes,
+        notes: reviewNotes,
+      };
+      if (expectedVersion !== undefined) {
+        body.expected_version = expectedVersion;
+      }
+
       return request(`/projects/${projectId}/verification/cases/${caseId}/reject`, {
         method: "POST",
-        body: JSON.stringify({ reason: reason || "Rejected by reviewer" }),
+        body: JSON.stringify(body),
       });
     },
     async markUnresolved(projectId: string, caseId: string, reason: string): Promise<Record<string, unknown>> {
@@ -1264,21 +1359,51 @@ export const api = {
         body: JSON.stringify({ title: title || "New Investigation" }),
       });
     },
-    async sendMessage(projectId: string, conversationId: string, content: string): Promise<{
-      id: string;
-      role: string;
-      content: string;
+    async sendMessage(
+      projectId: string,
+      conversationId: string,
+      contentOrQuestion: string,
+      options?: {
+        mode?: string;
+        include_domains?: string[];
+        max_citations?: number;
+      }
+    ): Promise<{
+      id?: string;
+      message_id?: string;
+      conversation_id?: string;
+      role?: string;
+      content?: string;
+      answer?: string;
+      answer_status?: string;
+      query_type?: string;
+      claims?: Array<Record<string, unknown>>;
       citations: Array<{
         source_id: string;
         source_title: string;
         snippet: string;
         confidence: number;
       }>;
+      uncertainty?: string | null;
+      conflicts?: Array<Record<string, unknown>>;
+      missing_information?: string[];
+      suggested_followup_questions?: string[];
+      model_name?: string;
+      duration_ms?: number;
       created_at: string;
     }> {
+      const payload: Record<string, unknown> = {
+        question: contentOrQuestion,
+        content: contentOrQuestion,
+        mode: options?.mode || "standard",
+        max_citations: options?.max_citations || 5,
+      };
+      if (options?.include_domains) {
+        payload.include_domains = options.include_domains;
+      }
       return request(`/projects/${projectId}/assistant/conversations/${conversationId}/messages`, {
         method: "POST",
-        body: JSON.stringify({ content }),
+        body: JSON.stringify(payload),
       });
     },
     async getMessages(projectId: string, conversationId: string): Promise<Array<{

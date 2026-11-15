@@ -16,7 +16,15 @@ export function Breadcrumbs({ crumbs }: { crumbs?: Crumb[] }) {
   const pathname = usePathname();
   const { activeOrg, activeProject } = useLiveApp();
 
-  const orgName = activeOrg?.name || "The Handover";
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const effectiveProject = mounted ? activeProject : null;
+  const effectiveOrg = mounted ? activeOrg : null;
+
+  const orgName = effectiveOrg?.name || "The Handover";
   const orgInitial = orgName.charAt(0).toUpperCase();
 
   // Generate automatic breadcrumbs if explicit crumbs are not provided
@@ -28,9 +36,9 @@ export function Breadcrumbs({ crumbs }: { crumbs?: Crumb[] }) {
     switch (pathname) {
       case "/dashboard":
       case "/overview":
-        if (activeProject) {
+        if (effectiveProject) {
           list.push({ label: "Projects", to: "/projects" });
-          list.push({ label: activeProject.name, to: `/projects/${activeProject.id}` });
+          list.push({ label: effectiveProject.name, to: `/projects/${effectiveProject.id}` });
         }
         list.push({ label: "Overview" });
         break;
@@ -40,30 +48,30 @@ export function Breadcrumbs({ crumbs }: { crumbs?: Crumb[] }) {
         break;
       case "/settings/team":
       case "/team":
-        if (activeProject) {
+        if (effectiveProject) {
           list.push({ label: "Projects", to: "/projects" });
-          list.push({ label: activeProject.name, to: `/projects/${activeProject.id}` });
+          list.push({ label: effectiveProject.name, to: `/projects/${effectiveProject.id}` });
         }
         list.push({ label: "Team Members" });
         break;
       case "/evidence":
-        if (activeProject) {
+        if (effectiveProject) {
           list.push({ label: "Projects", to: "/projects" });
-          list.push({ label: activeProject.name, to: `/projects/${activeProject.id}` });
+          list.push({ label: effectiveProject.name, to: `/projects/${effectiveProject.id}` });
         }
         list.push({ label: "Evidence Center" });
         break;
       case "/knowledge":
-        if (activeProject) {
+        if (effectiveProject) {
           list.push({ label: "Projects", to: "/projects" });
-          list.push({ label: activeProject.name, to: `/projects/${activeProject.id}` });
+          list.push({ label: effectiveProject.name, to: `/projects/${effectiveProject.id}` });
         }
         list.push({ label: "Knowledge Intelligence" });
         break;
       case "/relationships":
-        if (activeProject) {
+        if (effectiveProject) {
           list.push({ label: "Projects", to: "/projects" });
-          list.push({ label: activeProject.name, to: `/projects/${activeProject.id}` });
+          list.push({ label: effectiveProject.name, to: `/projects/${effectiveProject.id}` });
         }
         list.push({ label: "Relationship Explorer" });
         break;

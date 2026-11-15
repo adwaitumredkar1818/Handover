@@ -425,21 +425,19 @@ function SidebarContent({
       items: [
         {
           label: "Evidence Center",
-          to: activeProject
-            ? `/projects/${activeProject.id}/evidence`
-            : projects.length > 0 && projects[0]
-            ? `/projects/${projects[0].id}/evidence`
-            : "/evidence",
+          to:
+            mounted && activeProject
+              ? `/projects/${activeProject.id}/evidence`
+              : "/evidence",
           icon: FileSearch,
           match: "^/projects/.+/evidence|^/evidence",
         },
         {
           label: "Knowledge Intelligence",
-          to: activeProject
-            ? `/projects/${activeProject.id}/knowledge`
-            : projects.length > 0 && projects[0]
-            ? `/projects/${projects[0].id}/knowledge`
-            : "/knowledge",
+          to:
+            mounted && activeProject
+              ? `/projects/${activeProject.id}/knowledge`
+              : "/knowledge",
           icon: BrainCircuit,
           match: "^/projects/.+/knowledge|^/knowledge",
         },
@@ -466,7 +464,7 @@ function SidebarContent({
           icon: AlertTriangle,
           match: "^/conflicts",
         },
-        ...(userProjectRole === "outgoing"
+        ...(mounted && userProjectRole === "outgoing"
           ? [
               {
                 label: "Verify my handover",
@@ -493,7 +491,7 @@ function SidebarContent({
           icon: Send,
           match: "^/generated-handovers",
         },
-        ...(userProjectRole === "incoming"
+        ...(mounted && userProjectRole === "incoming"
           ? [
               {
                 label: "Ask assistant",

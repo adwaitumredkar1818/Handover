@@ -6,7 +6,7 @@ import { Sidebar, RoleBadge } from "./Sidebar";
 import { TopNav } from "./TopNav";
 import { CommandPalette } from "./CommandPalette";
 import { ToastContainer } from "../common/ToastContainer";
-import { Logo } from "../brand";
+import { Logo, BrandLoadingScreen } from "../brand";
 import { CreateOrganisationModal } from "../modals/CreateOrganisationModal";
 import { CreateProjectModal } from "../modals/CreateProjectModal";
 import { UploadDocumentModal } from "../modals/UploadDocumentModal";
@@ -65,7 +65,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
     pathname === "/login" ||
     pathname === "/signup" ||
     pathname === "/forgot-password" ||
-    pathname === "/onboarding";
+    pathname === "/onboarding" ||
+    pathname?.startsWith("/auth/");
 
   const isPublicRoute = pathname === "/" || pathname === "/landing" || isAuthPage;
 
@@ -114,14 +115,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
         />
 
         <main id="main-scroll" className="ambient-canvas scrollbar-thin flex-1 overflow-y-auto relative">
-          {(!user || isLoadingAuth) && (
-            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-canvas/80 backdrop-blur-xs">
-              <div className="flex flex-col items-center gap-3">
-                <Logo size={32} />
-                <p className="text-xs text-muted">Verifying workspace session…</p>
-              </div>
-            </div>
-          )}
+          <BrandLoadingScreen isLoading={!user || isLoadingAuth} />
 
           <div
             className={`animate-fade mx-auto w-full px-4 py-6 sm:px-6 lg:px-8 lg:py-8 ${

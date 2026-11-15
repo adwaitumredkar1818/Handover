@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 from sqlalchemy.orm import Session
 
 from app.models.handover import (

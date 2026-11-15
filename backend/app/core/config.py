@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from functools import cached_property, lru_cache
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import parse_qs, urlparse
@@ -19,6 +20,7 @@ PostgresSslMode = Literal["disable", "allow", "prefer", "require", "verify-ca", 
 CookieSameSite = Literal["lax", "strict", "none"]
 AllowedJwtAlgorithm = Literal["HS256", "HS384", "HS512"]
 StorageBackendProvider = Literal["local_encrypted", "supabase_storage"]
+InferenceMode = Literal["local", "gateway", "disabled"]
 
 _STORAGE_BUCKET_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$")
 
@@ -39,6 +41,19 @@ def _require_http_url(value: str, field_name: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError(f"{field_name} must be a valid http(s) URL.")
     return cleaned
+
+
+class SupabaseAuthSettings(BaseModel):
+    """Supabase Auth identity provider and token verification configuration."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    url: str | None = None
+    audience: str = "authenticated"
+    issuer: str | None = None
+    jwks_url: str | None = None
+    jwt_secret: SecretStr | None = None
 
 
 class StorageSettings(BaseModel):
@@ -242,6 +257,95 @@ class RetrievalSettings(BaseModel):
             raise ValueError(
                 "RETRIEVAL_SEMANTIC_WEIGHT + RETRIEVAL_KEYWORD_WEIGHT must be positive."
             )
+        return self
+
+
+class InferenceGatewaySettings(BaseModel):
+    """Centralized Local Inference Gateway client configuration."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    base_url: str = "http://127.0.0.1:8002"
+    token: SecretStr | None = None
+    timeout_seconds: float = Field(default=120.0, gt=0.05, le=600.0)
+    cf_access_client_id: str | None = None
+    cf_access_client_secret: SecretStr | None = None
+    cf_access_allowed_host: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_destination_and_credentials(self) -> InferenceGatewaySettings:
+        has_cf_id = bool(self.cf_access_client_id and self.cf_access_client_id.strip())
+        has_cf_secret = bool(
+            self.cf_access_client_secret and self.cf_access_client_secret.get_secret_value().strip()
+        )
+        if has_cf_id or has_cf_secret:
+            if not (has_cf_id and has_cf_secret):
+                raise ValueError(
+                    "Both CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET must be provided together."
+                )
+
+            # Strict destination protection for Cloudflare Access credentials
+            raw_url = self.base_url.strip()
+            parsed = urlparse(raw_url)
+            if parsed.scheme.lower() != "https":
+                raise ValueError(
+                    f"INFERENCE_GATEWAY_BASE_URL must use HTTPS scheme when Cloudflare Access credentials are provided (got {parsed.scheme!r})."
+                )
+
+            # Reject embedded credentials
+            if parsed.username or parsed.password:
+                raise ValueError(
+                    "INFERENCE_GATEWAY_BASE_URL must not contain embedded user credentials."
+                )
+
+            # Extract hostname
+            hostname = parsed.hostname
+            if not hostname:
+                raise ValueError(
+                    f"INFERENCE_GATEWAY_BASE_URL has an invalid or missing hostname: {raw_url!r}"
+                )
+
+            hostname_lower = hostname.lower()
+
+            # Reject localhost and loopback names
+            if hostname_lower in ("localhost", "127.0.0.1", "::1"):
+                raise ValueError(
+                    "Cloudflare Access credentials cannot be attached to localhost or loopback destinations."
+                )
+
+            # Reject IP literals (private, loopback, link-local, multicast, reserved)
+            try:
+                ip_obj = ip_address(hostname_lower)
+                if (
+                    ip_obj.is_loopback
+                    or ip_obj.is_private
+                    or ip_obj.is_link_local
+                    or ip_obj.is_multicast
+                    or ip_obj.is_reserved
+                    or ip_obj.is_unspecified
+                ):
+                    raise ValueError(
+                        f"Cloudflare Access credentials cannot be attached to IP address {hostname_lower} (loopback, private, or reserved)."
+                    )
+            except ValueError as exc:
+                # Not an IP literal, which is expected for domain names.
+                # But if our own validation raised ValueError, re-raise it
+                if "Cloudflare Access credentials cannot be attached" in str(exc):
+                    raise
+
+            # Must match explicitly configured approved host
+            if not self.cf_access_allowed_host or not self.cf_access_allowed_host.strip():
+                raise ValueError(
+                    "CF_ACCESS_ALLOWED_HOST must be explicitly configured when Cloudflare Access credentials are used."
+                )
+
+            allowed_host_clean = self.cf_access_allowed_host.strip().lower()
+            if hostname_lower != allowed_host_clean:
+                raise ValueError(
+                    f"INFERENCE_GATEWAY_BASE_URL hostname {hostname_lower!r} does not match approved CF_ACCESS_ALLOWED_HOST {allowed_host_clean!r}."
+                )
+
         return self
 
 
@@ -507,6 +611,19 @@ class Settings(BaseSettings):
     ollama_ocr_num_predict: int = Field(default=4096, ge=256, le=16384)
     ollama_ocr_timeout_seconds: float | None = Field(default=None, ge=0.0)
 
+    # Inference execution mode ('local', 'gateway', 'disabled')
+    # If None, automatically derived: 'gateway' if inference_gateway_enabled else ('disabled' if is_production else 'local')
+    inference_mode: InferenceMode | None = None
+
+    # Inference Gateway settings (`settings.gateway`)
+    inference_gateway_enabled: bool = False
+    inference_gateway_base_url: str = "http://127.0.0.1:8002"
+    inference_gateway_token: SecretStr | None = None
+    inference_gateway_timeout_seconds: float = Field(default=120.0, gt=1.0, le=600.0)
+    cf_access_client_id: str | None = None
+    cf_access_client_secret: SecretStr | None = None
+    cf_access_allowed_host: str | None = None
+
     # Knowledge reconstruction fields (`settings.extraction`)
     extraction_prompt_version: str = Field(default="p2.6-v1", min_length=1, max_length=64)
     extraction_max_retries: int = Field(default=2, ge=0, le=5)
@@ -590,6 +707,13 @@ class Settings(BaseSettings):
     supabase_storage_max_retries: int = Field(default=2, ge=0, le=5)
     supabase_storage_retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=10.0)
     supabase_storage_verify_ciphertext_size: bool = True
+
+    # Supabase Auth identity provider (`settings.supabase_auth`)
+    supabase_auth_enabled: bool = True
+    supabase_auth_audience: str = "authenticated"
+    supabase_auth_issuer: str | None = None
+    supabase_auth_jwks_url: str | None = None
+    supabase_jwt_secret: SecretStr | None = None
 
     # Redis Caching Layer (`settings.redis`)
     redis_enabled: bool = True
@@ -833,6 +957,19 @@ class Settings(BaseSettings):
         )
 
     @cached_property
+    def gateway(self) -> InferenceGatewaySettings:
+        """Centralized Local Inference Gateway client configuration."""
+        return InferenceGatewaySettings(
+            enabled=self.inference_gateway_enabled,
+            base_url=self.inference_gateway_base_url.strip().rstrip("/"),
+            token=self.inference_gateway_token,
+            timeout_seconds=self.inference_gateway_timeout_seconds,
+            cf_access_client_id=self.cf_access_client_id.strip() if self.cf_access_client_id else None,
+            cf_access_client_secret=self.cf_access_client_secret,
+            cf_access_allowed_host=self.cf_access_allowed_host.strip() if self.cf_access_allowed_host else None,
+        )
+
+    @cached_property
     def extraction(self) -> ExtractionSettings:
         """Separated Phase 2.6 knowledge reconstruction & validation settings."""
         return ExtractionSettings(
@@ -916,6 +1053,29 @@ class Settings(BaseSettings):
         )
 
     @cached_property
+    def supabase_auth(self) -> SupabaseAuthSettings:
+        """Supabase Auth token verification configuration."""
+        clean_url = _normalize_optional_str(self.supabase_url)
+        issuer = _normalize_optional_str(self.supabase_auth_issuer)
+        jwks_url = _normalize_optional_str(self.supabase_auth_jwks_url)
+
+        if clean_url:
+            clean_url = clean_url.rstrip("/")
+            if not issuer:
+                issuer = f"{clean_url}/auth/v1"
+            if not jwks_url:
+                jwks_url = f"{clean_url}/auth/v1/.well-known/jwks.json"
+
+        return SupabaseAuthSettings(
+            enabled=self.supabase_auth_enabled and bool(clean_url or jwks_url or self.supabase_jwt_secret),
+            url=clean_url,
+            audience=self.supabase_auth_audience.strip() if self.supabase_auth_audience else "authenticated",
+            issuer=issuer,
+            jwks_url=jwks_url,
+            jwt_secret=self.supabase_jwt_secret,
+        )
+
+    @cached_property
     def storage(self) -> StorageSettings:
         """Separated private encrypted storage provider configuration."""
         resolved_service_key = self.supabase_service_role_key or self.supabase_secret_key
@@ -948,6 +1108,20 @@ class Settings(BaseSettings):
             default_ttl=self.redis_default_ttl,
             max_memory=self.redis_max_memory.strip(),
         )
+
+    @property
+    def resolved_inference_mode(self) -> InferenceMode:
+        """Resolve effective inference mode: 'local', 'gateway', or 'disabled'.
+        
+        Guarantees that a cloud production backend never falls back to local Ollama or ChromaDB.
+        """
+        if self.inference_mode is not None:
+            return self.inference_mode
+        if self.inference_gateway_enabled:
+            return "gateway"
+        if self.is_production:
+            return "disabled"
+        return "local"
 
     @property
     def is_production(self) -> bool:

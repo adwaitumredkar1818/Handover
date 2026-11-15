@@ -31,13 +31,27 @@ from app.repositories.system import SystemRepository
 from app.repositories.user import UserRepository
 from app.services.audit import AuditService
 from app.services.auth import AuthService
-from app.services.embedding import EmbeddingService, OllamaEmbeddingService
+from app.services.embedding import (
+    DisabledEmbeddingService,
+    EmbeddingService,
+    GatewayEmbeddingService,
+    OllamaEmbeddingService,
+)
 from app.services.evidence import EvidenceService
 from app.services.health import HealthService
+from app.services.inference_gateway import (
+    InferenceGatewayClient,
+    InferenceGatewayClientError,
+)
 from app.services.integrations.service import SourceIntegrationService
 from app.services.knowledge import KnowledgeReconstructionService
 from app.services.knowledge_intelligence import KnowledgeIntelligenceService
-from app.services.llm import OllamaLLMClient, StructuredLLMClient
+from app.services.llm import (
+    DisabledLLMClient,
+    GatewayLLMClient,
+    OllamaLLMClient,
+    StructuredLLMClient,
+)
 from app.services.organisation import OrganisationService
 from app.services.project import ProjectService
 from app.services.rbac import (
@@ -54,7 +68,13 @@ from app.services.token_encryption import (
     TokenEncryptionService,
 )
 from app.services.user import UserService
-from app.services.vector_store import ChromaV2HttpVectorStore, VectorStoreClient
+from app.services.vector_store import (
+    ChromaV2HttpVectorStore,
+    DisabledVectorStore,
+    GatewayVectorStore,
+    VectorStoreClient,
+    build_chroma_collection_name,
+)
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -283,14 +303,68 @@ def get_source_integration_service(
     )
 
 
+def get_inference_gateway_client(
+    request: Request,
+    settings: Settings = Depends(get_app_settings),  # noqa: B008
+) -> InferenceGatewayClient | None:
+    """Resolve centralized InferenceGatewayClient if enabled, or None."""
+    overridden = getattr(request.app.state, "inference_gateway_client", None)
+    if overridden is not None:
+        return cast(InferenceGatewayClient, overridden)
+
+    if not settings.gateway.enabled:
+        return None
+
+    transport = cast(
+        httpx.BaseTransport | None,
+        getattr(request.app.state, "gateway_http_transport", None),
+    )
+    shared_client = cast(
+        httpx.Client | None,
+        getattr(request.app.state, "sync_http_client", None),
+    )
+    return InferenceGatewayClient(
+        settings=settings.gateway,
+        http_client=shared_client,
+        http_transport=transport,
+    )
+
+
 def get_embedding_service(
     request: Request,
     settings: Settings = Depends(get_app_settings),  # noqa: B008
+    gateway_client: InferenceGatewayClient | None = Depends(get_inference_gateway_client),  # noqa: B008
 ) -> EmbeddingService:
-    """Resolve replaceable EmbeddingService adapter with optional test overrides."""
+    """Resolve replaceable EmbeddingService adapter with optional test overrides.
+    
+    Modes:
+    - 'gateway': Routes through InferenceGatewayClient to local gateway (CloudFlare tunnel / TCP).
+    - 'disabled': Fails closed with typed error without connecting to any service (Render initial staging).
+    - 'local': Uses native OllamaEmbeddingService for developer laptop direct inference.
+    """
     overridden = getattr(request.app.state, "embedding_service", None)
     if overridden is not None:
         return cast(EmbeddingService, overridden)
+
+    mode = settings.resolved_inference_mode
+    if mode == "gateway":
+        if gateway_client is None:
+            raise InferenceGatewayClientError(
+                message="Inference Gateway mode is enabled, but client could not be initialized.",
+                code="GATEWAY_NOT_INITIALIZED",
+            )
+        return GatewayEmbeddingService(
+            gateway_client=gateway_client,
+            model=settings.ollama.embedding_model,
+            batch_size=settings.embedding.batch_size,
+            expected_dimensions=settings.embedding.expected_dimensions,
+        )
+    elif mode == "disabled":
+        return DisabledEmbeddingService(
+            model=settings.ollama.embedding_model,
+            expected_dimensions=settings.embedding.expected_dimensions,
+        )
+
     transport = cast(
         httpx.BaseTransport | None,
         getattr(request.app.state, "ollama_http_transport", None),
@@ -308,18 +382,54 @@ def get_embedding_service(
 def get_vector_store_client(
     request: Request,
     settings: Settings = Depends(get_app_settings),  # noqa: B008
+    gateway_client: InferenceGatewayClient | None = Depends(get_inference_gateway_client),  # noqa: B008
 ) -> VectorStoreClient:
-    """Resolve replaceable VectorStoreClient (Chroma v2) with optional test overrides."""
+    """Resolve replaceable VectorStoreClient (Chroma v2) with optional test overrides.
+    
+    Modes:
+    - 'gateway': Routes read-only queries through InferenceGatewayClient with mandatory tenant boundaries.
+    - 'disabled': Fails closed without connecting to any service (Render initial staging).
+    - 'local': Uses native ChromaV2HttpVectorStore for direct local ChromaDB HTTP access.
+    """
     overridden = getattr(request.app.state, "vector_store_client", None)
     if overridden is not None:
         return cast(VectorStoreClient, overridden)
-    transport = cast(
-        httpx.BaseTransport | None,
-        getattr(request.app.state, "chroma_http_transport", None),
-    )
+
     collection_override = cast(
         str | None,
         getattr(request.app.state, "chroma_collection_name", None),
+    )
+    canonical_collection = collection_override or build_chroma_collection_name(
+        prefix=settings.chroma.collection_prefix,
+        embedding_model=settings.ollama.embedding_model,
+        index_version=settings.chroma.index_version,
+    )
+
+    mode = settings.resolved_inference_mode
+    if mode == "gateway":
+        if gateway_client is None:
+            raise InferenceGatewayClientError(
+                message="Inference Gateway mode is enabled, but client could not be initialized.",
+                code="GATEWAY_NOT_INITIALIZED",
+            )
+        return GatewayVectorStore(
+            gateway_client=gateway_client,
+            collection_name=canonical_collection,
+            embedding_model=settings.ollama.embedding_model,
+            index_version=settings.chroma.index_version,
+            expected_dimensions=settings.embedding.expected_dimensions,
+        )
+    elif mode == "disabled":
+        return DisabledVectorStore(
+            collection_name=canonical_collection,
+            embedding_model=settings.ollama.embedding_model,
+            index_version=settings.chroma.index_version,
+            expected_dimensions=settings.embedding.expected_dimensions,
+        )
+
+    transport = cast(
+        httpx.BaseTransport | None,
+        getattr(request.app.state, "chroma_http_transport", None),
     )
     chroma_token = (
         settings.chroma.auth_token.get_secret_value()
@@ -363,11 +473,35 @@ def get_hybrid_retrieval_service(
 def get_llm_client(
     request: Request,
     settings: Settings = Depends(get_app_settings),  # noqa: B008
+    gateway_client: InferenceGatewayClient | None = Depends(get_inference_gateway_client),  # noqa: B008
 ) -> StructuredLLMClient:
-    """Resolve replaceable StructuredLLMClient with optional test overrides."""
+    """Resolve replaceable StructuredLLMClient with optional test overrides.
+    
+    Modes:
+    - 'gateway': Returns GatewayLLMClient wrapping InferenceGatewayClient.
+    - 'disabled': Returns DisabledLLMClient which fails closed without local connections.
+    - 'local': Returns native OllamaLLMClient for local direct inference.
+    """
     overridden = getattr(request.app.state, "llm_client", None)
     if overridden is not None:
         return cast(StructuredLLMClient, overridden)
+
+    mode = settings.resolved_inference_mode
+    if mode == "gateway":
+        if gateway_client is None:
+            raise InferenceGatewayClientError(
+                message="Inference Gateway mode is enabled, but client could not be initialized.",
+                code="GATEWAY_NOT_INITIALIZED",
+            )
+        return GatewayLLMClient(
+            gateway_client=gateway_client,
+            model=settings.ollama.llm_model,
+            temperature=settings.ollama.llm_temperature,
+            num_predict=settings.ollama.llm_num_predict,
+        )
+    elif mode == "disabled":
+        return DisabledLLMClient(model=settings.ollama.llm_model)
+
     transport = cast(
         httpx.BaseTransport | None,
         getattr(request.app.state, "ollama_http_transport", None),

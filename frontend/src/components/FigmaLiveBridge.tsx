@@ -38,6 +38,7 @@ export function FigmaLiveBridge() {
     currentProject,
     setSources,
     setHandovers,
+    setWorkspaceId,
   } = useFigmaStore()
 
   const lastUserEmailRef = useRef<string>('')
@@ -80,8 +81,9 @@ export function FigmaLiveBridge() {
       if (key !== lastMembersRef.current) {
         lastMembersRef.current = key
         members.forEach((m) => {
-          const name = m.user_email?.split('@')[0] || 'Member'
-          if (!storePeople.some((p) => p.id === m.user_id)) {
+          const name = m.user_full_name || m.user_email?.split('@')[0] || 'Member'
+          const existing = storePeople.find((p) => p.id === m.user_id)
+          if (!existing) {
             storePeople.push({
               id: m.user_id,
               name,
@@ -91,6 +93,8 @@ export function FigmaLiveBridge() {
               wsRole: 'Member',
               status: 'Active',
             })
+          } else if (m.user_full_name) {
+            existing.name = m.user_full_name
           }
         })
       }
@@ -118,7 +122,7 @@ export function FigmaLiveBridge() {
             category,
             status: p.status === 'archived' ? 'completed' : 'active',
             health: 92,
-            ownerId: user?.id || 'maya',
+            ownerId: (pRecord.owner_id as string) || (pRecord.created_by_id as string) || user?.id || 'maya',
             role,
             lastActivity: 'Just now',
             coverage: 85,
@@ -128,10 +132,16 @@ export function FigmaLiveBridge() {
           }
         })
 
+        // Ensure store workspace matches the projects' workspace so they aren't filtered out
+        const firstOrgId = projects[0]?.organisation_id
+        if (firstOrgId) {
+          setWorkspaceId(firstOrgId)
+        }
+
         setProjects(mapped)
       }
     }
-  }, [projects, user?.id, setProjects])
+  }, [projects, user?.id, setProjects, setWorkspaceId])
 
   // 3b. Switch active project in figma store safely
   useEffect(() => {

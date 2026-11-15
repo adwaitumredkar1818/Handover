@@ -804,7 +804,7 @@ class EvidenceService:
                                 pages=(),
                             )
                             evidence.chunk_count = len(created_chunks)
-                            evidence.extraction_method = "python-docx"
+                            evidence.extraction_method = "python_docx"
                             evidence.processing_status = "extracted"
                             evidence.error_code = None
                             evidence.error_message = None

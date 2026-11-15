@@ -33,6 +33,7 @@ def _build_lifespan(
         engine = create_db_engine(settings)
         session_factory = create_session_factory(engine)
         http_client = httpx.AsyncClient()
+        sync_http_client = httpx.Client(follow_redirects=False)
         redis_mgr = RedisConnectionManager(settings)
         redis_mgr.initialize()
         cache_service = CacheService(settings, redis_mgr=redis_mgr)
@@ -41,6 +42,7 @@ def _build_lifespan(
         app.state.db_engine = engine
         app.state.session_factory = session_factory
         app.state.http_client = http_client
+        app.state.sync_http_client = sync_http_client
         app.state.redis_manager = redis_mgr
         app.state.cache_service = cache_service
         if getattr(app.state, "auth_rate_limiter", None) is None:
@@ -59,6 +61,7 @@ def _build_lifespan(
         try:
             yield
         finally:
+            sync_http_client.close()
             await http_client.aclose()
             redis_mgr.close()
             engine.dispose()

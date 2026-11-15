@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { Button } from "../ui";
+import { api } from "../../lib/api";
 
 export function AuditWorkspaceView() {
   const { activeOrg, user } = useLiveApp();
@@ -27,17 +28,11 @@ export function AuditWorkspaceView() {
   const loadAuditLogs = async (orgId: string) => {
     setIsLoading(true);
     try {
-      const token = localStorage.getItem("auth_token");
-      const res = await fetch(
-        `http://127.0.0.1:8000/api/v1/organisations/${orgId}/audit-events?limit=50`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        setAuditEvents(data.items || []);
-      }
+      const data = await api.audit.listOrganisationEvents(orgId, 50, 0);
+      setAuditEvents(data.items || []);
     } catch (err) {
       console.error("Failed to load audit logs:", err);
+      setAuditEvents([]);
     } finally {
       setIsLoading(false);
     }
@@ -46,6 +41,8 @@ export function AuditWorkspaceView() {
   useEffect(() => {
     if (activeOrg) {
       loadAuditLogs(activeOrg.id);
+    } else {
+      setAuditEvents([]);
     }
   }, [activeOrg]);
 

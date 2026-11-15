@@ -99,13 +99,7 @@ export function KnowledgeWorkspaceView() {
     if (!activeProject) return;
     setIsExtracting(true);
     try {
-      await fetch(`http://127.0.0.1:8000/api/v1/projects/${activeProject.id}/knowledge-intelligence/extract`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("auth_token")}`,
-        },
-      });
+      await api.knowledgeIntelligence.triggerExtraction(activeProject.id);
       await loadKnowledgeData(activeProject.id);
     } catch (err) {
       console.error("Failed to trigger extraction:", err);

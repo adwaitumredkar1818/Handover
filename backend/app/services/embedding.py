@@ -292,3 +292,134 @@ class OllamaEmbeddingService:
             },
         )
         return validated
+
+
+class GatewayEmbeddingService:
+    """EmbeddingService adapter routing through the Local Inference Gateway.
+    
+    Translates embedding requests to InferenceGatewayClient.embed_texts() with
+    dimension validation, batching, and typed EmbeddingExecutionError mapping.
+    """
+
+    def __init__(
+        self,
+        *,
+        gateway_client: Any,
+        model: str = "nomic-embed-text",
+        batch_size: int = 8,
+        expected_dimensions: int = 768,
+    ) -> None:
+        self._gateway_client = gateway_client
+        self._model = model.strip()
+        self._batch_size = max(1, min(16, int(batch_size)))
+        self._expected_dimensions = int(expected_dimensions)
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    @property
+    def expected_dimensions(self) -> int:
+        return self._expected_dimensions
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        
+        all_embeddings: list[list[float]] = []
+        try:
+            for i in range(0, len(texts), self._batch_size):
+                batch = list(texts[i : i + self._batch_size])
+                raw_embeddings = self._gateway_client.embed_texts(
+                    model=self._model,
+                    texts=batch,
+                )
+                self._validate_embeddings(raw_embeddings, len(batch))
+                all_embeddings.extend(raw_embeddings)
+        except Exception as exc:
+            if isinstance(exc, EmbeddingExecutionError):
+                raise
+            code = getattr(exc, "code", "GATEWAY_EMBEDDING_ERROR")
+            retryable = getattr(exc, "retryable", False)
+            clean_msg = f"Inference Gateway embedding generation failed: {exc}"
+            logger.warning("Gateway embedding generation failed (%s: %s).", code, clean_msg)
+            raise EmbeddingExecutionError(
+                code=code,
+                message=clean_msg,
+                retryable=retryable,
+            ) from exc
+
+        return all_embeddings
+
+    def embed_query(self, text: str) -> list[float]:
+        cleaned = text.strip()
+        if not cleaned:
+            raise EmbeddingExecutionError(
+                code="EMBEDDING_TEXT_EMPTY",
+                message="Cannot generate query embedding for empty or whitespace-only text.",
+                retryable=False,
+            )
+        embeddings = self.embed_documents([cleaned])
+        if not embeddings:
+            raise EmbeddingExecutionError(
+                code="EMBEDDING_EMPTY_RESPONSE",
+                message="Inference Gateway returned empty embedding for query.",
+                retryable=False,
+            )
+        return embeddings[0]
+
+    def _validate_embeddings(self, embeddings: list[list[float]], expected_count: int) -> None:
+        if len(embeddings) != expected_count:
+            raise EmbeddingExecutionError(
+                code="EMBEDDING_COUNT_MISMATCH",
+                message=f"Gateway returned {len(embeddings)} vectors, expected {expected_count}.",
+                retryable=False,
+            )
+        for idx, vec in enumerate(embeddings):
+            if not isinstance(vec, list) or len(vec) != self._expected_dimensions:
+                raise EmbeddingExecutionError(
+                    code="EMBEDDING_DIMENSION_MISMATCH",
+                    message=f"Vector at index {idx} dimension mismatch: expected {self._expected_dimensions}.",
+                    retryable=False,
+                )
+
+
+class DisabledEmbeddingService:
+    """EmbeddingService placeholder used when inference is disabled on cloud deployment.
+    
+    Prevents any connection attempt to local Ollama.
+    Fails closed with a typed, informative EmbeddingExecutionError.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str = "disabled",
+        expected_dimensions: int = 768,
+    ) -> None:
+        self._model = model
+        self._expected_dimensions = expected_dimensions
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    @property
+    def expected_dimensions(self) -> int:
+        return self._expected_dimensions
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        raise EmbeddingExecutionError(
+            code="INFERENCE_DISABLED",
+            message="Embedding services are currently disabled on this deployment.",
+            retryable=False,
+        )
+
+    def embed_query(self, text: str) -> list[float]:
+        raise EmbeddingExecutionError(
+            code="INFERENCE_DISABLED",
+            message="Embedding services are currently disabled on this deployment.",
+            retryable=False,
+        )
+
+

@@ -178,7 +178,7 @@ export function VerificationCenterWorkspace() {
         })),
       ]);
 
-      setSummary(sumRes);
+      setSummary(sumRes as unknown as VerificationSummary);
       const items = (queueRes.items || []) as unknown as VerificationQueueItem[];
       setQueue(items);
 
@@ -253,6 +253,7 @@ export function VerificationCenterWorkspace() {
       await api.verification.approveCase(
         activeProject.id,
         caseDetail.id,
+        caseDetail.version || 1,
         noteToSave
       );
       addToast({
@@ -283,6 +284,8 @@ export function VerificationCenterWorkspace() {
       await api.verification.rejectCase(
         activeProject.id,
         caseDetail.id,
+        caseDetail.version || 1,
+        noteToSave,
         noteToSave
       );
       addToast({

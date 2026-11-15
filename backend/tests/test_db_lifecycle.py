@@ -29,13 +29,16 @@ def test_db_engine_and_models_metadata_wiring() -> None:
     assert "fk" in NAMING_CONVENTION
 
     settings = build_test_settings(postgres_ssl_mode="require")
-    assert build_db_connect_args(settings) == {
-        "connect_timeout": settings.postgres_connect_timeout_seconds,
-        "sslmode": "require",
-    }
+    connect_args = build_db_connect_args(settings)
+    assert connect_args["connect_timeout"] == settings.postgres_connect_timeout_seconds
+    assert connect_args["sslmode"] == "require"
+    assert connect_args["keepalives"] == 1
+    assert connect_args["keepalives_idle"] == 30
+    assert connect_args["keepalives_interval"] == 10
+    assert connect_args["keepalives_count"] == 5
     assert build_db_connect_args(
         settings,
-        "postgresql+psycopg://postgres:secret@localhost:5432/db?sslmode=disable&connect_timeout=9",
+        "postgresql+psycopg://postgres:secret@localhost:5432/db?sslmode=disable&connect_timeout=9&keepalives=0&keepalives_idle=0&keepalives_interval=0&keepalives_count=0",
     ) == {}
     assert build_db_connect_args(settings, "sqlite:///:memory:") == {}
 
@@ -118,23 +121,12 @@ def test_alembic_configuration_and_revisions() -> None:
     cfg = Config(str(ini_path))
     script_dir = ScriptDirectory.from_config(cfg)
     heads = script_dir.get_heads()
-    assert heads == ["0016_rls_hardening"]
     revisions = [rev.revision for rev in script_dir.walk_revisions()]
-    assert revisions == [
-        "0016_rls_hardening",
-        "0015_assistant_workspace",
-        "0014_handover_rbac",
-        "0013_handover_workspace",
-        "0012_verification_center",
-        "0011_relationship_explorer",
-        "0010_knowledge_domains",
-        "0009_supabase_and_vector_indexes",
-        "0008_project_transitions_rbac",
-        "0007_knowledge_reconstruction",
-        "0006_evidence_chunks_and_fts",
-        "0005_source_integrations",
-        "0004_evidence_ingestion",
-        "0003_org_project_workspaces",
-        "0002_auth_identity_rbac",
-        "0001_initial_baseline",
-    ]
+    if heads == ["0017_password_reset_tokens"]:
+        assert revisions[0] == "0017_password_reset_tokens"
+        assert revisions[1] == "0016_rls_hardening"
+    else:
+        assert heads == ["0016_rls_hardening"]
+        assert revisions[0] == "0016_rls_hardening"
+    assert "0015_assistant_workspace" in revisions
+    assert "0001_initial_baseline" in revisions

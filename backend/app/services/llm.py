@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import httpx
 
@@ -76,6 +76,7 @@ class LLMGenerationResult:
     truncated: bool
 
 
+@runtime_checkable
 class StructuredLLMClient(Protocol):
     """Replaceable abstraction decoupling knowledge extraction from Ollama/qwen3:8b."""
 
@@ -309,3 +310,139 @@ class OllamaLLMClient:
             done_reason=done_reason,
             truncated=truncated,
         )
+
+
+class GatewayLLMClient:
+    """StructuredLLMClient adapter routing through the Local Inference Gateway.
+    
+    Translates LLMGenerationRequest -> InferenceGatewayClient.generate_chat() -> LLMGenerationResult.
+    Preserves schema parsing, token telemetry, truncation handling, and typed exception mapping.
+    """
+
+    def __init__(
+        self,
+        *,
+        gateway_client: Any,
+        model: str = "qwen3:8b",
+        temperature: float = 0.1,
+        num_predict: int = 2048,
+    ) -> None:
+        self._gateway_client = gateway_client
+        self._model = model.strip()
+        self._temperature = float(temperature)
+        self._num_predict = max(256, int(num_predict))
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    def generate_json(self, request: LLMGenerationRequest) -> LLMGenerationResult:
+        messages = [
+            {"role": "system", "content": request.system_prompt},
+            {"role": "user", "content": request.user_prompt},
+        ]
+        temp = self._temperature if request.temperature is None else float(request.temperature)
+        predict = request.num_predict or self._num_predict
+
+        started = time.perf_counter()
+        try:
+            resp = self._gateway_client.generate_chat(
+                model=self._model,
+                messages=messages,
+                temperature=temp,
+                num_predict=predict,
+                format_json=True,
+            )
+        except Exception as exc:
+            # Map gateway client errors to LLMExecutionError preserving retryability
+            code = getattr(exc, "code", "GATEWAY_INFERENCE_ERROR")
+            retryable = getattr(exc, "retryable", False)
+            clean_msg = f"Inference Gateway chat completion failed: {exc}"
+            logger.warning(
+                "Gateway LLM generation failed (%s: %s).",
+                code,
+                clean_msg,
+            )
+            raise LLMExecutionError(
+                code=code,
+                message=clean_msg,
+                retryable=retryable,
+            ) from exc
+
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+        raw_content = ""
+        msg_obj = resp.get("message")
+        if isinstance(msg_obj, dict):
+            raw_content = str(msg_obj.get("content") or "")
+
+        prompt_tokens = max(0, int(resp.get("prompt_eval_count") or 0))
+        completion_tokens = max(0, int(resp.get("eval_count") or 0))
+        done_reason_raw = resp.get("done_reason")
+        done_reason = str(done_reason_raw).strip() if done_reason_raw is not None else None
+        truncated = done_reason == "length"
+
+        try:
+            parsed = parse_llm_json_object(raw_content)
+        except LLMExecutionError as exc:
+            if truncated:
+                raise LLMExecutionError(
+                    code="LLM_TRUNCATED",
+                    message="Gateway LLM output exceeded max prediction tokens before finishing JSON.",
+                    retryable=True,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                ) from exc
+            raise LLMExecutionError(
+                code=exc.code,
+                message=exc.message,
+                retryable=exc.retryable,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            ) from exc
+
+        logger.debug(
+            "Completed structured JSON generation via Inference Gateway.",
+            extra={
+                "llm_model": self._model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "duration_ms": elapsed_ms,
+                "done_reason": done_reason,
+            },
+        )
+        return LLMGenerationResult(
+            parsed_json=parsed,
+            raw_text=raw_content,
+            model_name=self._model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            duration_ms=elapsed_ms,
+            done_reason=done_reason,
+            truncated=truncated,
+        )
+
+
+class DisabledLLMClient:
+    """StructuredLLMClient placeholder used when inference is disabled on cloud deployment.
+    
+    Prevents any connection attempt to local Ollama or unconfigured gateways.
+    Fails closed with a typed, informative LLMExecutionError explaining that AI features
+    are currently offline/unconfigured.
+    """
+
+    def __init__(self, *, model: str = "disabled") -> None:
+        self._model = model
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    def generate_json(self, request: LLMGenerationRequest) -> LLMGenerationResult:
+        raise LLMExecutionError(
+            code="INFERENCE_DISABLED",
+            message="Inference services are currently disabled on this deployment. Please enable Inference Gateway or run locally.",
+            retryable=False,
+        )
+
+

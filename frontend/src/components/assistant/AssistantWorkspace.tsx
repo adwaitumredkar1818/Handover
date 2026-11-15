@@ -125,7 +125,14 @@ export function AssistantWorkspace() {
 
     try {
       const assistantReply = await api.assistant.sendMessage(activeProject.id, selectedConversation.id, text);
-      setMessages((prev) => [...prev, assistantReply]);
+      const mappedMsg: MessageItem = {
+        id: assistantReply.message_id || `asst-${Date.now()}`,
+        role: "assistant",
+        content: assistantReply.answer || "",
+        citations: assistantReply.citations,
+        created_at: assistantReply.created_at || new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, mappedMsg]);
     } catch {
       setMessages((prev) => [
         ...prev,

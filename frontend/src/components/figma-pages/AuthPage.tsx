@@ -35,6 +35,7 @@ import {
   AlertTriangle,
   Eye,
   EyeOff,
+  KeyRound,
 } from 'lucide-react'
 import { Logo, LogoMark, SourceIcon } from '../figma-ui/brand'
 import {
@@ -61,7 +62,7 @@ import {
   FigmaStoreProvider,
 } from '../../lib/figmaStore'
 import { useLiveApp } from '../../context/LiveAppContext'
-import { api, setStoredToken } from '../../lib/api'
+import { api, setStoredToken, ApiError } from '../../lib/api'
 
 /* HeroVisual embedded directly from landing reference */
 const SRC = [
@@ -338,11 +339,13 @@ export function Login() {
   const liveApp = useLiveApp()
 
   const registered = searchParams ? searchParams.get('registered') === '1' : false
+  const oauthError = searchParams ? searchParams.get('oauth_error') : null
   const [email, setEmail] = useState('maya.chen@northwind.io')
   const [pw, setPw] = useState('handover-demo')
   const [remember, setRemember] = useState(true)
   const [loading, setLoading] = useState(false)
-  const [err, setErr] = useState('')
+  const [googleLoading, setGoogleLoading] = useState(false)
+  const [err, setErr] = useState(oauthError || '')
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
@@ -400,11 +403,21 @@ export function Login() {
       )}
       <div className="mt-6">
         <GoogleButton
-          label="Continue with Google"
-          onClick={() => {
-            setErr(
-              'Google Workspace SSO requires organisation domain configuration in Settings.',
-            )
+          label={googleLoading ? "Connecting with Google..." : "Continue with Google"}
+          onClick={async () => {
+            setErr('')
+            setGoogleLoading(true)
+            try {
+              if (liveApp?.loginWithGoogle) {
+                await liveApp.loginWithGoogle()
+              } else {
+                setErr('Supabase Auth client is not available.')
+              }
+            } catch (gErr: unknown) {
+              setErr(gErr instanceof Error ? gErr.message : 'Failed to initiate Google sign-in.')
+            } finally {
+              setGoogleLoading(false)
+            }
           }}
         />
       </div>
@@ -491,6 +504,7 @@ export function Signup() {
   const [f, setF] = useState({ name: '', email: '', pw: '', confirm: '' })
   const [touched, setTouched] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [googleLoading, setGoogleLoading] = useState(false)
   const [err, setErr] = useState('')
 
   const strength = [
@@ -528,10 +542,16 @@ export function Signup() {
       s.setAuthed(true)
       router.push('/login?registered=1')
     } catch (apiErr: unknown) {
-      const msg =
+      let msg =
         apiErr instanceof Error
           ? apiErr.message
           : 'Unable to register account. Please try again.'
+      if (
+        msg.toLowerCase().includes('already exists') ||
+        (apiErr instanceof ApiError && apiErr.status === 409)
+      ) {
+        msg = 'An account with this email address already exists. Please sign in.'
+      }
       setErr(msg)
     } finally {
       setLoading(false)
@@ -548,11 +568,21 @@ export function Signup() {
       </p>
       <div className="mt-6">
         <GoogleButton
-          label="Sign up with Google"
-          onClick={() => {
-            setErr(
-              'Google Workspace SSO requires organisation domain configuration in Settings.',
-            )
+          label={googleLoading ? "Connecting with Google..." : "Sign up with Google"}
+          onClick={async () => {
+            setErr('')
+            setGoogleLoading(true)
+            try {
+              if (liveApp?.loginWithGoogle) {
+                await liveApp.loginWithGoogle()
+              } else {
+                setErr('Supabase Auth client is not available.')
+              }
+            } catch (gErr: unknown) {
+              setErr(gErr instanceof Error ? gErr.message : 'Failed to initiate Google sign-in.')
+            } finally {
+              setGoogleLoading(false)
+            }
           }}
         />
       </div>
@@ -658,6 +688,7 @@ export function ForgotPassword() {
   const [email, setEmail] = useState('')
   const [sent, setSent] = useState(false)
   const [err, setErr] = useState('')
+  const [devToken, setDevToken] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
   return (
@@ -682,6 +713,20 @@ export function ForgotPassword() {
             <span className="font-medium text-navy">{email}</span>, we sent a link to
             reset your password. The link expires in 30 minutes.
           </p>
+
+          {devToken && (
+            <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50/70 p-3.5 text-left text-xs text-navy">
+              <span className="font-semibold text-teal-800">Development Mode Link:</span>
+              <p className="mt-1 text-muted">Click below to test password reset directly:</p>
+              <Link
+                href={`/reset-password?token=${encodeURIComponent(devToken)}`}
+                className="mt-2 inline-block font-mono text-[11px] font-semibold text-brand underline underline-offset-2 break-all hover:text-navy"
+              >
+                /reset-password?token={devToken}
+              </Link>
+            </div>
+          )}
+
           <div className="mt-6 space-y-2">
             <Button
               size="lg"
@@ -693,7 +738,10 @@ export function ForgotPassword() {
             <Button
               variant="ghost"
               className="w-full"
-              onClick={() => setSent(false)}
+              onClick={() => {
+                setSent(false)
+                setDevToken(null)
+              }}
             >
               Didn&apos;t get it? Resend
             </Button>
@@ -714,15 +762,24 @@ export function ForgotPassword() {
           <form
             className="mt-6 space-y-4"
             noValidate
-            onSubmit={(e) => {
+            onSubmit={async (e) => {
               e.preventDefault()
-              if (!emailOk(email)) return setErr('Enter a valid email address')
+              const cleanEmail = email.trim()
+              if (!emailOk(cleanEmail)) return setErr('Enter a valid email address')
               setErr('')
               setLoading(true)
-              setTimeout(() => {
-                setLoading(false)
+              try {
+                const res = await api.auth.forgotPassword({ email: cleanEmail })
+                if (res.reset_token) {
+                  setDevToken(res.reset_token)
+                }
                 setSent(true)
-              }, 700)
+              } catch (apiErr: unknown) {
+                const msg = apiErr instanceof Error ? apiErr.message : 'Unable to request password reset.'
+                setErr(msg)
+              } finally {
+                setLoading(false)
+              }
             }}
           >
             <Field label="Work email" error={err || undefined}>
@@ -750,6 +807,155 @@ export function ForgotPassword() {
     </AuthLayout>
   )
 }
+
+
+export function ResetPassword() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const tokenFromUrl = searchParams ? searchParams.get('token') || '' : ''
+  const [token, setToken] = useState(tokenFromUrl)
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [err, setErr] = useState('')
+  const [success, setSuccess] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  return (
+    <AuthLayout>
+      <Link
+        href="/login"
+        className="mb-6 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted hover:text-navy"
+      >
+        <ArrowLeft className="size-4" />
+        Back to sign in
+      </Link>
+      {success ? (
+        <div className="animate-fade">
+          <span className="flex size-12 items-center justify-center rounded-2xl bg-teal-50 text-ok">
+            <ShieldCheck className="size-6" />
+          </span>
+          <h1 className="mt-5 text-2xl font-semibold tracking-tight text-navy">
+            Password reset complete
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-muted">
+            Your password has been successfully updated and all active sessions have been secured.
+          </p>
+          <div className="mt-6">
+            <Button
+              size="lg"
+              className="w-full"
+              onClick={() => router.push('/login')}
+            >
+              Sign in with new password
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <span className="flex size-12 items-center justify-center rounded-2xl bg-tint text-brand">
+            <KeyRound className="size-6" />
+          </span>
+          <h1 className="mt-5 text-2xl font-semibold tracking-tight text-navy">
+            Choose a new password
+          </h1>
+          <p className="mt-1.5 text-sm text-muted">
+            Must be at least 8 characters long and different from your previous password.
+          </p>
+          <form
+            className="mt-6 space-y-4"
+            noValidate
+            onSubmit={async (e) => {
+              e.preventDefault()
+              if (!token.trim()) return setErr('Password reset token is required.')
+              if (password.length < 8) return setErr('Password must be at least 8 characters long.')
+              if (password !== confirmPassword) return setErr('Passwords do not match.')
+
+              setErr('')
+              setLoading(true)
+              try {
+                await api.auth.resetPassword({
+                  token: token.trim(),
+                  new_password: password,
+                })
+                setSuccess(true)
+              } catch (apiErr: unknown) {
+                const msg = apiErr instanceof Error ? apiErr.message : 'Failed to reset password.'
+                setErr(msg)
+              } finally {
+                setLoading(false)
+              }
+            }}
+          >
+            {!tokenFromUrl && (
+              <Field label="Reset Token" error={err && !token.trim() ? err : undefined}>
+                <Input
+                  type="text"
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                  placeholder="Paste your reset token"
+                />
+              </Field>
+            )}
+
+            <Field label="New password" error={err && password.length < 8 ? err : undefined}>
+              <div className="relative">
+                <Input
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="At least 8 characters"
+                  invalid={!!err && password.length < 8}
+                />
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-navy"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showPassword ? (
+                    <EyeOff className="size-4" />
+                  ) : (
+                    <Eye className="size-4" />
+                  )}
+                </button>
+              </div>
+            </Field>
+
+            <Field label="Confirm password" error={err && password !== confirmPassword ? err : undefined}>
+              <Input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Re-enter new password"
+                invalid={!!err && password !== confirmPassword}
+              />
+            </Field>
+
+            {err && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50/70 p-3 text-xs text-rose-700">
+                {err}
+              </div>
+            )}
+
+            <Button size="lg" className="w-full" disabled={loading}>
+              {loading ? (
+                <>
+                  <Loader2 className="size-4 animate-spin" />
+                  Updating password…
+                </>
+              ) : (
+                'Reset password'
+              )}
+            </Button>
+          </form>
+        </>
+      )}
+    </AuthLayout>
+  )
+}
+
 
 const OB_STEPS = [
   'Welcome',
@@ -1538,7 +1744,7 @@ export function Onboarding() {
 }
 
 /* Master AuthPage */
-export type AuthPageView = 'login' | 'signup' | 'forgot-password' | 'onboarding'
+export type AuthPageView = 'login' | 'signup' | 'forgot-password' | 'reset-password' | 'onboarding'
 
 export interface AuthPageProps {
   view?: AuthPageView
@@ -1550,6 +1756,8 @@ function AuthPageContent({ view = 'login' }: AuthPageProps) {
       return <Signup />
     case 'forgot-password':
       return <ForgotPassword />
+    case 'reset-password':
+      return <ResetPassword />
     case 'onboarding':
       return <Onboarding />
     case 'login':

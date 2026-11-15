@@ -845,7 +845,7 @@ function DashboardContent() {
   const s = useFigmaStore()
   const { user, activeProject: liveProject, overview, members: liveMembers } = useLiveApp()
 
-  const p = s.currentProject
+  const p = s.currentProject || (s.allProjects && s.allProjects.length > 0 ? s.allProjects[0] : null)
   const loading = useFakeLoading(550, [p?.id, s.workspaceId])
   const me = personById(ME)
 

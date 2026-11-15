@@ -92,3 +92,46 @@ class RevokeSessionResponse(BaseSchema):
     session_id: uuid.UUID
     revoked: bool
     message: str
+
+
+class SupabaseExchangeRequest(BaseSchema):
+    """Payload for exchanging a verified Supabase access token for a Handover session."""
+
+    access_token: str = Field(min_length=1, max_length=4096, description="Supabase user access token (JWT)")
+
+
+class ForgotPasswordRequest(BaseSchema):
+    """Payload for requesting a password reset link."""
+
+    email: NormalisedEmail = Field(description="Account email address")
+
+
+
+class ForgotPasswordResponse(BaseSchema):
+    """Generic confirmation response (preventing user enumeration)."""
+
+    message: str = Field(description="Human-readable status message")
+    reset_token: str | None = Field(
+        default=None,
+        description="Password reset token returned ONLY in development/testing mode when SMTP is not configured.",
+    )
+
+
+class ResetPasswordRequest(BaseSchema):
+    """Payload for resetting account password using token."""
+
+    token: str = Field(min_length=16, max_length=256, description="Password reset token")
+    new_password: str = Field(min_length=8, max_length=128, description="New account password")
+
+    @classmethod
+    def validate_new_password(cls, value: str) -> str:
+        if len(value) < 8:
+            raise ValueError("Password must be at least 8 characters long.")
+        return value
+
+
+class ResetPasswordResponse(BaseSchema):
+    """Confirmation of successful password reset."""
+
+    message: str = Field(description="Human-readable success message")
+

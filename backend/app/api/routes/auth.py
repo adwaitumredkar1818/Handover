@@ -21,12 +21,17 @@ from app.core.security import (
 )
 from app.schemas.auth import (
     AccessTokenResponse,
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
     LoginRequest,
     LogoutResponse,
     RegisterRequest,
     RegisterResponse,
+    ResetPasswordRequest,
+    ResetPasswordResponse,
     RevokeSessionResponse,
     SessionListResponse,
+    SupabaseExchangeRequest,
 )
 from app.schemas.user import AuthenticatedUserResponse
 from app.services.auth import AuthService, build_authenticated_user
@@ -82,6 +87,64 @@ def login(
     )
     set_refresh_cookie(response, raw_token=raw_refresh_token, settings=settings)
     return token_response
+
+
+@router.post(
+    "/supabase/exchange",
+    response_model=AccessTokenResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Exchange a verified Supabase access token for a Handover application session",
+    dependencies=[Depends(require_auth_rate_limit("login"))],
+)
+def exchange_supabase_token(
+    payload: SupabaseExchangeRequest,
+    request: Request,
+    response: Response,
+    settings: Settings = Depends(get_app_settings),  # noqa: B008
+    auth_service: AuthService = Depends(get_auth_service),  # noqa: B008
+) -> AccessTokenResponse:
+    """Validate Supabase JWT claims, link/onboard user, and issue Handover session."""
+    token_response, raw_refresh_token = auth_service.exchange_supabase_token(
+        access_token=payload.access_token,
+        session_metadata=_extract_safe_session_metadata(request),
+    )
+    set_refresh_cookie(response, raw_token=raw_refresh_token, settings=settings)
+    return token_response
+
+
+@router.post(
+    "/forgot-password",
+    response_model=ForgotPasswordResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Request a password reset link",
+    dependencies=[Depends(require_auth_rate_limit("login"))],
+)
+def forgot_password(
+    payload: ForgotPasswordRequest,
+    request: Request,
+    auth_service: AuthService = Depends(get_auth_service),  # noqa: B008
+) -> ForgotPasswordResponse:
+    """Issue password reset token without disclosing user account existence."""
+    return auth_service.request_password_reset(
+        payload=payload,
+        session_metadata=_extract_safe_session_metadata(request),
+    )
+
+
+@router.post(
+    "/reset-password",
+    response_model=ResetPasswordResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Reset account password using reset token",
+    dependencies=[Depends(require_auth_rate_limit("login"))],
+)
+def reset_password(
+    payload: ResetPasswordRequest,
+    auth_service: AuthService = Depends(get_auth_service),  # noqa: B008
+) -> ResetPasswordResponse:
+    """Validate reset token, update password hash, and revoke existing sessions."""
+    return auth_service.reset_password(payload=payload)
+
 
 
 @router.post(

@@ -35,26 +35,29 @@ export function useProject(projectId?: string) {
   const { activeProject, projects: liveProjects } = useLiveApp()
 
   let project: Project | undefined = undefined
-
-  // 1. If explicit projectId matches activeProject from LiveAppContext
   if (activeProject && (!projectId || activeProject.id === projectId || activeProject.name.toLowerCase() === projectId.toLowerCase())) {
-    project = s.projects.find((p) => p.id === activeProject.id) || ({
-      id: activeProject.id,
-      workspaceId: activeProject.organisation_id || 'sandbox',
-      name: activeProject.name,
-      code: activeProject.name.slice(0, 4).toUpperCase(),
-      description: activeProject.description || 'Project managed in The Handover',
-      category: 'General',
-      status: 'active',
-      health: 92,
-      ownerId: 'user',
-      role: 'manager',
-      lastActivity: 'Just now',
-      coverage: 85,
-      startDate: '2026-01-01',
-      endDate: '2026-12-31',
-      color: '#315FBA',
-    } as Project)
+    const existing = s.projects.find((p) => p.id === activeProject.id)
+    if (existing) {
+      project = existing
+    } else {
+      project = {
+        id: activeProject.id,
+        workspaceId: activeProject.organisation_id || 'sandbox',
+        name: activeProject.name,
+        code: activeProject.name.slice(0, 4).toUpperCase(),
+        description: activeProject.description || 'Project managed in The Handover',
+        category: 'General',
+        status: 'active',
+        health: 92,
+        ownerId: 'user',
+        role: 'manager',
+        lastActivity: 'Just now',
+        coverage: 85,
+        startDate: '2026-01-01',
+        endDate: '2026-12-31',
+        color: '#315FBA',
+      } as Project
+    }
   }
 
   // 2. Try exact ID match in s.projects
@@ -247,7 +250,7 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
 
   return useMemo(() => {
     // 1. If explicit findings from backend exist
-    if (liveFindings && liveFindings.length > 0) {
+    if (liveFindings && Array.isArray(liveFindings) && liveFindings.length > 0) {
       return liveFindings.map((f): AnyFinding => {
         let kind: 'Decision' | 'Task' | 'Risk' | 'Dependency' = 'Decision'
         const cat = (f.category || f.knowledge_domain || '').toLowerCase()
@@ -272,7 +275,7 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
         }
 
         const rawAttr = (anyF.source_attribution || ((f as unknown as { source_attribution_json?: Record<string, unknown> }).source_attribution_json || {})) as Record<string, unknown>
-        const ownerName = anyF.person_or_owner_label || (f.item_payload?.owner as string) || (rawAttr["source_author_identity"] as string) || (rawAttr["author"] as string) || (members[0]?.user_full_name || members[0]?.full_name || 'Shubham')
+        const ownerName = anyF.person_or_owner_label || (f.item_payload?.owner as string) || (rawAttr["source_author_identity"] as string) || (rawAttr["author"] as string) || (members?.[0]?.user_full_name || members?.[0]?.full_name || 'Shubham')
         const summaryText = anyF.structured_summary || f.summary || f.title
         const score = computeFindingConfidence(f)
         const dateStr = (anyF.created_at || f.extracted_at || '2026-10-17').split('T')[0] || '2026-10-17'
@@ -397,7 +400,7 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
     const docEvidence = (evidenceList || []).filter(
       (e) => e.provider === 'upload' || e.category?.includes('doc') || e.category?.includes('pdf')
     )
-    const ownerName = members[0]?.user_full_name || members[0]?.full_name || 'Shubham Pokale'
+    const ownerName = members?.[0]?.user_full_name || members?.[0]?.full_name || 'Shubham Pokale'
     const docId = docEvidence[0]?.id || evidenceList?.[0]?.id || ''
     const gitId1 = gitEvidence[0]?.id || evidenceList?.[0]?.id || ''
     const gitId2 = gitEvidence[1]?.id || gitEvidence[0]?.id || ''

@@ -2,7 +2,7 @@
 
 from app.db.base import Base
 from app.models.audit import AuditLog
-from app.models.auth import RefreshSession
+from app.models.auth import PasswordResetToken, RefreshSession
 from app.models.evidence import (
     EvidenceChunk,
     EvidenceContent,
@@ -113,6 +113,7 @@ __all__ = [
     "Organisation",
     "OrganisationInvitation",
     "OrganisationMembership",
+    "PasswordResetToken",
     "Permission",
     "Project",
     "ProjectMembership",

@@ -38,6 +38,7 @@ export interface Project {
   target_handover_date?: string | null;
   created_at: string;
   updated_at: string;
+  created_by_id?: UUID;
   owner_id?: UUID;
   my_project_role?: string | null;
   effective_permissions?: string[];
@@ -315,21 +316,33 @@ export interface TimelineStreamEvent {
 export interface GraphNodeData {
   id: string;
   label: string;
-  type: string;
-  canonical_name: string;
-  confidence: number;
-  resolution_status: string;
+  type?: string;
+  entity_type?: string;
+  canonical_name?: string;
+  confidence?: number;
+  resolution_status?: string;
+  status?: string;
+  verification_status?: string;
+  description?: string | null;
   domain?: string;
+  source_provider?: string | null;
   properties?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface GraphEdgeData {
   id: string;
   source: string;
   target: string;
-  type: string;
-  verification_status: string;
-  confidence: number;
+  type?: string;
+  relationship_type?: string;
+  label?: string;
+  relationship_basis?: string;
+  verification_status?: string;
+  confidence?: number;
+  evidence_count?: number;
+  supporting_evidence_available?: boolean;
+  is_bidirectional?: boolean;
 }
 
 export interface KnowledgeGraphData {
@@ -346,6 +359,7 @@ export interface VerificationCaseQueueItem {
   confidence_score: number;
   created_at: string;
   issue_count: number;
+  version?: number;
   assigned_to_user_id?: string;
   finding?: {
     title: string;

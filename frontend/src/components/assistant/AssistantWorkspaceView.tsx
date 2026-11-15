@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { Button } from "../ui";
+import { api } from "../../lib/api";
 
 export interface Message {
   id: string;
@@ -57,23 +58,27 @@ export function AssistantWorkspaceView() {
 
   const loadConversations = async (projectId: string) => {
     try {
-      const token = localStorage.getItem("auth_token");
-      const res = await fetch(
-        `http://127.0.0.1:8000/api/v1/conversations?project_id=${projectId}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        setConversations(data || []);
+      const data = await api.assistant.listConversations(projectId);
+      setConversations(data || []);
+      if (!data || data.length === 0) {
+        setActiveConversationId(null);
+        setMessages([]);
       }
     } catch (err) {
       console.error("Failed to load conversations:", err);
+      setConversations([]);
+      setActiveConversationId(null);
+      setMessages([]);
     }
   };
 
   useEffect(() => {
     if (activeProject) {
       loadConversations(activeProject.id);
+    } else {
+      setConversations([]);
+      setActiveConversationId(null);
+      setMessages([]);
     }
   }, [activeProject]);
 
@@ -93,56 +98,34 @@ export function AssistantWorkspaceView() {
     setIsLoading(true);
 
     try {
-      const token = localStorage.getItem("auth_token");
       let convId = activeConversationId;
 
       // Create conversation if not exists
       if (!convId) {
-        const cRes = await fetch("http://127.0.0.1:8000/api/v1/conversations", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            project_id: activeProject.id,
-            title: text.slice(0, 40),
-          }),
-        });
-        if (cRes.ok) {
-          const cData = await cRes.json();
-          convId = cData.id;
-          setActiveConversationId(convId);
-        }
+        const cData = await api.assistant.createConversation(activeProject.id, text.slice(0, 40));
+        convId = cData.id;
+        setActiveConversationId(convId);
+        await loadConversations(activeProject.id);
       }
 
       // Send message to assistant
       if (convId) {
-        const aRes = await fetch(
-          `http://127.0.0.1:8000/api/v1/conversations/${convId}/messages`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${token}`,
-            },
-            body: JSON.stringify({ message: text }),
-          }
-        );
+        const aData = await api.assistant.sendMessage(activeProject.id, convId, text);
 
-        if (aRes.ok) {
-          const aData = await aRes.json();
-          const assistantMsg: Message = {
-            id: `asst-${Date.now()}`,
-            role: "assistant",
-            content: aData.answer || aData.response || "No response received.",
-            citations: aData.citations || aData.supporting_evidence || [],
-            created_at: new Date().toISOString(),
-          };
-          setMessages((prev) => [...prev, assistantMsg]);
-        } else {
-          throw new Error("Assistant response failed");
-        }
+        const mappedCitations = (aData.citations || []).map((c) => ({
+          title: c.source_title || "Project Evidence",
+          excerpt: c.snippet || "",
+          confidence: c.confidence || 1.0,
+        }));
+
+        const assistantMsg: Message = {
+          id: aData.message_id || `asst-${Date.now()}`,
+          role: "assistant",
+          content: aData.answer || "No response received.",
+          citations: mappedCitations,
+          created_at: aData.created_at || new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, assistantMsg]);
       }
     } catch (err) {
       console.error("Assistant chat error:", err);

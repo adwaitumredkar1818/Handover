@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { Button } from "../ui";
+import { api } from "../../lib/api";
 
 export function VerificationWorkspaceView({
   initialTab = "queue",
@@ -39,34 +40,32 @@ export function VerificationWorkspaceView({
   const loadVerificationData = async (projectId: string) => {
     setIsLoading(true);
     try {
-      const token = localStorage.getItem("auth_token");
-      const headers = { Authorization: `Bearer ${token}` };
-
       // Load summary
-      const sumRes = await fetch(
-        `http://127.0.0.1:8000/api/v1/projects/${projectId}/verification/summary`,
-        { headers }
-      );
-      if (sumRes.ok) {
-        const sumData = await sumRes.json();
+      try {
+        const sumData = await api.verification.getSummary(projectId);
         setSummary(sumData);
+      } catch {
+        setSummary(null);
       }
 
       // Load queue
-      const qRes = await fetch(
-        `http://127.0.0.1:8000/api/v1/projects/${projectId}/verification/queue`,
-        { headers }
-      );
-      if (qRes.ok) {
-        const qData = await qRes.json();
+      try {
+        const qData = await api.verification.getQueue(projectId);
         const items = qData.items || [];
         setCases(items);
         if (items.length > 0 && !selectedCase) {
           setSelectedCase(items[0]);
+        } else if (items.length === 0) {
+          setSelectedCase(null);
         }
+      } catch {
+        setCases([]);
+        setSelectedCase(null);
       }
     } catch (err) {
       console.error("Failed to load verification queue:", err);
+      setCases([]);
+      setSelectedCase(null);
     } finally {
       setIsLoading(false);
     }
@@ -75,6 +74,10 @@ export function VerificationWorkspaceView({
   useEffect(() => {
     if (activeProject) {
       loadVerificationData(activeProject.id);
+    } else {
+      setCases([]);
+      setSelectedCase(null);
+      setSummary(null);
     }
   }, [activeProject]);
 
@@ -82,17 +85,13 @@ export function VerificationWorkspaceView({
     if (!activeProject) return;
     setIsActing(true);
     try {
-      const token = localStorage.getItem("auth_token");
-      await fetch(
-        `http://127.0.0.1:8000/api/v1/projects/${activeProject.id}/verification/cases/${caseId}/approve`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ review_notes: "Approved in Verification Center review" }),
-        }
+      const targetCase = cases.find((c) => c.id === caseId);
+      const expectedVersion = (targetCase?.version as number) || 1;
+      await api.verification.approveCase(
+        activeProject.id,
+        caseId,
+        expectedVersion,
+        "Approved in Verification Center review"
       );
       await loadVerificationData(activeProject.id);
     } catch (err) {
@@ -106,17 +105,13 @@ export function VerificationWorkspaceView({
     if (!activeProject) return;
     setIsActing(true);
     try {
-      const token = localStorage.getItem("auth_token");
-      await fetch(
-        `http://127.0.0.1:8000/api/v1/projects/${activeProject.id}/verification/cases/${caseId}/reject`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ rejection_reason: "Rejected by reviewer" }),
-        }
+      const targetCase = cases.find((c) => c.id === caseId);
+      const expectedVersion = (targetCase?.version as number) || 1;
+      await api.verification.rejectCase(
+        activeProject.id,
+        caseId,
+        expectedVersion,
+        "Rejected by reviewer"
       );
       await loadVerificationData(activeProject.id);
     } catch (err) {

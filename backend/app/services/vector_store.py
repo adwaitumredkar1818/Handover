@@ -637,3 +637,231 @@ class ChromaV2HttpVectorStore:
             return False
         self._raise_for_unexpected_status(resp, operation="delete_collection")
         return True
+
+
+class GatewayVectorStore:
+    """VectorStoreClient adapter routing read-only queries through Local Inference Gateway.
+    
+    Translates query_vectors() -> InferenceGatewayClient.search_vectors() -> list[VectorQueryHit].
+    Enforces mandatory tenant boundaries (organisation_id and project_id).
+    Mutating methods (ensure_collection, upsert_records, delete_records) raise
+    VectorStoreError since cloud backends must never mutate local vector storage.
+    """
+
+    def __init__(
+        self,
+        *,
+        gateway_client: Any,
+        collection_name: str,
+        embedding_model: str = "nomic-embed-text",
+        index_version: str = "v1",
+        expected_dimensions: int = 768,
+    ) -> None:
+        self._gateway_client = gateway_client
+        self._collection_name = collection_name
+        self._embedding_model = embedding_model
+        self._index_version = index_version
+        self._expected_dimensions = expected_dimensions
+
+    @property
+    def collection_name(self) -> str:
+        return self._collection_name
+
+    @property
+    def embedding_model(self) -> str:
+        return self._embedding_model
+
+    @property
+    def index_version(self) -> str:
+        return self._index_version
+
+    @property
+    def expected_dimensions(self) -> int:
+        return self._expected_dimensions
+
+    def ensure_collection(self) -> VectorCollectionInfo:
+        raise VectorStoreError(
+            code="CLOUD_MUTATION_FORBIDDEN",
+            message="Cloud backend cannot create or mutate local Chroma collections directly.",
+            retryable=False,
+        )
+
+    def inspect_collection(self) -> VectorCollectionInfo | None:
+        # Returns synthetic metadata indicating healthy gateway connection
+        return VectorCollectionInfo(
+            collection_id=f"gateway:{self._collection_name}",
+            name=self._collection_name,
+            space="cosine",
+            dimension=self._expected_dimensions,
+            metadata={"source": "inference_gateway"},
+        )
+
+    def upsert_records(self, records: Sequence[VectorUpsertRecord]) -> None:
+        raise VectorStoreError(
+            code="CLOUD_MUTATION_FORBIDDEN",
+            message="Cloud backend cannot upsert records to local Chroma directly. Worker owns indexing.",
+            retryable=False,
+        )
+
+    def query_vectors(
+        self,
+        *,
+        query_embedding: Sequence[float],
+        top_k: int,
+        where: dict[str, Any] | None = None,
+    ) -> list[VectorQueryHit]:
+        # Extract mandatory organisation_id and project_id from where clause
+        where_dict = where or {}
+        org_id: str | None = None
+        proj_id: str | None = None
+
+        if "$and" in where_dict:
+            for clause in where_dict.get("$and", []):
+                if isinstance(clause, dict):
+                    if "organisation_id" in clause:
+                        val = clause["organisation_id"]
+                        org_id = val.get("$eq") if isinstance(val, dict) else val
+                    elif "project_id" in clause:
+                        val = clause["project_id"]
+                        proj_id = val.get("$eq") if isinstance(val, dict) else val
+        else:
+            if "organisation_id" in where_dict:
+                val = where_dict["organisation_id"]
+                org_id = val.get("$eq") if isinstance(val, dict) else val
+            if "project_id" in where_dict:
+                val = where_dict["project_id"]
+                proj_id = val.get("$eq") if isinstance(val, dict) else val
+
+        if not org_id or not proj_id:
+            raise VectorStoreError(
+                code="TENANT_SCOPE_MISSING",
+                message="Vector search via Inference Gateway requires mandatory organisation_id and project_id.",
+                retryable=False,
+            )
+
+        try:
+            resp = self._gateway_client.search_vectors(
+                collection_name=self._collection_name,
+                organisation_id=str(org_id),
+                project_id=str(proj_id),
+                query_embedding=list(query_embedding),
+                top_k=top_k,
+                where=where,
+            )
+            raw_hits = resp.get("hits", [])
+            hits: list[VectorQueryHit] = []
+            for h in raw_hits:
+                hits.append(
+                    VectorQueryHit(
+                        vector_id=str(h.get("id")),
+                        distance=float(h.get("distance", 0.0)),
+                        similarity=float(h.get("similarity", 0.0)),
+                        metadata=dict(h.get("metadata", {})),
+                    )
+                )
+            return hits
+        except Exception as exc:
+            if isinstance(exc, VectorStoreError):
+                raise
+            code = getattr(exc, "code", "GATEWAY_VECTOR_ERROR")
+            retryable = getattr(exc, "retryable", False)
+            clean_msg = f"Inference Gateway vector search failed: {exc}"
+            logger.warning("Gateway vector search failed (%s: %s).", code, clean_msg)
+            raise VectorStoreError(
+                code=code,
+                message=clean_msg,
+                retryable=retryable,
+            ) from exc
+
+    def delete_records(
+        self,
+        *,
+        ids: Sequence[str] | None = None,
+        where: dict[str, Any] | None = None,
+    ) -> int:
+        raise VectorStoreError(
+            code="CLOUD_MUTATION_FORBIDDEN",
+            message="Cloud backend cannot delete records from local Chroma directly.",
+            retryable=False,
+        )
+
+
+class DisabledVectorStore:
+    """VectorStoreClient placeholder used when inference/vector services are disabled on cloud.
+    
+    Prevents any connection attempt to local ChromaDB.
+    Fails closed with a typed, informative VectorStoreError.
+    """
+
+    def __init__(
+        self,
+        *,
+        collection_name: str = "disabled",
+        embedding_model: str = "disabled",
+        index_version: str = "v1",
+        expected_dimensions: int = 768,
+    ) -> None:
+        self._collection_name = collection_name
+        self._embedding_model = embedding_model
+        self._index_version = index_version
+        self._expected_dimensions = expected_dimensions
+
+    @property
+    def collection_name(self) -> str:
+        return self._collection_name
+
+    @property
+    def embedding_model(self) -> str:
+        return self._embedding_model
+
+    @property
+    def index_version(self) -> str:
+        return self._index_version
+
+    @property
+    def expected_dimensions(self) -> int:
+        return self._expected_dimensions
+
+    def ensure_collection(self) -> VectorCollectionInfo:
+        raise VectorStoreError(
+            code="INFERENCE_DISABLED",
+            message="Vector storage is disabled on this deployment.",
+            retryable=False,
+        )
+
+    def inspect_collection(self) -> VectorCollectionInfo | None:
+        return None
+
+    def upsert_records(self, records: Sequence[VectorUpsertRecord]) -> None:
+        raise VectorStoreError(
+            code="INFERENCE_DISABLED",
+            message="Vector storage is disabled on this deployment.",
+            retryable=False,
+        )
+
+    def query_vectors(
+        self,
+        *,
+        query_embedding: Sequence[float],
+        top_k: int,
+        where: dict[str, Any] | None = None,
+    ) -> list[VectorQueryHit]:
+        raise VectorStoreError(
+            code="INFERENCE_DISABLED",
+            message="Vector search is currently disabled on this deployment.",
+            retryable=False,
+        )
+
+    def delete_records(
+        self,
+        *,
+        ids: Sequence[str] | None = None,
+        where: dict[str, Any] | None = None,
+    ) -> int:
+        raise VectorStoreError(
+            code="INFERENCE_DISABLED",
+            message="Vector storage is disabled on this deployment.",
+            retryable=False,
+        )
+
+

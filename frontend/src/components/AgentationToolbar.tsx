@@ -12,7 +12,11 @@ export function AgentationToolbar() {
     () => false
   );
 
-  if (!isClient || process.env.NEXT_PUBLIC_ENABLE_AGENTATION !== "true") {
+  if (
+    !isClient ||
+    process.env.NODE_ENV !== "development" ||
+    process.env.NEXT_PUBLIC_ENABLE_AGENTATION !== "true"
+  ) {
     return null;
   }
 

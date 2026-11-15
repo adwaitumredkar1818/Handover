@@ -1,7 +1,7 @@
 """Repository layer package exports."""
 
 from app.repositories.audit import AuditLogRepository
-from app.repositories.auth import RefreshSessionRepository
+from app.repositories.auth import PasswordResetTokenRepository, RefreshSessionRepository
 from app.repositories.organisation import OrganisationRepository
 from app.repositories.project import ProjectRepository
 from app.repositories.rbac import RbacRepository
@@ -20,6 +20,7 @@ __all__ = [
     "AuditLogRepository",
     "EntityRepository",
     "OrganisationRepository",
+    "PasswordResetTokenRepository",
     "ProjectRepository",
     "RbacRepository",
     "RefreshSessionRepository",

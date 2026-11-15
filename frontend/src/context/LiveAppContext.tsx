@@ -10,6 +10,7 @@ import React, {
   type ReactNode,
 } from "react";
 import { api, setStoredToken, setStoredUser, getStoredUser, ApiError } from "../lib/api";
+import { createClient as createSupabaseClient } from "../lib/supabase/client";
 import type {
   User,
   Organisation,
@@ -40,7 +41,10 @@ interface LiveAppContextType {
   user: User | null;
   token: string | null;
   isLoadingAuth: boolean;
+  setUser: (user: User | null) => void;
+  setToken: (token: string | null) => void;
   login: (email: string, password: string) => Promise<void>;
+  loginWithGoogle: () => Promise<void>;
   register: (email: string, password: string, fullName: string) => Promise<void>;
   logout: () => Promise<void>;
 
@@ -136,9 +140,9 @@ interface LiveAppContextType {
   setIsCreateProjectModalOpen: (open: boolean) => void;
   isAddSourceModalOpen: boolean;
   setIsAddSourceModalOpen: (open: boolean) => void;
-  initialSourceProvider: "github" | "jira" | "slack";
-  setInitialSourceProvider: (provider: "github" | "jira" | "slack") => void;
-  openConnectSourceModal: (provider?: "github" | "jira" | "slack") => void;
+  initialSourceProvider: "github" | "jira" | "slack" | "docs" | "confluence" | "gdrive";
+  setInitialSourceProvider: (provider: "github" | "jira" | "slack" | "docs" | "confluence" | "gdrive") => void;
+  openConnectSourceModal: (provider?: "github" | "jira" | "slack" | "docs" | "confluence" | "gdrive") => void;
   isUploadModalOpen: boolean;
   setIsUploadModalOpen: (open: boolean) => void;
   isAddMemberModalOpen: boolean;
@@ -261,8 +265,8 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const [isCreateOrgModalOpen, setIsCreateOrgModalOpen] = useState(false);
   const [isCreateProjectModalOpen, setIsCreateProjectModalOpen] = useState(false);
   const [isAddSourceModalOpen, setIsAddSourceModalOpen] = useState(false);
-  const [initialSourceProvider, setInitialSourceProvider] = useState<"github" | "jira" | "slack">("github");
-  const openConnectSourceModal = useCallback((prov: "github" | "jira" | "slack" = "github") => {
+  const [initialSourceProvider, setInitialSourceProvider] = useState<"github" | "jira" | "slack" | "docs" | "confluence" | "gdrive">("github");
+  const openConnectSourceModal = useCallback((prov: "github" | "jira" | "slack" | "docs" | "confluence" | "gdrive" = "github") => {
     setInitialSourceProvider(prov);
     setIsAddSourceModalOpen(true);
   }, []);
@@ -310,6 +314,30 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     async function initAuth() {
       try {
+        // First check if there's an active Supabase session waiting to be exchanged
+        try {
+          const supabase = createSupabaseClient();
+          if (supabase) {
+            const { data } = await supabase.auth.getSession();
+            if (data?.session?.access_token) {
+              try {
+                const exchangeRes = await api.auth.exchangeSupabaseToken(data.session.access_token);
+                setStoredToken(exchangeRes.access_token);
+                setStoredUser(exchangeRes.user);
+                setToken(exchangeRes.access_token);
+                setUser(exchangeRes.user);
+                setIsLoadingAuth(false);
+                return;
+              } catch (exchangeErr) {
+                // Non-fatal: Supabase token exchange failed (e.g. backend offline or expired), fall back to standard session check
+                console.warn("Supabase token exchange skipped:", exchangeErr);
+              }
+            }
+          }
+        } catch {
+          // Supabase client error, proceed to standard check
+        }
+
         const stored = typeof window !== "undefined" ? localStorage.getItem("handover_access_token") : null;
         const cachedUser = getStoredUser();
 
@@ -383,6 +411,46 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       }
     }
     initAuth();
+
+    // Listen for OAuth redirects and token updates
+    let unsubscribeSupabase: (() => void) | undefined;
+    try {
+      const supabase = createSupabaseClient();
+      if (supabase) {
+        const { data: authListener } = supabase.auth.onAuthStateChange(
+          async (event, session) => {
+            if ((event === "SIGNED_IN" || event === "TOKEN_REFRESHED") && session?.access_token) {
+              try {
+                const exchangeRes = await api.auth.exchangeSupabaseToken(session.access_token);
+                setStoredToken(exchangeRes.access_token);
+                setStoredUser(exchangeRes.user);
+                setToken(exchangeRes.access_token);
+                setUser(exchangeRes.user);
+                setIsLoadingAuth(false);
+              } catch (err) {
+                console.warn("Failed to exchange Supabase session on auth state change:", err);
+              }
+            } else if (event === "SIGNED_OUT") {
+              setStoredToken(null);
+              setStoredUser(null);
+              setToken(null);
+              setUser(null);
+            }
+          }
+        );
+        unsubscribeSupabase = () => {
+          authListener?.subscription?.unsubscribe();
+        };
+      }
+    } catch {
+      // Ignore Supabase client load errors
+    }
+
+    return () => {
+      if (unsubscribeSupabase) {
+        unsubscribeSupabase();
+      }
+    };
   }, []);
 
   // Once authenticated, load organisations
@@ -729,7 +797,9 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const approveVerificationCase = useCallback(async (caseId: string, notes?: string) => {
     if (!activeProject) return;
     try {
-      await api.verification.approveCase(activeProject.id, caseId, notes);
+      const targetCase = verificationQueue.find((c) => c.id === caseId);
+      const expectedVersion = (targetCase?.version as number) || 1;
+      await api.verification.approveCase(activeProject.id, caseId, expectedVersion, notes);
       addToast({
         type: "success",
         title: "Finding Verified",
@@ -744,12 +814,14 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         message: err instanceof Error ? err.message : "Failed to approve verification case",
       });
     }
-  }, [activeProject, refreshVerification, refreshFindings, addToast]);
+  }, [activeProject, verificationQueue, refreshVerification, refreshFindings, addToast]);
 
   const rejectVerificationCase = useCallback(async (caseId: string, reason?: string) => {
     if (!activeProject) return;
     try {
-      await api.verification.rejectCase(activeProject.id, caseId, reason);
+      const targetCase = verificationQueue.find((c) => c.id === caseId);
+      const expectedVersion = (targetCase?.version as number) || 1;
+      await api.verification.rejectCase(activeProject.id, caseId, expectedVersion, reason || "Rejected by reviewer");
       addToast({
         type: "info",
         title: "Finding Rejected",
@@ -763,7 +835,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         message: err instanceof Error ? err.message : "Failed to reject verification case",
       });
     }
-  }, [activeProject, refreshVerification, addToast]);
+  }, [activeProject, verificationQueue, refreshVerification, addToast]);
 
   const refreshHandovers = useCallback(async () => {
     if (!user || !activeProject) {
@@ -788,10 +860,10 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     successor_id?: string;
     metadata_json?: Record<string, unknown>;
   }) => {
-    if (!activeProject) throw new Error("No active project");
+    if (!activeProject || !user) throw new Error("No active project or authenticated user");
     const res = await api.handover.createCase(activeProject.id, {
       ...data,
-      departing_member_id: data.departing_member_id || user?.id || "",
+      departing_member_id: data.departing_member_id || user.id,
     });
     addToast({
       type: "success",
@@ -800,7 +872,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     });
     await refreshHandovers();
     return res;
-  }, [activeProject, user?.id, refreshHandovers, addToast]);
+  }, [activeProject, user, refreshHandovers, addToast]);
 
 
   // Trigger data refreshes when active project changes
@@ -858,6 +930,28 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     });
   };
 
+  const loginWithGoogle = async () => {
+    const supabase = createSupabaseClient();
+    if (!supabase) {
+      throw new Error("Supabase Auth is not configured. Please check environment variables.");
+    }
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const redirectTo = `${origin}/auth/callback`;
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo,
+        queryParams: {
+          access_type: "offline",
+          prompt: "consent",
+        },
+      },
+    });
+    if (error) {
+      throw error;
+    }
+  };
+
   const register = async (email: string, password: string, fullName: string) => {
     await api.auth.register({ email, password, full_name: fullName });
     // After registration, log in
@@ -872,6 +966,14 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
     try {
       await api.auth.logout();
+    } catch {
+      // ignore
+    }
+    try {
+      const supabase = createSupabaseClient();
+      if (supabase) {
+        await supabase.auth.signOut();
+      }
     } catch {
       // ignore
     }
@@ -1058,7 +1160,10 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     user,
     token,
     isLoadingAuth,
+    setUser,
+    setToken,
     login,
+    loginWithGoogle,
     register,
     logout,
     organisations,

@@ -295,7 +295,7 @@ export function DataSources({ projectId }: { projectId: string }) {
   const { openConnectSourceModal, setIsUploadModalOpen, sourceMappings, triggerSync, evidenceList } = useLiveApp()
 
   const types: SourceType[] = ['github', 'jira', 'slack', 'docs', 'confluence', 'gdrive']
-  const srcs = s.sources.filter((x) => (p?.id ? x.projectId === p.id : false))
+  const srcs = p ? s.sources.filter((x) => x.projectId === p.id) : []
 
   const githubMapping = sourceMappings.find((m) => m.provider === 'github')
   const jiraMapping = sourceMappings.find((m) => m.provider === 'jira')
@@ -310,6 +310,8 @@ export function DataSources({ projectId }: { projectId: string }) {
 
   const liveSourcesMap = useMemo(() => {
     const map = new Map<SourceType, Source>()
+    if (!p) return map
+    const activeP = p
     types.forEach((t) => {
       const mockSrc = srcs.find((x) => x.type === t)
       if (t === 'github') {
@@ -317,7 +319,7 @@ export function DataSources({ projectId }: { projectId: string }) {
         const count = githubEvidence.length || (githubMapping ? 72 : 0)
         map.set(t, {
           id: githubMapping?.id || 'src-github',
-          projectId: p?.id || '',
+          projectId: activeP.id,
           type: 'github',
           name: 'GitHub',
           account: isConn ? 'Connected repository' : 'Not connected',
@@ -332,7 +334,7 @@ export function DataSources({ projectId }: { projectId: string }) {
         const isConn = docEvidence.length > 0
         map.set(t, {
           id: 'src-docs',
-          projectId: p?.id || '',
+          projectId: activeP.id,
           type: 'docs',
           name: 'PDF & DOCX uploads',
           account: isConn ? 'Uploaded Project Documentation' : 'Not connected',
@@ -347,7 +349,7 @@ export function DataSources({ projectId }: { projectId: string }) {
         const isConn = !!jiraMapping || jiraEvidence.length > 0
         map.set(t, {
           id: jiraMapping?.id || 'src-jira',
-          projectId: p?.id || '',
+          projectId: activeP.id,
           type: 'jira',
           name: 'Jira',
           account: isConn ? 'Connected Jira Workspace' : 'Not connected',
@@ -362,7 +364,7 @@ export function DataSources({ projectId }: { projectId: string }) {
         const isConn = !!slackMapping || slackEvidence.length > 0
         map.set(t, {
           id: slackMapping?.id || 'src-slack',
-          projectId: p?.id || '',
+          projectId: activeP.id,
           type: 'slack',
           name: 'Slack',
           account: isConn ? 'Connected Slack Channels' : 'Not connected',
@@ -376,7 +378,7 @@ export function DataSources({ projectId }: { projectId: string }) {
       } else {
         map.set(t, mockSrc || {
           id: `src-${t}`,
-          projectId: p?.id || '',
+          projectId: activeP.id,
           type: t,
           name: SOURCE_META[t]?.label || t,
           account: 'Not connected',
@@ -390,7 +392,7 @@ export function DataSources({ projectId }: { projectId: string }) {
       }
     })
     return map
-  }, [p?.id, srcs, githubMapping, jiraMapping, slackMapping, githubEvidence.length, docEvidence, jiraEvidence.length, slackEvidence.length])
+  }, [p, srcs, githubMapping, jiraMapping, slackMapping, githubEvidence.length, docEvidence, jiraEvidence.length, slackEvidence.length])
 
   if (!p) return <ProjectNotFound />
   const canManage = p.role === 'manager'
@@ -482,19 +484,7 @@ export function DataSources({ projectId }: { projectId: string }) {
                     icon={t === 'docs' ? Upload : Plug}
                     disabled={!canManage}
                     onClick={() => {
-                      if (t === 'docs') {
-                        setIsUploadModalOpen(true)
-                      } else if (t === 'github') {
-                        openConnectSourceModal('github')
-                      } else if (t === 'jira') {
-                        openConnectSourceModal('jira')
-                      } else if (t === 'slack') {
-                        openConnectSourceModal('slack')
-                      } else if (t === 'confluence') {
-                        openConnectSourceModal('jira')
-                      } else if (t === 'gdrive') {
-                        setIsUploadModalOpen(true)
-                      }
+                      openConnectSourceModal(t)
                     }}
                   >
                     {t === 'docs' ? 'Upload files' : 'Connect'}
@@ -826,9 +816,10 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     })
   }, [evidenceList, p?.id])
 
-  const storeItems = evidence.filter((e) => (p?.id ? e.projectId === p.id : false))
+  const storeItems = p ? evidence.filter((e) => e.projectId === p.id) : []
   const all = liveItems.length > 0 ? liveItems : storeItems
   const sources = useMemo(() => {
+    if (!p) return []
     const sList: Source[] = []
     const gitEvidence = evidenceList.filter((e) => e.provider === 'github')
     const docEvidence = evidenceList.filter((e) => e.provider === 'upload' || e.category?.includes('doc') || e.category?.includes('pdf'))
@@ -968,7 +959,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
   }, [liveSelectedEvidence, activeEvidenceId, selectedEvidence])
 
   const relatedFindings = useMemo(() => {
-    if (!activeEvidenceId) return []
+    if (!activeEvidenceId || !p) return []
     const liveMatches = (liveFindings || [])
       .filter((f) => (f.citations || []).some((c) => c.evidence_id === activeEvidenceId))
       .map((f) => ({
@@ -990,7 +981,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
         summary: f.summary,
         verification: s.verif[f.id] ?? f.verification,
       }))
-  }, [liveFindings, activeEvidenceId, p?.id, s.verif])
+  }, [liveFindings, activeEvidenceId, p, s.verif])
 
   const reset = () => {
     setQ('')
@@ -1656,6 +1647,8 @@ export function EvidenceDetail({ projectId, evidenceId }: { projectId: string; e
     }
     return storeE?.extracted || []
   }, [detail, storeE])
+
+  if (!p) return <ProjectNotFound />
 
   const contentText = detail?.extracted_content?.extracted_text
     || (detail?.chunks && detail.chunks.length > 0 ? detail.chunks.map((c: any) => c.content_text).join('\n\n') : '')

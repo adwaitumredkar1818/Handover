@@ -108,27 +108,60 @@ class HealthService:
             chroma_headers = {"Authorization": f"Bearer {chroma_cfg.auth_token.get_secret_value()}"}
 
         db_task = run_in_threadpool(self._system_repository.ping)
-        ollama_task = _probe_http_service(
-            self._http_client,
-            url=f"{ollama_cfg.base_url}/api/version",
-            timeout_seconds=ollama_cfg.health_timeout_seconds,
-            service_label="Ollama AI",
-            required=False,
-        )
-        chroma_task = _probe_http_service(
-            self._http_client,
-            url=f"{chroma_cfg.base_url}/api/v2/heartbeat",
-            timeout_seconds=chroma_cfg.health_timeout_seconds,
-            service_label="ChromaDB",
-            required=False,
-            headers=chroma_headers,
-        )
 
-        (db_ok, db_latency_ms), ollama_health, chroma_health = await asyncio.gather(
-            db_task,
-            ollama_task,
-            chroma_task,
-        )
+        inference_mode = self._settings.resolved_inference_mode
+
+        if inference_mode == "disabled":
+            # In disabled cloud mode, do not probe local Ollama or ChromaDB (they are not present)
+            ollama_health = DependencyHealth(
+                status="ok",
+                required=False,
+                latency_ms=0.0,
+                message="Inference disabled on cloud deployment (as expected).",
+            )
+            chroma_health = DependencyHealth(
+                status="ok",
+                required=False,
+                latency_ms=0.0,
+                message="Vector store disabled on cloud deployment (as expected).",
+            )
+            db_ok, db_latency_ms = await db_task
+        elif inference_mode == "gateway":
+            # Probe gateway health
+            gw_cfg = self._settings.gateway
+            gw_task = _probe_http_service(
+                self._http_client,
+                url=f"{gw_cfg.base_url}/health",
+                timeout_seconds=gw_cfg.timeout_seconds if gw_cfg.timeout_seconds < 5.0 else 5.0,
+                service_label="Inference Gateway",
+                required=False,
+            )
+            (db_ok, db_latency_ms), gw_health = await asyncio.gather(db_task, gw_task)
+            ollama_health = gw_health
+            chroma_health = gw_health
+        else:
+            # Native local mode
+            ollama_task = _probe_http_service(
+                self._http_client,
+                url=f"{ollama_cfg.base_url}/api/version",
+                timeout_seconds=ollama_cfg.health_timeout_seconds,
+                service_label="Ollama AI",
+                required=False,
+            )
+            chroma_task = _probe_http_service(
+                self._http_client,
+                url=f"{chroma_cfg.base_url}/api/v2/heartbeat",
+                timeout_seconds=chroma_cfg.health_timeout_seconds,
+                service_label="ChromaDB",
+                required=False,
+                headers=chroma_headers,
+            )
+
+            (db_ok, db_latency_ms), ollama_health, chroma_health = await asyncio.gather(
+                db_task,
+                ollama_task,
+                chroma_task,
+            )
 
         database_health = DependencyHealth(
             status="ok" if db_ok else "unavailable",
