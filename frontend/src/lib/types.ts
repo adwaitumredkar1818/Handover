@@ -418,3 +418,98 @@ export interface AuditEventItem {
   actor_name?: string | null;
   details?: Record<string, unknown> | null;
 }
+
+// ---------------------------------------------------------------------------
+// Project Knowledge Assistant (Module 5 / AI Assistant)
+// ---------------------------------------------------------------------------
+
+export type AssistantAnswerStatus =
+  | "answered"
+  | "insufficient_evidence"
+  | "conflicting_evidence"
+  | "declined";
+
+export type AssistantSenderType = "user" | "assistant";
+
+export interface AssistantCitation {
+  id?: string;
+  citation_label: string; // e.g. "S1", "S2"
+  evidence_id: string;
+  chunk_id?: string | null;
+  knowledge_item_id?: string | null;
+  source_title: string;
+  source_provider: string; // "github", "jira", "document_upload", "slack", etc.
+  source_url?: string | null;
+  source_external_id?: string | null;
+  author?: string | null;
+  source_timestamp?: string | null;
+  page_number?: number | null;
+  section_title?: string | null;
+  excerpt: string;
+  is_verified: boolean;
+}
+
+export interface AssistantClaim {
+  claim_text: string;
+  citation_labels: string[];
+  confidence: number;
+}
+
+export interface AssistantConversation {
+  id: string;
+  organisation_id: string;
+  project_id: string;
+  created_by_user_id: string;
+  title: string;
+  status: "active" | "archived";
+  metadata_json?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+  last_message_at?: string | null;
+}
+
+export interface AssistantMessage {
+  id: string;
+  conversation_id: string;
+  sender_type: AssistantSenderType;
+  content: string;
+  answer_status?: AssistantAnswerStatus | null;
+  structured_payload_json?: {
+    claims?: AssistantClaim[];
+    conflicts?: string[];
+    uncertainty?: string | null;
+    missing_information?: string[];
+    suggested_followup_questions?: string[];
+    query_type?: string;
+  } | null;
+  citations: AssistantCitation[];
+  model_name?: string | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  duration_ms?: number | null;
+  retrieval_run_id?: string | null;
+  created_at: string;
+}
+
+export interface AssistantConversationDetail {
+  conversation: AssistantConversation;
+  messages: AssistantMessage[];
+}
+
+export interface AssistantAnswerResponse {
+  message_id: string;
+  conversation_id: string;
+  answer: string;
+  answer_status: AssistantAnswerStatus;
+  query_type: string;
+  claims: AssistantClaim[];
+  citations: AssistantCitation[];
+  uncertainty?: string | null;
+  conflicts: string[];
+  missing_information: string[];
+  suggested_followup_questions: string[];
+  model_name: string;
+  retrieval_run_id?: string | null;
+  duration_ms: number;
+  created_at: string;
+}

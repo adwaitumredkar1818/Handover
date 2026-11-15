@@ -13,6 +13,9 @@ import type {
   EvidenceSummary,
   EvidenceDetail,
   EvidenceMetrics,
+  AssistantConversation,
+  AssistantConversationDetail,
+  AssistantAnswerResponse,
 } from "./types";
 
 const API_BASE_URL =
@@ -1341,89 +1344,82 @@ export const api = {
     },
   },
   assistant: {
-    async listConversations(projectId: string): Promise<Array<{
-      id: string;
-      title: string;
-      created_at: string;
-      updated_at: string;
-    }>> {
-      return request(`/projects/${projectId}/assistant/conversations`);
+    async listConversations(projectId: string): Promise<AssistantConversation[]> {
+      return request<AssistantConversation[]>(`/projects/${projectId}/assistant/conversations`);
     },
-    async createConversation(projectId: string, title?: string): Promise<{
-      id: string;
-      title: string;
-      created_at: string;
-    }> {
-      return request(`/projects/${projectId}/assistant/conversations`, {
+    async createConversation(projectId: string, title?: string): Promise<AssistantConversation> {
+      return request<AssistantConversation>(`/projects/${projectId}/assistant/conversations`, {
         method: "POST",
         body: JSON.stringify({ title: title || "New Investigation" }),
       });
+    },
+    async getConversation(projectId: string, conversationId: string): Promise<AssistantConversationDetail> {
+      return request<AssistantConversationDetail>(`/projects/${projectId}/assistant/conversations/${conversationId}`);
+    },
+    async askQuestion(
+      projectId: string,
+      conversationId: string,
+      data: {
+        question: string;
+        mode?: "hybrid" | "keyword" | "semantic";
+        include_domains?: string[];
+        max_citations?: number;
+      }
+    ): Promise<AssistantAnswerResponse> {
+      return request<AssistantAnswerResponse>(
+        `/projects/${projectId}/assistant/conversations/${conversationId}/messages`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            question: data.question,
+            mode: data.mode || "hybrid",
+            include_domains: data.include_domains,
+            max_citations: data.max_citations || 8,
+          }),
+        }
+      );
     },
     async sendMessage(
       projectId: string,
       conversationId: string,
       contentOrQuestion: string,
       options?: {
-        mode?: string;
+        mode?: "hybrid" | "keyword" | "semantic";
         include_domains?: string[];
         max_citations?: number;
       }
-    ): Promise<{
-      id?: string;
-      message_id?: string;
-      conversation_id?: string;
-      role?: string;
-      content?: string;
-      answer?: string;
-      answer_status?: string;
-      query_type?: string;
-      claims?: Array<Record<string, unknown>>;
-      citations: Array<{
-        source_id: string;
-        source_title: string;
-        snippet: string;
-        confidence: number;
-      }>;
-      uncertainty?: string | null;
-      conflicts?: Array<Record<string, unknown>>;
-      missing_information?: string[];
-      suggested_followup_questions?: string[];
-      model_name?: string;
-      duration_ms?: number;
-      created_at: string;
-    }> {
-      const payload: Record<string, unknown> = {
+    ): Promise<AssistantAnswerResponse> {
+      return this.askQuestion(projectId, conversationId, {
         question: contentOrQuestion,
-        content: contentOrQuestion,
-        mode: options?.mode || "standard",
-        max_citations: options?.max_citations || 5,
-      };
-      if (options?.include_domains) {
-        payload.include_domains = options.include_domains;
-      }
-      return request(`/projects/${projectId}/assistant/conversations/${conversationId}/messages`, {
-        method: "POST",
-        body: JSON.stringify(payload),
+        mode: options?.mode,
+        include_domains: options?.include_domains,
+        max_citations: options?.max_citations,
       });
     },
-    async getMessages(projectId: string, conversationId: string): Promise<Array<{
-      id: string;
-      role: string;
-      content: string;
-      citations?: Array<{
-        source_id: string;
-        source_title: string;
-        snippet: string;
-        confidence: number;
-      }>;
-      created_at: string;
-    }>> {
-      return request(`/projects/${projectId}/assistant/conversations/${conversationId}/messages`);
+    async getMessages(projectId: string, conversationId: string): Promise<AssistantConversationDetail["messages"]> {
+      const detail = await this.getConversation(projectId, conversationId);
+      return detail.messages || [];
     },
     async deleteConversation(projectId: string, conversationId: string): Promise<void> {
       return request(`/projects/${projectId}/assistant/conversations/${conversationId}`, {
         method: "DELETE",
       });
+    },
+    async submitFeedback(
+      projectId: string,
+      messageId: string,
+      data: {
+        feedback_type: "helpful" | "unhelpful" | "incorrect_fact" | "missing_citation" | "unauthorized_source";
+        comment?: string;
+      }
+    ): Promise<{ id: string; message_id: string; user_id: string; feedback_type: string; comment?: string }> {
+      return request(`/projects/${projectId}/assistant/messages/${messageId}/feedback`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async getDiagnostics(projectId: string, runId: string): Promise<unknown> {
+      return request(`/projects/${projectId}/assistant/diagnostics/retrieval/${runId}`);
     },
   },
   audit: {

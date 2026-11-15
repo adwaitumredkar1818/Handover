@@ -1,289 +1,1216 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Bot,
   Send,
+  Plus,
+  Trash2,
   Sparkles,
-  Database,
   ExternalLink,
   ShieldCheck,
+  ShieldAlert,
   RefreshCw,
-  User,
-  MessageSquare,
-  HelpCircle,
   AlertCircle,
+  AlertTriangle,
+  HelpCircle,
+  FileText,
+  GitCommit,
+  CheckCircle2,
+  ThumbsUp,
+  ThumbsDown,
+  ChevronDown,
+  ChevronUp,
   ChevronRight,
+  Database,
+  Layers,
+  Search,
+  User,
+  ArrowRight,
+  Hash,
+  Clock,
+  Check,
 } from "lucide-react";
-import { useLiveApp } from "../../context/LiveAppContext";
-import { Button } from "../ui";
+import Link from "next/link";
 import { api } from "../../lib/api";
+import { useLiveApp } from "../../context/LiveAppContext";
+import type {
+  AssistantConversation,
+  AssistantMessage,
+  AssistantCitation,
+  AssistantClaim,
+  AssistantAnswerStatus,
+} from "../../lib/types";
 
-export interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  citations?: Array<{
-    title: string;
-    source_url?: string;
-    excerpt?: string;
-    confidence?: number;
-  }>;
-  created_at?: string;
-}
+// Starter prompt recommendations
+const STARTER_PROMPTS = [
+  {
+    title: "Platform Identity & Auth",
+    question: "What is the platform identity and authentication architecture?",
+    category: "Architecture",
+  },
+  {
+    title: "RTX 4050 VRAM Contention",
+    question: "What are the main architecture risks regarding Ollama and RTX 4050 VRAM contention?",
+    category: "Risks",
+  },
+  {
+    title: "Storage Provider Decision",
+    question: "What are the key architectural decisions regarding dual-provider storage?",
+    category: "Decisions",
+  },
+  {
+    title: "Ownership & Responsibilities",
+    question: "Who is responsible for platform architecture and cryptographic security?",
+    category: "Ownership",
+  },
+  {
+    title: "Unfinished Tasks & Milestones",
+    question: "What unfinished tasks and blockers remain for the project transition?",
+    category: "Tasks",
+  },
+];
+
+// Domains mapping
+const DOMAINS_LIST = [
+  { id: "all", label: "All Knowledge Domains" },
+  { id: "decisions_rationale", label: "Decisions & Rationale" },
+  { id: "technical_architecture", label: "Technical Architecture" },
+  { id: "work_progress", label: "Work Progress & Tasks" },
+  { id: "responsibilities_ownership", label: "Ownership & Roles" },
+  { id: "dependencies_relationships", label: "Dependencies" },
+  { id: "bugs_blockers_risks", label: "Risks, Blockers & Bugs" },
+  { id: "operational_historical", label: "Operations & Procedures" },
+  { id: "project_overview_context", label: "Project Context" },
+];
 
 export function AssistantWorkspaceView() {
-  const { activeProject } = useLiveApp();
-  const [conversations, setConversations] = useState<Array<Record<string, unknown>>>([]);
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "initial-welcome",
-      role: "assistant",
-      content:
-        "Hello! I am your Project Knowledge Assistant. I answer questions grounded strictly in authorized project evidence, architectural records, decisions, and transition dossiers. What would you like to know about this project?",
-    },
-  ]);
-  const [inputValue, setInputValue] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const { activeProject, user, addToast } = useLiveApp();
 
+  // State
+  const [conversations, setConversations] = useState<AssistantConversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<AssistantMessage[]>([]);
+  const [loadingConversations, setLoadingConversations] = useState<boolean>(true);
+  const [loadingMessages, setLoadingMessages] = useState<boolean>(false);
+  const [asking, setAsking] = useState<boolean>(false);
+
+  // Form input
+  const [inputValue, setInputValue] = useState<string>("");
+  const [selectedDomain, setSelectedDomain] = useState<string>("all");
+  const [retrievalMode, setRetrievalMode] = useState<"hybrid" | "keyword" | "semantic">("hybrid");
+
+  // Interaction
+  const [activeCitationLabel, setActiveCitationLabel] = useState<string | null>(null);
+  const [evidenceFilterTab, setEvidenceFilterTab] = useState<string>("all");
+  const [expandedClaims, setExpandedClaims] = useState<Record<string, boolean>>({});
+  const [feedbackGiven, setFeedbackGiven] = useState<Record<string, "helpful" | "unhelpful">>({});
+  const [searchThreadQuery, setSearchThreadQuery] = useState<string>("");
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const citationRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  // Auto-scroll messages
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, asking]);
 
-  const loadConversations = async (projectId: string) => {
-    try {
-      const data = await api.assistant.listConversations(projectId);
-      setConversations(data || []);
-      if (!data || data.length === 0) {
-        setActiveConversationId(null);
-        setMessages([]);
+  // Load conversations
+  const loadConversations = useCallback(
+    async (selectFirst = false) => {
+      if (!activeProject?.id) return;
+      setLoadingConversations(true);
+      try {
+        const list = await api.assistant.listConversations(activeProject.id).catch(() => []);
+        setConversations(list || []);
+
+        if (list && list.length > 0) {
+          if (selectFirst || !activeConversationId || !list.some((c) => c.id === activeConversationId)) {
+            const target = list[0];
+            if (target) {
+              setActiveConversationId(target.id);
+            }
+          }
+        } else {
+          setActiveConversationId(null);
+          setMessages([]);
+        }
+      } catch (err) {
+        console.error("Failed to load conversations:", err);
+      } finally {
+        setLoadingConversations(false);
       }
-    } catch (err) {
-      console.error("Failed to load conversations:", err);
-      setConversations([]);
-      setActiveConversationId(null);
+    },
+    [activeProject?.id, activeConversationId]
+  );
+
+  useEffect(() => {
+    loadConversations(true);
+  }, [activeProject?.id]);
+
+  // Load messages when active conversation changes
+  const loadMessages = useCallback(
+    async (convId: string) => {
+      if (!activeProject?.id || !convId) return;
+      setLoadingMessages(true);
+      try {
+        const detail = await api.assistant.getConversation(activeProject.id, convId);
+        setMessages(detail?.messages || []);
+      } catch (err) {
+        console.error("Failed to load conversation detail:", err);
+        setMessages([]);
+      } finally {
+        setLoadingMessages(false);
+      }
+    },
+    [activeProject?.id]
+  );
+
+  useEffect(() => {
+    if (activeConversationId) {
+      loadMessages(activeConversationId);
+    }
+  }, [activeConversationId, loadMessages]);
+
+  // Create new conversation thread
+  const handleCreateNewThread = async (title?: string) => {
+    if (!activeProject?.id) return;
+    try {
+      const threadTitle = title || `Investigation #${conversations.length + 1}`;
+      const newConv = await api.assistant.createConversation(activeProject.id, threadTitle);
+      addToast({
+        type: "success",
+        title: "Thread Created",
+        message: `New assistant conversation "${threadTitle}" opened.`,
+      });
+      setConversations((prev) => [newConv, ...prev]);
+      setActiveConversationId(newConv.id);
       setMessages([]);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to create conversation";
+      addToast({
+        type: "error",
+        title: "Creation Error",
+        message: errorMsg,
+      });
     }
   };
 
-  useEffect(() => {
-    if (activeProject) {
-      loadConversations(activeProject.id);
-    } else {
-      setConversations([]);
-      setActiveConversationId(null);
-      setMessages([]);
+  // Delete conversation thread
+  const handleDeleteThread = async (convId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!activeProject?.id) return;
+    try {
+      await api.assistant.deleteConversation(activeProject.id, convId);
+      addToast({
+        type: "info",
+        title: "Thread Removed",
+        message: "Assistant conversation deleted.",
+      });
+      const updated = conversations.filter((c) => c.id !== convId);
+      setConversations(updated);
+      if (activeConversationId === convId) {
+        if (updated.length > 0 && updated[0]) {
+          setActiveConversationId(updated[0].id);
+        } else {
+          setActiveConversationId(null);
+          setMessages([]);
+        }
+      }
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to delete conversation";
+      addToast({
+        type: "error",
+        title: "Deletion Failed",
+        message: errorMsg,
+      });
     }
-  }, [activeProject]);
+  };
 
-  const handleSendMessage = async (textToSend?: string) => {
-    const text = textToSend || inputValue;
-    if (!text.trim() || !activeProject) return;
+  // Submit question turn
+  const handleAsk = async (questionText?: string) => {
+    const q = (questionText || inputValue).trim();
+    if (!q || !activeProject?.id) return;
 
-    const userMsg: Message = {
-      id: `user-${Date.now()}`,
-      role: "user",
-      content: text,
+    if (!questionText) {
+      setInputValue("");
+    }
+
+    let targetConvId = activeConversationId;
+
+    // Auto-create thread if none exists
+    if (!targetConvId) {
+      try {
+        const threadTitle = q.length > 40 ? q.slice(0, 37) + "..." : q;
+        const newConv = await api.assistant.createConversation(activeProject.id, threadTitle);
+        targetConvId = newConv.id;
+        setActiveConversationId(newConv.id);
+        setConversations((prev) => [newConv, ...prev]);
+      } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : "Failed to start thread";
+        addToast({
+          type: "error",
+          title: "Session Error",
+          message: errorMsg,
+        });
+        return;
+      }
+    }
+
+    // Optimistic user message
+    const tempUserMsg: AssistantMessage = {
+      id: `temp-user-${Date.now()}`,
+      conversation_id: targetConvId,
+      sender_type: "user",
+      content: q,
+      citations: [],
       created_at: new Date().toISOString(),
     };
-
-    setMessages((prev) => [...prev, userMsg]);
-    if (!textToSend) setInputValue("");
-    setIsLoading(true);
+    setMessages((prev) => [...prev, tempUserMsg]);
+    setAsking(true);
 
     try {
-      let convId = activeConversationId;
+      const domainsFilter = selectedDomain === "all" ? undefined : [selectedDomain];
+      const answerRes = await api.assistant.askQuestion(activeProject.id, targetConvId, {
+        question: q,
+        mode: retrievalMode,
+        include_domains: domainsFilter,
+        max_citations: 8,
+      });
 
-      // Create conversation if not exists
-      if (!convId) {
-        const cData = await api.assistant.createConversation(activeProject.id, text.slice(0, 40));
-        convId = cData.id;
-        setActiveConversationId(convId);
-        await loadConversations(activeProject.id);
+      // Append assistant message from answer response
+      const assistantMsg: AssistantMessage = {
+        id: answerRes.message_id,
+        conversation_id: answerRes.conversation_id,
+        sender_type: "assistant",
+        content: answerRes.answer,
+        answer_status: answerRes.answer_status,
+        structured_payload_json: {
+          claims: answerRes.claims,
+          conflicts: answerRes.conflicts,
+          uncertainty: answerRes.uncertainty,
+          missing_information: answerRes.missing_information,
+          suggested_followup_questions: answerRes.suggested_followup_questions,
+          query_type: answerRes.query_type,
+        },
+        citations: answerRes.citations || [],
+        model_name: answerRes.model_name,
+        duration_ms: answerRes.duration_ms,
+        retrieval_run_id: answerRes.retrieval_run_id,
+        created_at: answerRes.created_at,
+      };
+
+      setMessages((prev) => [...prev, assistantMsg]);
+
+      // If citations were returned, focus the first one
+      if (answerRes.citations && answerRes.citations.length > 0 && answerRes.citations[0]) {
+        setActiveCitationLabel(answerRes.citations[0].citation_label);
       }
-
-      // Send message to assistant
-      if (convId) {
-        const aData = await api.assistant.sendMessage(activeProject.id, convId, text);
-
-        const mappedCitations = (aData.citations || []).map((c) => ({
-          title: c.source_title || "Project Evidence",
-          excerpt: c.snippet || "",
-          confidence: c.confidence || 1.0,
-        }));
-
-        const assistantMsg: Message = {
-          id: aData.message_id || `asst-${Date.now()}`,
-          role: "assistant",
-          content: aData.answer || "No response received.",
-          citations: mappedCitations,
-          created_at: aData.created_at || new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, assistantMsg]);
-      }
-    } catch (err) {
-      console.error("Assistant chat error:", err);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : "Failed to retrieve evidence-grounded answer";
+      addToast({
+        type: "error",
+        title: "Assistant Error",
+        message: errorMsg,
+      });
+      // Append error message to chat
       setMessages((prev) => [
         ...prev,
         {
-          id: `err-${Date.now()}`,
-          role: "assistant",
-          content:
-            "I could not complete retrieval for that request. Supporting project evidence may be unavailable or the local inference engine may be initializing.",
+          id: `temp-err-${Date.now()}`,
+          conversation_id: targetConvId!,
+          sender_type: "assistant",
+          content: `⚠️ Error during knowledge retrieval: ${errorMsg}. Please verify connection to the Ollama runtime and PostgreSQL full-text search.`,
+          answer_status: "declined",
+          citations: [],
+          created_at: new Date().toISOString(),
         },
       ]);
     } finally {
-      setIsLoading(false);
+      setAsking(false);
     }
   };
 
-  if (!activeProject) {
-    return (
-      <div className="p-8 text-center bg-white rounded-xl border border-[#DCE3EB]">
-        <Bot className="w-12 h-12 text-[#69778D] mb-3 mx-auto" />
-        <div className="font-bold text-sm text-[#25334B]">No Active Project Selected</div>
-        <p className="text-xs text-[#69778D] mt-1">Select a project workspace to open the AI Assistant.</p>
-      </div>
-    );
-  }
+  // Submit message feedback
+  const handleFeedback = async (messageId: string, type: "helpful" | "unhelpful") => {
+    if (!activeProject?.id) return;
+    try {
+      await api.assistant.submitFeedback(activeProject.id, messageId, {
+        feedback_type: type,
+      });
+      setFeedbackGiven((prev) => ({ ...prev, [messageId]: type }));
+      addToast({
+        type: "success",
+        title: "Feedback Recorded",
+        message: type === "helpful" ? "Marked response as helpful." : "Marked response as needing improvement.",
+      });
+    } catch {
+      // Fallback
+    }
+  };
+
+  // Handle citation click: highlight and scroll to Panel 3 card
+  const handleCitationClick = (citationLabel: string) => {
+    setActiveCitationLabel(citationLabel);
+    const element = citationRefs.current[citationLabel];
+    if (element) {
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  };
+
+  // Extract all citations from the latest assistant message or active thread
+  const latestAssistantMessage = useMemo(() => {
+    return [...messages].reverse().find((m) => m.sender_type === "assistant");
+  }, [messages]);
+
+  const activeCitations = useMemo(() => {
+    return latestAssistantMessage?.citations || [];
+  }, [latestAssistantMessage]);
+
+  // Group citations for Panel 3 breakdown
+  const filteredCitations = useMemo(() => {
+    if (evidenceFilterTab === "all") return activeCitations;
+    if (evidenceFilterTab === "jira") {
+      return activeCitations.filter((c) => c.source_provider?.toLowerCase().includes("jira"));
+    }
+    if (evidenceFilterTab === "github") {
+      return activeCitations.filter(
+        (c) =>
+          c.source_provider?.toLowerCase().includes("github") ||
+          c.source_provider?.toLowerCase().includes("commit")
+      );
+    }
+    if (evidenceFilterTab === "documents") {
+      return activeCitations.filter(
+        (c) =>
+          c.source_provider?.toLowerCase().includes("document") ||
+          c.source_provider?.toLowerCase().includes("upload") ||
+          c.source_provider?.toLowerCase().includes("pdf")
+      );
+    }
+    if (evidenceFilterTab === "findings") {
+      return activeCitations.filter((c) => c.knowledge_item_id != null || c.is_verified);
+    }
+    return activeCitations;
+  }, [activeCitations, evidenceFilterTab]);
+
+  // Counts by provider
+  const countsByProvider = useMemo(() => {
+    return {
+      all: activeCitations.length,
+      jira: activeCitations.filter((c) => c.source_provider?.toLowerCase().includes("jira")).length,
+      github: activeCitations.filter(
+        (c) =>
+          c.source_provider?.toLowerCase().includes("github") ||
+          c.source_provider?.toLowerCase().includes("commit")
+      ).length,
+      documents: activeCitations.filter(
+        (c) =>
+          c.source_provider?.toLowerCase().includes("document") ||
+          c.source_provider?.toLowerCase().includes("upload") ||
+          c.source_provider?.toLowerCase().includes("pdf")
+      ).length,
+      findings: activeCitations.filter((c) => c.knowledge_item_id != null || c.is_verified).length,
+    };
+  }, [activeCitations]);
+
+  // Helper to render answer text with interactive [S1], [S2] chips
+  const renderFormattedAnswer = (text: string) => {
+    const parts = text.split(/(\[S?\d+\])/g);
+    return parts.map((part, idx) => {
+      const match = part.match(/^\[(S?\d+)\]$/);
+      if (match && match[1]) {
+        const label = match[1];
+        const isActive = activeCitationLabel === label;
+        return (
+          <button
+            key={idx}
+            type="button"
+            onClick={() => handleCitationClick(label)}
+            className={`inline-flex items-center mx-0.5 px-1.5 py-0.2 rounded text-[11px] font-mono font-bold transition-all shadow-2xs ${
+              isActive
+                ? "bg-emerald-600 text-white ring-2 ring-emerald-400 scale-105"
+                : "bg-emerald-100 text-emerald-800 hover:bg-emerald-200 border border-emerald-300"
+            }`}
+            title={`View evidence record [${label}] in Panel 3`}
+          >
+            {part}
+          </button>
+        );
+      }
+      return <span key={idx}>{part}</span>;
+    });
+  };
+
+  // Filtered threads list
+  const filteredThreads = useMemo(() => {
+    if (!searchThreadQuery.trim()) return conversations;
+    const q = searchThreadQuery.toLowerCase();
+    return conversations.filter((c) => c.title.toLowerCase().includes(q));
+  }, [conversations, searchThreadQuery]);
 
   return (
-    <div className="h-[calc(100vh-6rem)] flex flex-col gap-4">
-      {/* Header */}
-      <div className="bg-white rounded-xl border border-[#DCE3EB] px-5 py-3.5 shadow-2xs flex items-center justify-between shrink-0">
+    <div className="flex flex-col min-h-[calc(100vh-64px)] bg-[#f8fafc] text-slate-800 p-6 space-y-6">
+      {/* ------------------------------------------------------------- */}
+      {/* Top Bar Header & Breadcrumbs                                 */}
+      {/* ------------------------------------------------------------- */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-5">
         <div>
-          <div className="flex items-center gap-2 text-xs font-semibold text-[#4774A9] uppercase tracking-wider">
-            <span>AI Project Assistant</span>
-            <span className="w-1.5 h-1.5 rounded-full bg-[#249E91]" />
-            <span className="text-[#69778D] font-normal">{activeProject.name}</span>
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-teal-800">
+            <span className="inline-block size-2 rounded-full bg-teal-500 animate-pulse" />
+            Sidebar: AI ASSISTANT &gt; Project Knowledge Assistant
+            <span className="text-slate-400">·</span>
+            <span className="text-emerald-700 font-mono lowercase tracking-normal">evidence-grounded answers</span>
           </div>
-          <h1 className="text-lg font-bold text-[#25334B] tracking-tight">
-            Evidence-Backed Knowledge Assistant
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 mt-1 flex items-center gap-2">
+            Project Knowledge Assistant
           </h1>
+          <p className="text-xs text-slate-500 mt-1 max-w-2xl">
+            Permission-filtered hybrid RAG assistant with strict source citations, source ACL checks, and uncertainty disclosure.
+          </p>
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-[#69778D] font-mono">
-          <ShieldCheck className="w-4 h-4 text-[#249E91]" />
-          <span>Strict Pre-Retrieval ACLs</span>
+        <div className="flex items-center gap-2 self-start md:self-auto">
+          <button
+            onClick={() => handleCreateNewThread()}
+            className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white shadow-xs transition"
+          >
+            <Plus className="size-3.5" />
+            New Thread
+          </button>
+          <Link
+            href="/evidence"
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 shadow-xs transition"
+          >
+            <Database className="size-3.5 text-slate-500" />
+            Go to Evidence Center
+          </Link>
+          <button
+            onClick={() => {
+              if (activeConversationId) loadMessages(activeConversationId);
+              loadConversations();
+            }}
+            disabled={loadingConversations || loadingMessages}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 shadow-xs transition disabled:opacity-50"
+            title="Refresh threads and active turn"
+          >
+            <RefreshCw className={`size-3.5 ${loadingConversations || loadingMessages ? "animate-spin" : ""}`} />
+          </button>
         </div>
       </div>
 
-      {/* Main Chat Container */}
-      <div className="flex-1 bg-white rounded-xl border border-[#DCE3EB] shadow-2xs flex flex-col overflow-hidden">
-        {/* Messages Stream */}
-        <div className="flex-1 overflow-y-auto p-5 space-y-4">
-          {messages.map((m) => (
-            <div
-              key={m.id}
-              className={`flex gap-3 text-xs leading-relaxed ${
-                m.role === "user" ? "justify-end" : "justify-start"
-              }`}
-            >
-              {m.role === "assistant" && (
-                <div className="w-7 h-7 rounded-lg bg-[#E8EEF5] text-[#4774A9] flex items-center justify-center shrink-0 mt-0.5">
-                  <Bot className="w-4 h-4" />
+      {/* ------------------------------------------------------------- */}
+      {/* 3-Panel Main Workspace Architecture (Matches Wireframe Fig. 8) */}
+      {/* ------------------------------------------------------------- */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 flex-1 items-start">
+        {/* ============================================================ */}
+        {/* PANEL 1: CONTEXT (Left Panel)                               */}
+        {/* ============================================================ */}
+        <div className="lg:col-span-3 bg-white border border-slate-200 rounded-xl shadow-xs flex flex-col overflow-hidden h-[760px]">
+          {/* Header */}
+          <div className="bg-[#1e293b] text-white px-4 py-2.5 flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2">
+              <Layers className="size-3.5 text-blue-400" />
+              1 CONTEXT
+            </span>
+            <span className="text-[11px] font-mono text-slate-300 bg-slate-800 px-2 py-0.5 rounded-full">
+              {conversations.length} threads
+            </span>
+          </div>
+
+          <div className="p-3.5 flex flex-col gap-4 overflow-y-auto flex-1">
+            {/* Section 1: PROJECT, ROLE */}
+            <div>
+              <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+                PROJECT, ROLE
+              </div>
+              <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-900 truncate">
+                    {activeProject?.name || "Skillpassport"}
+                  </span>
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                    Active
+                  </span>
                 </div>
-              )}
+                <div className="flex items-center gap-1.5 text-xs text-slate-600">
+                  <User className="size-3 text-slate-400" />
+                  <span className="font-medium text-slate-700">
+                    {(user?.roles && user.roles[0]) || "project_manager"}
+                  </span>
+                  <span className="text-slate-400">·</span>
+                  <span className="text-[11px] text-slate-500">Project Member</span>
+                </div>
+                <div className="pt-2 border-t border-slate-200 flex items-start gap-1.5 text-[11px] text-slate-500 leading-tight">
+                  <ShieldCheck className="size-3.5 text-teal-600 shrink-0 mt-0.5" />
+                  <span>Strict pre-retrieval source ACL enforcement. Citations fail-closed.</span>
+                </div>
+              </div>
+            </div>
 
-              <div
-                className={`max-w-2xl p-4 rounded-xl ${
-                  m.role === "user"
-                    ? "bg-[#4774A9] text-white"
-                    : "bg-[#F6F8FC] border border-[#DCE3EB] text-[#25334B]"
-                }`}
-              >
-                <div className="whitespace-pre-wrap">{m.content}</div>
+            {/* Section 2: CONVERSATION HISTORY */}
+            <div className="flex flex-col flex-1 min-h-[220px]">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                  CONVERSATION HISTORY
+                </span>
+                <button
+                  onClick={() => handleCreateNewThread()}
+                  className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 flex items-center gap-1"
+                >
+                  <Plus className="size-3" />
+                  New
+                </button>
+              </div>
 
-                {/* Evidence Citations */}
-                {m.citations && m.citations.length > 0 && (
-                  <div className="mt-3 pt-3 border-t border-[#DCE3EB] space-y-2">
-                    <div className="text-[10px] font-bold text-[#4774A9] uppercase tracking-wider flex items-center gap-1.5">
-                      <Database className="w-3.5 h-3.5" />
-                      <span>Supporting Evidence Citations</span>
-                    </div>
-                    {m.citations.map((c, idx) => (
-                      <div
-                        key={idx}
-                        className="p-2 rounded bg-white border border-[#DCE3EB] text-[11px]"
-                      >
-                        <div className="font-bold text-[#25334B]">{c.title}</div>
-                        {c.excerpt && (
-                          <div className="text-[#69778D] mt-0.5 font-mono text-[10px]">
-                            {c.excerpt}
-                          </div>
-                        )}
-                      </div>
-                    ))}
+              {/* Thread search */}
+              <div className="relative mb-2">
+                <Search className="absolute left-2.5 top-2.5 size-3 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Filter threads..."
+                  value={searchThreadQuery}
+                  onChange={(e) => setSearchThreadQuery(e.target.value)}
+                  className="w-full pl-7 pr-2 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md focus:bg-white focus:outline-hidden focus:ring-1 focus:ring-teal-500 text-slate-800 placeholder-slate-400"
+                />
+              </div>
+
+              {/* Thread list */}
+              <div className="space-y-1.5 overflow-y-auto flex-1 pr-1 max-h-[220px]">
+                {loadingConversations ? (
+                  <div className="p-4 text-center text-xs text-slate-400">Loading threads...</div>
+                ) : filteredThreads.length === 0 ? (
+                  <div className="p-4 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-lg">
+                    No conversations found. Click &quot;New&quot; to start.
                   </div>
+                ) : (
+                  filteredThreads.map((conv) => {
+                    const isActive = conv.id === activeConversationId;
+                    return (
+                      <div
+                        key={conv.id}
+                        onClick={() => setActiveConversationId(conv.id)}
+                        className={`group p-2.5 rounded-lg border text-xs cursor-pointer transition-all flex items-start justify-between gap-2 ${
+                          isActive
+                            ? "bg-teal-50/80 border-teal-300 shadow-2xs font-medium text-teal-950"
+                            : "bg-white border-slate-200 hover:bg-slate-50 text-slate-700"
+                        }`}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="truncate font-semibold">{conv.title}</div>
+                          <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-1">
+                            <Clock className="size-2.5" />
+                            <span>
+                              {conv.last_message_at
+                                ? new Date(conv.last_message_at).toLocaleTimeString([], {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                  })
+                                : new Date(conv.created_at).toLocaleDateString()}
+                            </span>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={(e) => handleDeleteThread(conv.id, e)}
+                          className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-rose-600 p-1 rounded transition-opacity"
+                          title="Delete thread"
+                        >
+                          <Trash2 className="size-3" />
+                        </button>
+                      </div>
+                    );
+                  })
                 )}
               </div>
-
-              {m.role === "user" && (
-                <div className="w-7 h-7 rounded-lg bg-[#25334B] text-white flex items-center justify-center shrink-0 mt-0.5">
-                  <User className="w-4 h-4" />
-                </div>
-              )}
             </div>
-          ))}
 
-          {isLoading && (
-            <div className="flex gap-3 text-xs text-[#69778D] items-center">
-              <div className="w-7 h-7 rounded-lg bg-[#E8EEF5] text-[#4774A9] flex items-center justify-center shrink-0">
-                <Bot className="w-4 h-4 animate-pulse" />
+            {/* Section 3: RECENT QUESTIONS / STARTER PROMPTS */}
+            <div>
+              <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">
+                RECENT QUESTIONS &amp; PROMPTS
               </div>
-              <span className="italic">Searching project evidence and reasoning...</span>
+              <div className="space-y-1.5">
+                {STARTER_PROMPTS.map((prompt, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => handleAsk(prompt.question)}
+                    disabled={asking}
+                    className="w-full text-left p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 hover:border-teal-300 transition-colors text-xs text-slate-700 flex items-start justify-between gap-2 group disabled:opacity-50"
+                  >
+                    <div className="flex-1">
+                      <span className="font-medium group-hover:text-teal-900 block">{prompt.title}</span>
+                      <span className="text-[10px] text-slate-400 truncate block mt-0.5">{prompt.question}</span>
+                    </div>
+                    <ArrowRight className="size-3 text-slate-400 group-hover:text-teal-600 shrink-0 mt-1" />
+                  </button>
+                ))}
+              </div>
             </div>
-          )}
-          <div ref={messagesEndRef} />
+          </div>
         </div>
 
-        {/* Suggested Queries */}
-        <div className="p-3 bg-[#F4F6F9] border-t border-[#DCE3EB] flex items-center gap-2 overflow-x-auto text-xs shrink-0">
-          <span className="text-[10px] uppercase font-bold text-[#69778D] shrink-0">Suggested:</span>
-          {[
-            "What are the major architectural decisions in this project?",
-            "What critical blockers or risks are currently unmitigated?",
-            "Who owns the core platform services?",
-          ].map((prompt, i) => (
-            <button
-              key={i}
-              onClick={() => handleSendMessage(prompt)}
-              className="px-3 py-1 rounded-full bg-white border border-[#DCE3EB] text-[#25334B] hover:border-[#4774A9] text-xs shrink-0 transition-colors"
-            >
-              {prompt}
-            </button>
-          ))}
-        </div>
+        {/* ============================================================ */}
+        {/* PANEL 2: QUESTION AND ANSWER (Center Panel)                  */}
+        {/* ============================================================ */}
+        <div className="lg:col-span-5 bg-white border border-slate-200 rounded-xl shadow-xs flex flex-col overflow-hidden h-[760px]">
+          {/* Header */}
+          <div className="bg-[#0f766e] text-white px-4 py-2.5 flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2">
+              <Bot className="size-3.5 text-emerald-300" />
+              2 QUESTION AND ANSWER
+            </span>
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center gap-1 text-[10px] font-mono bg-teal-800/80 text-teal-100 px-2 py-0.5 rounded-full border border-teal-600/50">
+                <Sparkles className="size-2.5 text-emerald-300" />
+                Hybrid RAG: Qwen3 8B
+              </span>
+            </div>
+          </div>
 
-        {/* Input Bar */}
-        <div className="p-3 bg-white border-t border-[#DCE3EB] flex items-center gap-3 shrink-0">
-          <input
-            type="text"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
+          {/* Conversation Turns Scroll Area */}
+          <div className="flex-1 p-4 overflow-y-auto space-y-5 bg-slate-50/50">
+            {loadingMessages ? (
+              <div className="p-8 text-center text-xs text-slate-400">Loading conversation history...</div>
+            ) : messages.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center p-6 text-center">
+                <div className="size-12 rounded-full bg-teal-100 flex items-center justify-center text-teal-700 mb-3">
+                  <Bot className="size-6" />
+                </div>
+                <h3 className="text-sm font-bold text-slate-900">Project Knowledge Assistant</h3>
+                <p className="text-xs text-slate-500 max-w-sm mt-1 leading-relaxed">
+                  Ask any question regarding architecture, technical decisions, unfinished work, responsibilities, or risks.
+                  Every statement is grounded in authorized project sources with zero fabrication.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-5 w-full max-w-md">
+                  {STARTER_PROMPTS.slice(0, 4).map((p, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => handleAsk(p.question)}
+                      className="p-2 text-left bg-white border border-slate-200 rounded-lg hover:border-teal-400 hover:shadow-2xs transition text-xs"
+                    >
+                      <div className="font-semibold text-slate-800 text-[11px]">{p.title}</div>
+                      <div className="text-[10px] text-slate-400 truncate mt-0.5">{p.question}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              messages.map((msg, index) => {
+                if (msg.sender_type === "user") {
+                  return (
+                    <div key={msg.id || index} className="flex flex-col items-end">
+                      <div className="flex items-center gap-1.5 text-[10px] text-slate-400 uppercase font-semibold mb-1 mr-1">
+                        <User className="size-3" />
+                        <span>QUESTION (user)</span>
+                        <span>·</span>
+                        <span>
+                          {msg.created_at ? new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Now"}
+                        </span>
+                      </div>
+                      <div className="max-w-[85%] bg-blue-50/80 border border-blue-200 text-slate-900 rounded-2xl rounded-tr-xs px-4 py-3 text-xs leading-relaxed shadow-2xs">
+                        {msg.content}
+                      </div>
+                    </div>
+                  );
+                }
+
+                // Assistant message turn
+                const isInsufficient =
+                  msg.answer_status === "insufficient_evidence" ||
+                  Boolean(msg.structured_payload_json?.uncertainty);
+                const hasConflicts =
+                  (msg.structured_payload_json?.conflicts &&
+                    msg.structured_payload_json.conflicts.length > 0) ||
+                  msg.answer_status === "conflicting_evidence";
+                const claims = msg.structured_payload_json?.claims || [];
+                const followups = msg.structured_payload_json?.suggested_followup_questions || [];
+                const isClaimsExpanded = expandedClaims[msg.id];
+                const currentFeedback = feedbackGiven[msg.id];
+
+                return (
+                  <div key={msg.id || index} className="flex flex-col items-start w-full">
+                    <div className="flex items-center gap-1.5 text-[10px] text-slate-500 uppercase font-semibold mb-1 ml-1">
+                      <Bot className="size-3 text-teal-600" />
+                      <span className="text-teal-900 font-bold">ANSWER</span>
+                      {msg.structured_payload_json?.query_type && (
+                        <span className="px-1.5 py-0.2 bg-teal-100 text-teal-800 rounded text-[9px] font-mono">
+                          {msg.structured_payload_json.query_type}
+                        </span>
+                      )}
+                      {msg.duration_ms && (
+                        <span className="text-slate-400 font-mono text-[9px]">
+                          {(msg.duration_ms / 1000).toFixed(1)}s
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="w-full bg-white border border-slate-200 rounded-2xl rounded-tl-xs p-4 text-xs shadow-xs space-y-3.5">
+                      {/* Main answer text */}
+                      <div className="text-slate-800 leading-relaxed space-y-2 whitespace-pre-wrap">
+                        {renderFormattedAnswer(msg.content)}
+                      </div>
+
+                      {/* Citation summary pills row */}
+                      {msg.citations && msg.citations.length > 0 && (
+                        <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center gap-1.5">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">
+                            Citations:
+                          </span>
+                          {msg.citations.map((c, i) => (
+                            <button
+                              key={i}
+                              type="button"
+                              onClick={() => handleCitationClick(c.citation_label)}
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold border transition ${
+                                activeCitationLabel === c.citation_label
+                                  ? "bg-emerald-600 text-white border-emerald-700 shadow-xs"
+                                  : "bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100"
+                              }`}
+                              title={c.source_title}
+                            >
+                              <span>[{c.citation_label}]</span>
+                              <span className="max-w-[120px] truncate">{c.source_provider}</span>
+                            </button>
+                          ))}
+                          <span className="text-[10px] text-slate-400 italic ml-1">
+                            (citations open source records)
+                          </span>
+                        </div>
+                      )}
+
+                      {/* INSUFFICIENT-EVIDENCE STATE ALERT */}
+                      {isInsufficient && (
+                        <div className="p-3 bg-amber-50/70 border border-dashed border-amber-300 rounded-lg text-amber-900 text-xs space-y-1">
+                          <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-[11px] text-amber-800">
+                            <AlertCircle className="size-3.5 text-amber-600" />
+                            INSUFFICIENT-EVIDENCE STATE
+                          </div>
+                          <p className="text-[11px] text-amber-800/90 leading-relaxed">
+                            {msg.structured_payload_json?.uncertainty ||
+                              "Available project evidence does not support a fully authoritative answer. Zero fabrication enforced."}
+                          </p>
+                          {msg.structured_payload_json?.missing_information &&
+                            msg.structured_payload_json.missing_information.length > 0 && (
+                              <div className="text-[10px] text-amber-700 mt-1 pl-4 list-disc">
+                                {msg.structured_payload_json.missing_information.map((m, mi) => (
+                                  <div key={mi}>• Missing context: {m}</div>
+                                ))}
+                              </div>
+                            )}
+                        </div>
+                      )}
+
+                      {/* CONFLICTS WARNING ALERT */}
+                      {hasConflicts && (
+                        <div className="p-3 bg-rose-50/70 border border-rose-200 rounded-lg text-rose-900 text-xs space-y-1">
+                          <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-[11px] text-rose-800">
+                            <ShieldAlert className="size-3.5 text-rose-600" />
+                            DETECTED CONFLICTS BETWEEN SOURCES
+                          </div>
+                          <div className="space-y-1 text-[11px] text-rose-800/90 pl-1">
+                            {msg.structured_payload_json?.conflicts?.map((conf, ci) => (
+                              <div key={ci} className="flex items-start gap-1">
+                                <span>⚠️</span>
+                                <span>{conf}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Factual Claims Accordion */}
+                      {claims.length > 0 && (
+                        <div className="pt-2 border-t border-slate-100">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedClaims((prev) => ({ ...prev, [msg.id]: !prev[msg.id] }))
+                            }
+                            className="flex items-center justify-between w-full text-left text-[11px] font-semibold text-slate-600 hover:text-slate-900 py-1"
+                          >
+                            <span className="flex items-center gap-1.5">
+                              <ShieldCheck className="size-3.5 text-teal-600" />
+                              Factual Claims &amp; Confidence ({claims.length})
+                            </span>
+                            {isClaimsExpanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
+                          </button>
+
+                          {isClaimsExpanded && (
+                            <div className="mt-2 space-y-1.5 pl-2 border-l-2 border-teal-200">
+                              {claims.map((claim, ci) => (
+                                <div key={ci} className="p-2 bg-slate-50 rounded border border-slate-200 text-[11px]">
+                                  <div className="text-slate-800 leading-snug">{claim.claim_text}</div>
+                                  <div className="flex items-center justify-between text-[10px] text-slate-500 mt-1">
+                                    <div className="flex items-center gap-1">
+                                      <span className="font-semibold text-emerald-700">
+                                        {Math.round(claim.confidence * 100)}% conf
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center gap-1 font-mono">
+                                      {claim.citation_labels.map((cl, cli) => (
+                                        <button
+                                          key={cli}
+                                          type="button"
+                                          onClick={() => handleCitationClick(cl)}
+                                          className="text-teal-700 hover:underline"
+                                        >
+                                          [{cl}]
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Feedback Buttons */}
+                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
+                        <div className="text-[10px]">
+                          Model: <span className="font-mono text-slate-600">{msg.model_name || "qwen3:8b"}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-slate-400">Helpful?</span>
+                          <button
+                            type="button"
+                            onClick={() => handleFeedback(msg.id, "helpful")}
+                            disabled={Boolean(currentFeedback)}
+                            className={`p-1 rounded hover:bg-slate-100 transition ${
+                              currentFeedback === "helpful" ? "text-emerald-600 font-bold" : "text-slate-400"
+                            }`}
+                            title="Helpful response"
+                          >
+                            <ThumbsUp className="size-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleFeedback(msg.id, "unhelpful")}
+                            disabled={Boolean(currentFeedback)}
+                            className={`p-1 rounded hover:bg-slate-100 transition ${
+                              currentFeedback === "unhelpful" ? "text-rose-600 font-bold" : "text-slate-400"
+                            }`}
+                            title="Needs improvement"
+                          >
+                            <ThumbsDown className="size-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Suggested Follow-Up Questions */}
+                      {followups.length > 0 && (
+                        <div className="pt-2 border-t border-slate-100 space-y-1.5">
+                          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                            SUGGESTED FOLLOW-UP QUESTIONS
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {followups.map((fq, fi) => (
+                              <button
+                                key={fi}
+                                type="button"
+                                onClick={() => handleAsk(fq)}
+                                disabled={asking}
+                                className="px-2.5 py-1 text-[11px] rounded-full bg-slate-100 hover:bg-teal-50 hover:text-teal-900 border border-slate-200 hover:border-teal-300 text-slate-700 transition shadow-2xs text-left"
+                              >
+                                {fq}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+
+            {/* In-flight loading turn */}
+            {asking && (
+              <div className="flex flex-col items-start w-full animate-pulse">
+                <div className="flex items-center gap-1.5 text-[10px] text-slate-500 uppercase font-semibold mb-1 ml-1">
+                  <Bot className="size-3 text-teal-600 animate-spin" />
+                  <span className="text-teal-900 font-bold">REASONING &amp; RETRIEVING...</span>
+                </div>
+                <div className="w-full bg-white border border-teal-200 rounded-2xl rounded-tl-xs p-4 text-xs text-slate-500 shadow-xs flex items-center gap-3">
+                  <Sparkles className="size-4 text-teal-600 animate-bounce" />
+                  <span>
+                    Querying hybrid retrieval (ChromaDB + PostgreSQL) and synthesising with Ollama Qwen3 8B...
+                  </span>
+                </div>
+              </div>
+            )}
+
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Bottom Question Input Bar */}
+          <div className="p-3 bg-white border-t border-slate-200 space-y-2">
+            {/* Filter controls row */}
+            <div className="flex items-center justify-between text-xs gap-2">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-bold text-slate-400 uppercase">Domain:</span>
+                <select
+                  value={selectedDomain}
+                  onChange={(e) => setSelectedDomain(e.target.value)}
+                  className="text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-0.5 text-slate-700 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
+                >
+                  {DOMAINS_LIST.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-bold text-slate-400 uppercase">Mode:</span>
+                <select
+                  value={retrievalMode}
+                  onChange={(e) => setRetrievalMode(e.target.value as "hybrid" | "keyword" | "semantic")}
+                  className="text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-0.5 text-slate-700 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
+                >
+                  <option value="hybrid">Hybrid (Vector + FTS)</option>
+                  <option value="keyword">Keyword (FTS)</option>
+                  <option value="semantic">Semantic (Vector)</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Input field and send button */}
+            <form
+              onSubmit={(e) => {
                 e.preventDefault();
-                handleSendMessage();
-              }
-            }}
-            placeholder={`Ask a question about ${activeProject.name}...`}
-            className="flex-1 text-xs text-[#25334B] placeholder:text-[#69778D] focus:outline-none px-2 py-1"
-          />
-          <Button
-            variant="primary"
-            icon={Send}
-            onClick={() => handleSendMessage()}
-            disabled={isLoading || !inputValue.trim()}
-          >
-            Ask Assistant
-          </Button>
+                handleAsk();
+              }}
+              className="flex items-center gap-2"
+            >
+              <input
+                type="text"
+                placeholder="Ask a question about the project (e.g. architecture, ownership, decisions)..."
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                disabled={asking}
+                className="flex-1 px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 text-slate-900 placeholder-slate-400 transition"
+              />
+              <button
+                type="submit"
+                disabled={!inputValue.trim() || asking}
+                className="px-4 py-2 bg-teal-700 hover:bg-teal-800 disabled:opacity-40 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5 transition shadow-xs"
+              >
+                {asking ? <RefreshCw className="size-3.5 animate-spin" /> : <Send className="size-3.5" />}
+                <span>Send</span>
+              </button>
+            </form>
+          </div>
+        </div>
+
+        {/* ============================================================ */}
+        {/* PANEL 3: RETRIEVED EVIDENCE (Right Panel)                    */}
+        {/* ============================================================ */}
+        <div className="lg:col-span-4 bg-white border border-slate-200 rounded-xl shadow-xs flex flex-col overflow-hidden h-[760px]">
+          {/* Header */}
+          <div className="bg-[#1e293b] text-white px-4 py-2.5 flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2">
+              <FileText className="size-3.5 text-emerald-400" />
+              3 RETRIEVED EVIDENCE
+            </span>
+            <span className="text-[11px] font-mono text-slate-300 bg-slate-800 px-2 py-0.5 rounded-full">
+              {activeCitations.length} sources
+            </span>
+          </div>
+
+          {/* Sub-tabs by category (Jira Tasks, GitHub Commits, Documents, Related Findings) */}
+          <div className="flex border-b border-slate-200 bg-slate-50 px-2 pt-2 gap-1 overflow-x-auto text-xs">
+            <button
+              type="button"
+              onClick={() => setEvidenceFilterTab("all")}
+              className={`px-2.5 py-1.5 rounded-t-lg font-semibold border-t border-x text-[11px] whitespace-nowrap transition ${
+                evidenceFilterTab === "all"
+                  ? "bg-white border-slate-200 text-teal-900"
+                  : "border-transparent text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              All ({countsByProvider.all})
+            </button>
+            <button
+              type="button"
+              onClick={() => setEvidenceFilterTab("jira")}
+              className={`px-2.5 py-1.5 rounded-t-lg font-semibold border-t border-x text-[11px] whitespace-nowrap transition ${
+                evidenceFilterTab === "jira"
+                  ? "bg-white border-slate-200 text-teal-900"
+                  : "border-transparent text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              Jira Tasks ({countsByProvider.jira})
+            </button>
+            <button
+              type="button"
+              onClick={() => setEvidenceFilterTab("github")}
+              className={`px-2.5 py-1.5 rounded-t-lg font-semibold border-t border-x text-[11px] whitespace-nowrap transition ${
+                evidenceFilterTab === "github"
+                  ? "bg-white border-slate-200 text-teal-900"
+                  : "border-transparent text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              GitHub ({countsByProvider.github})
+            </button>
+            <button
+              type="button"
+              onClick={() => setEvidenceFilterTab("documents")}
+              className={`px-2.5 py-1.5 rounded-t-lg font-semibold border-t border-x text-[11px] whitespace-nowrap transition ${
+                evidenceFilterTab === "documents"
+                  ? "bg-white border-slate-200 text-teal-900"
+                  : "border-transparent text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              Docs ({countsByProvider.documents})
+            </button>
+            <button
+              type="button"
+              onClick={() => setEvidenceFilterTab("findings")}
+              className={`px-2.5 py-1.5 rounded-t-lg font-semibold border-t border-x text-[11px] whitespace-nowrap transition ${
+                evidenceFilterTab === "findings"
+                  ? "bg-white border-slate-200 text-teal-900"
+                  : "border-transparent text-slate-500 hover:text-slate-800"
+              }`}
+            >
+              Findings ({countsByProvider.findings})
+            </button>
+          </div>
+
+          {/* Evidence Cards List */}
+          <div className="flex-1 p-3.5 overflow-y-auto space-y-3">
+            {filteredCitations.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center p-6 text-center text-slate-400">
+                <Database className="size-8 text-slate-300 mb-2" />
+                <div className="text-xs font-semibold text-slate-600">No Retrieved Evidence</div>
+                <p className="text-[11px] text-slate-400 max-w-xs mt-1">
+                  Ask a question in the center panel. Authorized supporting records will populate here with full provenance and direct quotations.
+                </p>
+              </div>
+            ) : (
+              filteredCitations.map((citation, idx) => {
+                const isSelected = activeCitationLabel === citation.citation_label;
+                const isGitHub = citation.source_provider?.toLowerCase().includes("github");
+                const isJira = citation.source_provider?.toLowerCase().includes("jira");
+                const isDoc = citation.source_provider?.toLowerCase().includes("document");
+
+                return (
+                  <div
+                    key={idx}
+                    ref={(el) => {
+                      citationRefs.current[citation.citation_label] = el;
+                    }}
+                    onClick={() => setActiveCitationLabel(citation.citation_label)}
+                    className={`p-3.5 rounded-xl border text-xs transition-all space-y-2.5 cursor-pointer ${
+                      isSelected
+                        ? "bg-emerald-50/50 border-emerald-500 ring-2 ring-emerald-500/30 shadow-xs"
+                        : "bg-white border-slate-200 hover:border-slate-300 shadow-2xs"
+                    }`}
+                  >
+                    {/* Top row: Label badge and Provider badge */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-bold bg-emerald-600 text-white shadow-2xs">
+                          [{citation.citation_label}]
+                        </span>
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                            isGitHub
+                              ? "bg-purple-50 text-purple-800 border-purple-200"
+                              : isJira
+                              ? "bg-blue-50 text-blue-800 border-blue-200"
+                              : isDoc
+                              ? "bg-teal-50 text-teal-800 border-teal-200"
+                              : "bg-slate-100 text-slate-700 border-slate-200"
+                          }`}
+                        >
+                          {isGitHub ? (
+                            <GitCommit className="size-2.5" />
+                          ) : isDoc ? (
+                            <FileText className="size-2.5" />
+                          ) : (
+                            <Database className="size-2.5" />
+                          )}
+                          {citation.source_provider}
+                        </span>
+                      </div>
+
+                      {citation.is_verified && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                          <CheckCircle2 className="size-2.5 text-emerald-600" />
+                          Human-Verified
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Source Title */}
+                    <div className="font-bold text-slate-900 text-xs leading-snug break-words">
+                      {citation.source_title}
+                    </div>
+
+                    {/* Section or page info */}
+                    {(citation.section_title || citation.page_number) && (
+                      <div className="text-[10px] text-slate-500 font-medium">
+                        {citation.section_title && <span>Section: {citation.section_title}</span>}
+                        {citation.page_number && <span className="ml-1.5">· Page {citation.page_number}</span>}
+                      </div>
+                    )}
+
+                    {/* Author & Timestamp */}
+                    <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                      {citation.author && (
+                        <span className="truncate">By: {citation.author}</span>
+                      )}
+                      {citation.source_timestamp && (
+                        <>
+                          <span>·</span>
+                          <span>{new Date(citation.source_timestamp).toLocaleDateString()}</span>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Direct Excerpt */}
+                    <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200 text-slate-700 text-[11px] italic leading-relaxed whitespace-pre-wrap">
+                      &quot;{citation.excerpt}&quot;
+                    </div>
+
+                    {/* Action link */}
+                    <div className="flex items-center justify-end pt-1">
+                      {citation.source_url ? (
+                        <a
+                          href={citation.source_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold text-teal-700 hover:text-teal-900 hover:underline"
+                        >
+                          <span>Open Source Record</span>
+                          <ExternalLink className="size-2.5" />
+                        </a>
+                      ) : (
+                        <Link
+                          href={`/evidence?id=${citation.evidence_id}`}
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold text-teal-700 hover:text-teal-900 hover:underline"
+                        >
+                          <span>View in Evidence Center</span>
+                          <ChevronRight className="size-2.5" />
+                        </Link>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       </div>
     </div>

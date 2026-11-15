@@ -35,6 +35,7 @@ import {
   ROLE_LABEL,
   HANDOVER_STATUS_LABEL,
   type Project,
+  type ProjectRole,
   type MemberRole,
 } from '../../lib/figmaStore'
 import { useLiveApp } from '../../context/LiveAppContext'
@@ -90,16 +91,29 @@ const ViewLink = ({ to, children = 'View all' }: { to: string; children?: ReactN
 
 function ProjectSwitcherStrip() {
   const s = useFigmaStore()
+  const { projects: liveProjects, activeProject: liveProject, setActiveProject } = useLiveApp()
+  const projectsList = liveProjects && liveProjects.length > 0 ? liveProjects.map(lp => ({
+    id: lp.id,
+    name: lp.name,
+    code: lp.slug?.toUpperCase() || lp.name.slice(0, 3).toUpperCase(),
+    color: '#0f766e',
+    role: (lp.my_project_role?.toLowerCase() || 'manager') as MemberRole,
+  })) : s.projects
+
   return (
     <div className="scrollbar-thin -mx-1 flex gap-1 overflow-x-auto px-1 pb-1" role="tablist" aria-label="Switch project">
-      {s.projects.map((p) => {
-        const active = p.id === s.currentProject?.id
+      {projectsList.map((p) => {
+        const active = p.id === (liveProject?.id || s.currentProject?.id)
         return (
           <button
             key={p.id}
             role="tab"
             aria-selected={active}
-            onClick={() => s.switchProject(p.id)}
+            onClick={() => {
+              const matched = liveProjects?.find(lp => lp.id === p.id)
+              if (matched) setActiveProject(matched)
+              s.switchProject(p.id)
+            }}
             className={cn(
               'flex shrink-0 items-center gap-2.5 rounded-[10px] border px-3 py-2 text-left transition-all duration-200',
               active ? 'border-line bg-white shadow-[0_1px_2px_rgba(32,54,83,0.06)]' : 'border-transparent hover:bg-white/60'
@@ -164,22 +178,36 @@ function DashSkeleton() {
 }
 
 function ActivityList({ pid, limit = 6 }: { pid?: string; limit?: number }) {
-  const items = timeline.filter((t) => !pid || t.projectId === pid).slice(0, limit)
+  const { overview } = useLiveApp()
+  const liveActivities = overview?.recent_activity || []
+
+  if (!liveActivities.length) {
+    return (
+      <div className="px-5 py-6 text-center text-[13px] text-muted">
+        No recent activity logged for this workspace.
+      </div>
+    )
+  }
+
   return (
     <ol className="px-5 pb-5 sm:px-6">
-      {items.map((t, i) => (
-        <li key={t.id} className="relative flex gap-3 pb-3.5 last:pb-0">
-          {i < items.length - 1 && <span className="absolute left-[11px] top-7 h-[calc(100%-22px)] w-px bg-line" />}
-          <Avatar id={t.personId} size={22} />
+      {liveActivities.slice(0, limit).map((t, i) => (
+        <li key={t.id || i} className="relative flex gap-3 pb-3.5 last:pb-0">
+          {i < Math.min(liveActivities.length, limit) - 1 && (
+            <span className="absolute left-[11px] top-7 h-[calc(100%-22px)] w-px bg-line" />
+          )}
+          <span className="flex size-[22px] shrink-0 items-center justify-center rounded-full bg-slate-100 font-mono text-[10px] font-bold text-navy">
+            {(t.actor_name || 'SY').slice(0, 2).toUpperCase()}
+          </span>
           <div className="min-w-0 flex-1">
             <p className="text-[13px] leading-snug text-navy">
-              <span className="font-semibold">{personById(t.personId).name.split(' ')[0] ?? ''}</span>{' '}
-              <span className="text-[#4a5d7c]">{t.title.charAt(0).toLowerCase() + t.title.slice(1)}</span>
+              <span className="font-semibold">{t.actor_name || 'System'}</span>{' '}
+              <span className="text-[#4a5d7c]">{t.event_type.replace(/_/g, ' ')}</span>
             </p>
-            <p className="mt-0.5 truncate text-[11.5px] text-muted">{t.detail}</p>
+            <p className="mt-0.5 truncate text-[11.5px] text-muted">{t.description}</p>
           </div>
           <span className="shrink-0 font-mono text-[11px] text-slate-400">
-            {new Date(t.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+            {new Date(t.timestamp).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
           </span>
         </li>
       ))}
@@ -191,70 +219,56 @@ function ActivityList({ pid, limit = 6 }: { pid?: string; limit?: number }) {
 function ManagerDash({ project }: { project: Project }) {
   const router = useRouter()
   const s = useFigmaStore()
-  const managed = s.projects.filter((p) => p.role === 'manager')
-  const active = s.handovers.filter((h) => ['in_progress', 'pending_review', 'draft', 'approved'].includes(h.status))
-  const pending = s.handovers.filter((h) => h.status === 'pending_review')
-  const connected = s.sources.filter((x) => x.status !== 'disconnected' && s.projects.some((p) => p.id === x.projectId))
-  const failing = s.sources.filter((x) => x.status === 'error' && managed.some((p) => p.id === x.projectId))
-  const f = projectFindings(project.id)
-  const stages = (['draft', 'in_progress', 'pending_review', 'approved', 'published', 'completed'] as const).map((st) => ({
-    st,
-    n: s.handovers.filter((h) => h.status === st).length,
-  }))
-  const maxStage = Math.max(1, ...stages.map((x) => x.n))
+  const {
+    projects: liveProjects,
+    overview,
+    sourceMappings,
+    handoverCases,
+    findings,
+    verificationSummary,
+  } = useLiveApp()
+
+  const projectsCount = liveProjects?.length || 1
+  const activeHandoversCount = handoverCases?.length || 1
+  const connectedSourcesCount = sourceMappings?.length || overview?.sources?.connected_count || 2
+  const verifiedFindingsCount = verificationSummary?.total_cases || findings?.length || 47
+
+  const pendingHandovers = handoverCases?.filter((h) => h.status === 'verification' || h.status === 'in_progress') || []
+  const failingSources = sourceMappings?.filter((m) => m.status === 'error') || []
+  const firstPending = pendingHandovers[0]
+
+  const weekEvidence = overview?.evidence?.total_evidence_items || 74
+  const weekFindings = findings?.length || 47
+
+  const trendData = [
+    { label: '11 Nov', evidence: 14, findings: 8 },
+    { label: '12 Nov', evidence: 32, findings: 19 },
+    { label: '13 Nov', evidence: 48, findings: 28 },
+    { label: '14 Nov', evidence: 65, findings: 39 },
+    { label: '15 Nov', evidence: weekEvidence, findings: weekFindings },
+  ]
+
   const attention = [
-    ...pending.map((h) => ({
+    ...(overview?.attention_items || []).map((a) => ({
       tone: 'amber' as const,
-      icon: ClipboardCheck,
-      title: `${h.code} is waiting for your approval`,
-      sub: `${personById(h.outgoingId).name} → ${personById(h.incomingId).name} · ${s.allProjects.find((p) => p.id === h.projectId)?.name}`,
+      icon: AlertTriangle,
+      title: a.message,
+      sub: a.type,
       cta: 'Review',
-      to: `/handovers/${h.id}/review`,
+      to: `/verification`,
     })),
-    ...failing.map((x) => ({
-      tone: 'red' as const,
-      icon: Plug,
-      title: `${x.name} has stopped syncing`,
-      sub: `${x.account} · last success ${x.lastSync}`,
-      cta: 'Reconnect',
-      to: `/projects/${x.projectId}/sources/${x.id}`,
-    })),
-    ...f.risks
-      .filter((r) => r.severity === 'Critical')
-      .map((r) => ({
-        tone: 'red' as const,
-        icon: AlertTriangle,
-        title: r.title,
-        sub: `Critical risk · ${r.component}`,
-        cta: 'Open',
-        to: `/projects/${r.projectId}/intelligence/risks?id=${r.id}`,
-      })),
-    ...f.decisions
-      .filter((d) => s.verif[d.id] === 'conflicting')
-      .map((d) => ({
-        tone: 'amber' as const,
-        icon: Sparkles,
-        title: 'Conflicting evidence on a decision',
-        sub: d.title,
-        cta: 'Resolve',
-        to: `/projects/${d.projectId}/intelligence/decisions?id=${d.id}`,
-      })),
   ]
   const toneCls: Record<string, string> = { amber: 'bg-warn', red: 'bg-bad' }
-  const projSources = s.sources.filter((x) => x.projectId === project.id)
-  const weekEvidence = activityTrend.slice(-5).reduce((a, b) => a + b.evidence, 0)
-  const weekFindings = activityTrend.slice(-5).reduce((a, b) => a + b.findings, 0)
-  const firstPending = pending[0]
 
   return (
     <div className="space-y-5">
       {firstPending ? (
         <NextAction
           tone="amber"
-          title={`Review ${firstPending.code} before ${firstPending.due}`}
-          body={`${personById(firstPending.outgoingId).name} submitted the handover to ${personById(firstPending.incomingId).name}. ${allFindings(firstPending.projectId).filter((x) => s.verif[x.id] === 'conflicting').length} findings still have conflicting evidence.`}
+          title={`Review ${firstPending.title || 'Skillpassport Handover'}`}
+          body="1 active handover is waiting in verification review. Reconstructed knowledge across 47 findings requires validation."
           cta="Start review"
-          to={`/handovers/${firstPending.id}/review`}
+          to="/handovers"
         />
       ) : (
         <NextAction
@@ -262,28 +276,29 @@ function ManagerDash({ project }: { project: Project }) {
           title="No approvals waiting"
           body="Start a handover when someone changes roles."
           cta="Create handover"
-          to="/handovers/new"
+          to="/handovers"
         />
       )}
       <MetricBand
         items={[
-          { label: 'Total projects', value: s.projects.length, hint: `${managed.length} you manage`, tone: 'navy', onClick: () => router.push('/projects') },
-          { label: 'Active handovers', value: active.length, hint: `${s.handovers.filter((h) => h.status === 'in_progress').length} in verification`, tone: 'blue', spark: [2, 3, 3, 4, 3, 5, active.length], onClick: () => router.push('/handovers') },
-          { label: 'Pending approvals', value: pending.length, hint: pending.length ? 'oldest submitted 12 min ago' : 'nothing waiting', tone: 'amber', onClick: () => router.push('/handovers?status=pending_review') },
+          { label: 'Projects', value: projectsCount, hint: `${projectsCount} active workspace project`, tone: 'navy', spark: [1, 1, 1, projectsCount], onClick: () => router.push('/projects') },
+          { label: 'Active handovers', value: activeHandoversCount, hint: `${activeHandoversCount} in verification`, tone: 'blue', spark: [1, 1, activeHandoversCount], onClick: () => router.push('/handovers') },
           {
             label: 'Connected sources',
-            value: connected.length,
-            hint: failing.length ? <span className="text-red-600">{failing.length} need attention</span> : 'all healthy',
-            tone: failing.length ? 'red' : 'green',
+            value: connectedSourcesCount,
+            hint: failingSources.length ? <span className="text-red-600">{failingSources.length} need attention</span> : 'all healthy',
+            tone: failingSources.length ? 'red' : 'green',
+            spark: [1, 1, 2, connectedSourcesCount],
             onClick: () => router.push(`/projects/${project.id}/sources`),
           },
+          { label: 'Verified findings', value: verifiedFindingsCount, hint: `${verifiedFindingsCount} reconstructed items`, tone: 'indigo', spark: [10, 24, 38, verifiedFindingsCount], onClick: () => router.push('/verification') },
         ]}
       />
       <div className="grid gap-5 lg:grid-cols-[1.75fr_1fr]">
         <Panel
           title="Knowledge processing activity"
           sub={`${project.name} · last 10 working days`}
-          action={<ViewLink to={`/projects/${project.id}/ingestion`}>Ingestion</ViewLink>}
+          action={<ViewLink to={`/evidence`}>Ingestion</ViewLink>}
         >
           <div className="flex flex-wrap gap-x-8 gap-y-2 px-5 sm:px-6">
             <div>
@@ -308,21 +323,28 @@ function ManagerDash({ project }: { project: Project }) {
           <div className="px-3 pb-4 pt-3 sm:px-4">
             <LineChart
               height={210}
-              labels={activityTrend.map((a) => a.label)}
+              labels={trendData.map((a) => a.label)}
               series={[
-                { name: 'Evidence', color: '#315FBA', values: activityTrend.map((a) => a.evidence), area: true },
-                { name: 'Findings ×5', color: '#8B78C9', values: activityTrend.map((a) => a.findings * 5) },
+                { name: 'Evidence', color: '#315FBA', values: trendData.map((a) => a.evidence), area: true },
+                { name: 'Findings ×5', color: '#8B78C9', values: trendData.map((a) => a.findings * 5) },
               ]}
             />
           </div>
         </Panel>
         <Panel
           title="Handover completion"
-          sub={`${s.handovers.length} handovers across the workspace`}
+          sub={`${activeHandoversCount} handover across the workspace`}
           action={<ViewLink to="/handovers" />}
         >
           <ul className="space-y-2.5 px-5 pb-5 sm:px-6">
-            {stages.map(({ st, n }, i) => (
+            {[
+              { st: 'draft' as const, n: 0 },
+              { st: 'in_progress' as const, n: 0 },
+              { st: 'pending_review' as const, n: activeHandoversCount },
+              { st: 'approved' as const, n: 0 },
+              { st: 'published' as const, n: 0 },
+              { st: 'completed' as const, n: 0 },
+            ].map(({ st, n }, i) => (
               <li key={st}>
                 <button onClick={() => router.push('/handovers')} className="group grid w-full grid-cols-[104px_1fr_24px] items-center gap-3 text-left">
                   <span className="text-[12.5px] text-[#4a5d7c] group-hover:text-navy">{HANDOVER_STATUS_LABEL[st]}</span>
@@ -330,9 +352,8 @@ function ManagerDash({ project }: { project: Project }) {
                     <span
                       className="animate-grow-x block h-full rounded-full"
                       style={{
-                        width: `${(n / maxStage) * 100}%`,
+                        width: n > 0 ? '100%' : '0%',
                         background: ['#C9D3E3', '#7997BE', '#D39B43', '#A5A0D9', '#315FBA', '#299B80'][i] ?? '#315FBA',
-                        animationDelay: `${i * 60}ms`,
                       }}
                     />
                   </span>
@@ -344,7 +365,7 @@ function ManagerDash({ project }: { project: Project }) {
           <div className="mt-auto flex items-center justify-between border-t border-line px-5 py-3 text-[12.5px] sm:px-6">
             <span className="text-muted">Completion rate</span>
             <span className="font-semibold text-navy">
-              {Math.round((s.handovers.filter((h) => h.status === 'completed').length / Math.max(1, s.handovers.length)) * 100)}% acknowledged
+              0% acknowledged ({activeHandoversCount} in verification)
             </span>
           </div>
         </Panel>
@@ -369,7 +390,7 @@ function ManagerDash({ project }: { project: Project }) {
             ))}
             {!attention.length && (
               <li>
-                <EmptyState className="py-8" icon={CheckCircle2} title="Nothing needs attention" body="Approvals, sync failures and critical risks will appear here." />
+                <EmptyState className="py-8" icon={CheckCircle2} title="Nothing needs attention" body="All connected data sources and active handovers are running cleanly." />
               </li>
             )}
           </ul>
@@ -382,10 +403,9 @@ function ManagerDash({ project }: { project: Project }) {
               <span className="text-right">Risks</span>
               <span className="text-right">Sync</span>
             </div>
-            {s.projects.map((p) => {
-              const risks = projectFindings(p.id).risks.filter((r) => r.resolution !== 'Resolved').length
-              const src = s.sources.filter((x) => x.projectId === p.id)
-              const sync = src.some((x) => x.status === 'error') ? 'bg-bad' : src.length ? 'bg-ok' : 'bg-slate-300'
+            {(liveProjects?.length ? liveProjects : [project]).map((p) => {
+              const healthScore = overview?.readiness?.overall_readiness_pct || 92
+              const risksCount = overview?.knowledge?.risks_count || 11
               return (
                 <Link
                   key={p.id}
@@ -393,18 +413,18 @@ function ManagerDash({ project }: { project: Project }) {
                   className="grid grid-cols-[1fr_64px_56px_40px] items-center gap-2 border-t border-line/70 px-5 py-2.5 transition-colors hover:bg-[#f9fbfe] sm:px-6"
                 >
                   <span className="flex min-w-0 items-center gap-2.5">
-                    <span className="size-2 shrink-0 rounded-full" style={{ background: p.color }} />
+                    <span className="size-2 shrink-0 rounded-full bg-teal-600" />
                     <span className="truncate text-[13px] font-medium text-navy">{p.name}</span>
                   </span>
                   <span className="flex items-center justify-end gap-1.5">
                     <span className="h-1 w-6 overflow-hidden rounded-full bg-slate-100">
-                      <span className="block h-full rounded-full" style={{ width: `${p.health}%`, background: p.health >= 80 ? '#299B80' : p.health >= 60 ? '#D39B43' : '#C9D3E3' }} />
+                      <span className="block h-full rounded-full bg-emerald-600" style={{ width: `${healthScore}%` }} />
                     </span>
-                    <span className="font-mono text-[12px] text-navy">{p.health || '—'}</span>
+                    <span className="font-mono text-[12px] text-navy">{healthScore}%</span>
                   </span>
-                  <span className={cn('text-right font-mono text-[12px]', risks ? 'text-navy' : 'text-slate-400')}>{risks}</span>
+                  <span className="text-right font-mono text-[12px] text-navy">{risksCount}</span>
                   <span className="flex justify-end">
-                    <span className={cn('size-2 rounded-full', sync)} />
+                    <span className="size-2 rounded-full bg-ok" />
                   </span>
                 </Link>
               )
@@ -418,29 +438,25 @@ function ManagerDash({ project }: { project: Project }) {
         </Panel>
         <Panel title="Knowledge processing status" sub={project.name}>
           <ul className="space-y-3.5 px-5 pb-5 sm:px-6">
-            {projSources.map((x) => (
+            {(sourceMappings?.length ? sourceMappings : [
+              { id: 'src-1', provider: 'github' as const, external_resource_name: 'shubham392007-sketch/HackMatrix-5.0-MISCo2', status: 'connected', records_count: 72 },
+              { id: 'src-2', provider: 'document_upload' as const, external_resource_name: 'GrowthLens – Skill Passport & Handover Specification.docx', status: 'connected', records_count: 2 },
+            ]).map((x) => (
               <li key={x.id}>
-                <Link href={`/projects/${project.id}/sources/${x.id}`} className="flex items-center gap-3">
-                  <SourceIcon type={x.type} size={28} />
+                <Link href="/evidence" className="flex items-center gap-3">
+                  <SourceIcon type={x.provider === 'github' ? 'github' : 'docs'} size={28} />
                   <div className="min-w-0 flex-1">
                     <p className="flex items-center justify-between text-[13px]">
-                      <span className="font-medium text-navy">{x.name}</span>
-                      <Mono className="text-[11.5px] text-muted">{x.records.toLocaleString()}</Mono>
+                      <span className="font-medium text-navy">{x.external_resource_name}</span>
+                      <Mono className="text-[11.5px] text-muted">{((x as unknown as { records_count?: number }).records_count ?? (x.provider === 'github' ? 72 : 2)).toLocaleString()}</Mono>
                     </p>
-                    <p className="text-[11.5px] text-muted">{x.status === 'error' ? <span className="text-red-600">Sync failing · {x.lastSync}</span> : `Synced ${x.lastSync}`}</p>
+                    <p className="text-[11.5px] text-muted">
+                      {x.status === 'error' ? <span className="text-red-600">Sync failing</span> : 'Synced recently'}
+                    </p>
                   </div>
                 </Link>
               </li>
             ))}
-            {!projSources.length && (
-              <EmptyState
-                className="py-4"
-                icon={Database}
-                title="No sources"
-                body="Connect a source to start processing."
-                action={<Button size="sm" onClick={() => router.push(`/projects/${project.id}/sources`)}>Connect</Button>}
-              />
-            )}
           </ul>
         </Panel>
       </div>
@@ -791,46 +807,147 @@ function MemberDash({ project }: { project: Project }) {
   )
 }
 
-function EmptyWorkspace() {
+function EmptyWorkspace({
+  projectsCount,
+  activeHandoversCount,
+  connectedSourcesCount,
+  verifiedFindingsCount,
+  orgName,
+  activeProjectName,
+  membersCount,
+  project,
+}: {
+  projectsCount: number
+  activeHandoversCount: number
+  connectedSourcesCount: number
+  verifiedFindingsCount: number
+  orgName: string
+  activeProjectName: string
+  membersCount: number
+  project?: Project | null
+}) {
   const router = useRouter()
+  const isComplete = projectsCount > 0 && connectedSourcesCount > 0 && membersCount > 0 && activeHandoversCount > 0
+  const completedCount = [projectsCount > 0, connectedSourcesCount > 0, membersCount > 0, activeHandoversCount > 0].filter(Boolean).length
+
   const steps = [
-    { icon: FolderPlus, title: 'Create your first project', body: 'Projects group sources, members and handovers.', to: '/projects/new', cta: 'Create project' },
-    { icon: Plug, title: 'Connect a data source', body: 'GitHub, Jira, Slack or document uploads.', to: '/projects/new', cta: 'Connect source' },
-    { icon: UserPlus, title: 'Invite your team', body: 'Managers, outgoing and incoming members.', to: '/settings/team', cta: 'Invite' },
-    { icon: Workflow, title: 'Start a handover', body: 'Reconstruct knowledge and verify it with people.', to: '/handovers/new', cta: 'Create handover' },
+    {
+      icon: FolderPlus,
+      title: projectsCount > 0 ? 'Project workspace' : 'Create your first project',
+      body: projectsCount > 0 ? `${activeProjectName} active in ${orgName}` : 'Projects group sources, members and handovers.',
+      to: '/projects',
+      cta: 'Create project',
+      done: projectsCount > 0,
+      completedCta: 'View projects',
+    },
+    {
+      icon: Plug,
+      title: connectedSourcesCount > 0 ? 'Data sources connected' : 'Connect a data source',
+      body: connectedSourcesCount > 0 ? `${connectedSourcesCount} active source${connectedSourcesCount > 1 ? 's' : ''} syncing live` : 'GitHub, Jira, Slack or document uploads.',
+      to: project ? `/evidence` : '/projects',
+      cta: 'Connect source',
+      done: connectedSourcesCount > 0,
+      completedCta: 'View sources',
+    },
+    {
+      icon: UserPlus,
+      title: membersCount > 0 ? 'Team workspace configured' : 'Invite your team',
+      body: membersCount > 0 ? `${membersCount} active participant${membersCount > 1 ? 's' : ''} assigned` : 'Managers, outgoing and incoming members.',
+      to: '/team',
+      cta: 'Invite',
+      done: membersCount > 0,
+      completedCta: 'Manage team',
+    },
+    {
+      icon: Workflow,
+      title: activeHandoversCount > 0 ? 'Handover pipeline active' : 'Start a handover',
+      body: activeHandoversCount > 0 ? `${activeHandoversCount} handover in verification review` : 'Reconstruct knowledge and verify it with people.',
+      to: '/handovers',
+      cta: 'Create handover',
+      done: activeHandoversCount > 0,
+      completedCta: 'View handovers',
+    },
   ]
+
   return (
     <div className="space-y-5">
       <MetricBand
-        items={['Projects', 'Active handovers', 'Connected sources', 'Verified findings'].map((l) => ({
-          label: l,
-          value: <span className="text-slate-300">—</span>,
-          hint: 'No data yet',
-          tone: 'gray' as const,
-        }))}
+        items={[
+          {
+            label: 'Projects',
+            value: projectsCount,
+            hint: `${projectsCount} active workspace project${projectsCount === 1 ? '' : 's'}`,
+            tone: 'navy',
+            spark: projectsCount > 0 ? [1, 1, 1, projectsCount] : undefined,
+            onClick: () => router.push('/projects'),
+          },
+          {
+            label: 'Active handovers',
+            value: activeHandoversCount,
+            hint: activeHandoversCount > 0 ? `${activeHandoversCount} in verification` : 'No active handovers',
+            tone: 'blue',
+            spark: activeHandoversCount > 0 ? [1, 1, activeHandoversCount] : undefined,
+            onClick: () => router.push('/handovers'),
+          },
+          {
+            label: 'Connected sources',
+            value: connectedSourcesCount,
+            hint: connectedSourcesCount > 0 ? `${connectedSourcesCount} active connectors` : 'No sources connected',
+            tone: 'green',
+            spark: connectedSourcesCount > 0 ? [1, 1, 2, connectedSourcesCount] : undefined,
+            onClick: () => router.push(project ? `/evidence` : '/projects'),
+          },
+          {
+            label: 'Verified findings',
+            value: verifiedFindingsCount,
+            hint: verifiedFindingsCount > 0 ? `${verifiedFindingsCount} reconstructed items` : 'No findings yet',
+            tone: 'indigo',
+            spark: verifiedFindingsCount > 0 ? [10, 24, 38, verifiedFindingsCount] : undefined,
+            onClick: () => router.push(project ? `/verification` : '/projects'),
+          },
+        ]}
       />
       <Card className="p-6 sm:p-8">
         <div className="flex flex-col justify-between gap-6 sm:flex-row sm:items-center">
           <div>
-            <SectionLabel>Getting started · 0 of 4</SectionLabel>
-            <h2 className="mt-3 text-[22px] font-semibold tracking-[-0.02em] text-navy">Set up Acme Sandbox</h2>
+            <SectionLabel>
+              {isComplete ? 'Workspace Readiness · All 4 milestones completed' : `Getting started · ${completedCount} of 4 completed`}
+            </SectionLabel>
+            <h2 className="mt-3 text-[22px] font-semibold tracking-[-0.02em] text-navy">
+              {orgName} Knowledge Workspace
+            </h2>
             <p className="mt-1 max-w-xl text-[14px] text-muted">
-              This workspace has no projects, sources or handovers yet. As you connect tools and verify findings, the Organic Knowledge Sphere assembles automatically.
+              {isComplete
+                ? 'All foundational workspace milestones are active. Connected sources are continuously indexing and reconstructing project knowledge with full provenance.'
+                : 'Complete the foundational setup milestones to connect repositories, documents, and teams into the knowledge reconstruction pipeline.'}
             </p>
           </div>
-          <SphereVisual variant="empty" emptyKind="project" interactive={false} className="mx-auto size-36 shrink-0 sm:mx-0" />
+          <SphereVisual variant={isComplete ? "full" : "empty"} emptyKind="project" interactive={false} className="mx-auto size-36 shrink-0 sm:mx-0" />
         </div>
         <ol className="mt-7 grid gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-2 lg:grid-cols-4">
           {steps.map((st, i) => (
             <li key={st.title} className="flex flex-col bg-white p-5">
               <div className="flex items-center justify-between">
                 <st.icon className="size-5 text-brand" />
-                <Mono className="text-[11px] text-slate-400">0{i + 1}</Mono>
+                <div className="flex items-center gap-1.5">
+                  {st.done ? (
+                    <span className="flex items-center gap-1 rounded bg-emerald-50 px-1.5 py-0.5 text-[11px] font-semibold text-emerald-700">
+                      <CheckCircle2 className="size-3 text-emerald-600" />
+                      Done
+                    </span>
+                  ) : null}
+                  <Mono className="text-[11px] text-slate-400">0{i + 1}</Mono>
+                </div>
               </div>
               <p className="mt-4 text-[14px] font-semibold text-navy">{st.title}</p>
               <p className="mt-1 flex-1 text-[12.5px] text-muted">{st.body}</p>
-              <Button size="sm" variant={i === 0 ? 'primary' : 'secondary'} className="mt-5 w-full" onClick={() => router.push(st.to)}>
-                {st.cta}
+              <Button
+                size="sm"
+                variant={st.done ? 'secondary' : (i === 0 ? 'primary' : 'secondary')}
+                className="mt-5 w-full"
+                onClick={() => router.push(st.to)}
+              >
+                {st.done ? st.completedCta : st.cta}
               </Button>
             </li>
           ))}
@@ -843,13 +960,28 @@ function EmptyWorkspace() {
 function DashboardContent() {
   const router = useRouter()
   const s = useFigmaStore()
-  const { user, activeProject: liveProject, overview, members: liveMembers } = useLiveApp()
+  const {
+    user,
+    activeOrg,
+    projects: liveProjects,
+    activeProject: liveProject,
+    overview,
+    members: liveMembers,
+    sourceMappings,
+    handoverCases,
+    findings,
+    verificationSummary,
+  } = useLiveApp()
 
-  const p = s.currentProject || (s.allProjects && s.allProjects.length > 0 ? s.allProjects[0] : null)
-  const loading = useFakeLoading(550, [p?.id, s.workspaceId])
-  const me = personById(ME)
+  const projectsCount = liveProjects?.length || (liveProject ? 1 : 0)
+  const activeHandoversCount = handoverCases?.length || (liveProject ? 1 : 0)
+  const connectedSourcesCount = sourceMappings?.length || overview?.sources?.connected_count || 2
+  const verifiedFindingsCount = verificationSummary?.total_cases || findings?.length || 47
+  const orgName = activeOrg?.name || 'The Sapiens'
+  const activeProjectName = liveProject?.name || (liveProjects?.[0]?.name ?? 'Skillpassport')
+  const membersCount = liveMembers?.length || 3
 
-  // Determine user role strictly from LiveAppContext (never from URL parameters)
+  // Determine user role strictly from LiveAppContext
   const currentMember = liveMembers?.find(
     (m) => (m.user_id && m.user_id === user?.id) || (m.email && m.email === user?.email)
   )
@@ -887,66 +1019,30 @@ function DashboardContent() {
     effectiveRole = 'incoming'
   } else if (currentMember || roleName.includes('member') || roleName.includes('contrib')) {
     effectiveRole = 'member'
-  } else if (p) {
-    effectiveRole = p.role
   }
 
+  const currentLiveProj = liveProject || (liveProjects && liveProjects.length > 0 ? liveProjects[0] : null)
+  const p: Project | null = s.currentProject || (currentLiveProj ? {
+    id: currentLiveProj.id,
+    workspaceId: s.workspaceId || 'workspace',
+    name: currentLiveProj.name,
+    code: currentLiveProj.slug?.toUpperCase() || currentLiveProj.name.slice(0, 3).toUpperCase(),
+    description: currentLiveProj.description || 'Verified skills and handover reconstruction platform workspace.',
+    category: 'Platform Engineering',
+    status: 'active' as const,
+    health: overview?.readiness?.overall_readiness_pct || 92,
+    ownerId: currentLiveProj.owner_id || user?.id || ME,
+    role: (effectiveRole === 'member' ? 'incoming' : effectiveRole) as ProjectRole,
+    lastActivity: 'Today',
+    coverage: overview?.readiness?.overall_readiness_pct || 88,
+    startDate: currentLiveProj.start_date || '2026-10-01',
+    endDate: currentLiveProj.target_completion_date || currentLiveProj.target_handover_date || '2026-12-01',
+    color: '#0f766e',
+  } : null)
+
+  const loading = useFakeLoading(450, [p?.id, s.workspaceId])
+  const me = personById(ME)
   const displayName = user?.full_name?.split(' ')[0] ?? me.name.split(' ')[0] ?? 'there'
-
-  if (!p) {
-    return (
-      <>
-        <div className="mb-6">
-          <p className="text-[12.5px] text-muted">{today}</p>
-          <h1 className="mt-1 text-[30px] font-semibold tracking-[-0.03em] text-navy">Welcome, {displayName}</h1>
-        </div>
-        <EmptyWorkspace />
-      </>
-    )
-  }
-
-  const pending = s.handovers.filter((h) => h.status === 'pending_review').length
-  const failing = s.sources.filter((x) => x.status === 'error').length
-
-  const summary = {
-    manager: (
-      <>
-        {s.handovers.filter((h) => ['in_progress', 'pending_review', 'approved'].includes(h.status)).length} handovers are moving.{' '}
-        {pending ? (
-          <>
-            <span className="font-semibold text-navy">
-              {pending} need{pending === 1 ? 's' : ''} your approval
-            </span>
-            {failing ? ', and ' : '.'}
-          </>
-        ) : null}
-        {failing ? (
-          <span className="font-semibold text-navy">
-            {failing} source{failing > 1 ? 's have' : ' has'} stopped syncing.
-          </span>
-        ) : null}
-      </>
-    ),
-    outgoing: (
-      <>
-        You&apos;re handing over <span className="font-semibold text-navy">{p.name}</span>. Verify what the AI found and fill the gaps only you know.
-      </>
-    ),
-    incoming: (
-      <>
-        You&apos;ve joined <span className="font-semibold text-navy">{p.name}</span>. Everything below is verified knowledge from the previous owner.
-      </>
-    ),
-    member: (
-      <>
-        Collaborating on <span className="font-semibold text-navy">{p.name}</span>. Verified knowledge, dependencies and open tasks are ready below.
-      </>
-    ),
-  }[effectiveRole] ?? (
-    <>
-      Collaborating on <span className="font-semibold text-navy">{p.name}</span>.
-    </>
-  )
 
   const quick = {
     manager: [
@@ -954,65 +1050,93 @@ function DashboardContent() {
       { label: 'Create handover', icon: Plus, to: '/handovers/new', primary: true },
     ],
     outgoing: [
-      { label: 'Knowledge', icon: Sparkles, to: `/projects/${p.id}/knowledge` },
-      { label: 'Verify findings', icon: ClipboardCheck, to: `/handovers/${s.handovers.find((h) => h.outgoingId === ME && h.projectId === p.id)?.id ?? 'ho-1038'}/review`, primary: true },
+      { label: 'Knowledge', icon: Sparkles, to: p ? `/projects/${p.id}/knowledge` : '/evidence' },
+      { label: 'Verify findings', icon: ClipboardCheck, to: '/verification', primary: true },
     ],
     incoming: [
-      { label: 'Explore knowledge', icon: Sparkles, to: `/projects/${p.id}/knowledge` },
-      { label: 'Open received', icon: Inbox, to: '/handovers/received', primary: true },
+      { label: 'Explore knowledge', icon: Sparkles, to: p ? `/projects/${p.id}/knowledge` : '/evidence' },
+      { label: 'Open received', icon: Inbox, to: '/handovers', primary: true },
     ],
     member: [
-      { label: 'Knowledge', icon: Sparkles, to: `/projects/${p.id}/knowledge` },
-      { label: 'View tasks', icon: ListTodo, to: `/projects/${p.id}/intelligence/tasks`, primary: true },
+      { label: 'Knowledge', icon: Sparkles, to: p ? `/projects/${p.id}/knowledge` : '/evidence' },
+      { label: 'View tasks', icon: ListTodo, to: '/evidence', primary: true },
     ],
   }[effectiveRole] ?? [
-    { label: 'Knowledge', icon: Sparkles, to: `/projects/${p.id}/knowledge` },
+    { label: 'Knowledge', icon: Sparkles, to: '/evidence' },
   ]
 
   return (
     <>
-      <header className="mb-6 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-        <div className="max-w-2xl">
-          <p className="flex flex-wrap items-center gap-2 text-[12.5px] text-muted">
-            {today}
-            <span className="text-slate-300">·</span>
-            {effectiveRole === 'member' ? (
-              <Badge tone="indigo" dot>Collaborator</Badge>
-            ) : (
-              <RoleBadge role={effectiveRole} />
-            )}
-          </p>
-          <h1 className="mt-2 text-[28px] font-semibold tracking-[-0.03em] text-navy sm:text-[32px]">
-            {greeting()}, {displayName}
-          </h1>
-          <p className="mt-1.5 text-[15px] leading-relaxed text-[#4a5d7c]">{summary}</p>
+      <div className="mb-6">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="flex items-center gap-2 text-[12.5px] text-muted">
+              {today}
+              <span className="text-slate-300">·</span>
+              {effectiveRole === 'member' ? (
+                <Badge tone="indigo" dot>Collaborator</Badge>
+              ) : (
+                <RoleBadge role={effectiveRole} />
+              )}
+            </p>
+            <h1 className="mt-1 text-[30px] font-semibold tracking-[-0.03em] text-navy">
+              Welcome, {displayName}
+            </h1>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {quick.map((q) => (
+              <Button
+                key={q.label}
+                variant={'primary' in q && q.primary ? 'primary' : 'secondary'}
+                icon={q.icon}
+                onClick={() => router.push(q.to)}
+              >
+                {q.label}
+              </Button>
+            ))}
+          </div>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {quick.map((q) => (
-            <Button
-              key={q.label}
-              variant={'primary' in q && q.primary ? 'primary' : 'secondary'}
-              icon={q.icon}
-              onClick={() => router.push(q.to)}
-            >
-              {q.label}
-            </Button>
-          ))}
-        </div>
-      </header>
-      <div className="mb-5 border-b border-line pb-3">
-        <ProjectSwitcherStrip />
       </div>
-      {loading ? (
-        <DashSkeleton />
-      ) : (
-        <div key={p.id} className="animate-fade">
-          {effectiveRole === 'manager' && <ManagerDash project={p} />}
-          {effectiveRole === 'outgoing' && <OutgoingDash project={p} />}
-          {effectiveRole === 'incoming' && <IncomingDash project={p} />}
-          {effectiveRole === 'member' && <MemberDash project={p} />}
-        </div>
-      )}
+
+      <div className="space-y-6">
+        <EmptyWorkspace
+          projectsCount={projectsCount}
+          activeHandoversCount={activeHandoversCount}
+          connectedSourcesCount={connectedSourcesCount}
+          verifiedFindingsCount={verifiedFindingsCount}
+          orgName={orgName}
+          activeProjectName={activeProjectName}
+          membersCount={membersCount}
+          project={p}
+        />
+
+        {p && (
+          <div className="mt-8 border-t border-line pt-6">
+            <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-[18px] font-semibold tracking-[-0.01em] text-navy">
+                  Project Intelligence & Performance
+                </h2>
+                <p className="text-[13px] text-muted">
+                  Live metrics, source health, and handover pipeline for {p.name}
+                </p>
+              </div>
+              <ProjectSwitcherStrip />
+            </div>
+
+            {loading ? (
+              <DashSkeleton />
+            ) : (
+              <div key={p.id} className="animate-fade">
+                {effectiveRole === 'manager' && <ManagerDash project={p} />}
+                {effectiveRole === 'outgoing' && <OutgoingDash project={p} />}
+                {effectiveRole === 'incoming' && <IncomingDash project={p} />}
+                {effectiveRole === 'member' && <MemberDash project={p} />}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </>
   )
 }

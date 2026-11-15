@@ -1,7 +1,8 @@
 "use client";
 
-import { Phase2ModuleView } from "../../components/views/Phase2ModuleView";
+import React from "react";
+import { AssistantWorkspaceView } from "../../components/assistant/AssistantWorkspaceView";
 
 export default function AssistantPage() {
-  return <Phase2ModuleView moduleKey="assistant" />;
+  return <AssistantWorkspaceView />;
 }
