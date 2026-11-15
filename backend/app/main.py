@@ -95,12 +95,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     register_exception_handlers(application)
 
+    cors_regex = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$" if not active_settings.is_production else None
+
     application.add_middleware(
         CORSMiddleware,
         allow_origins=active_settings.cors_allowed_origins,
+        allow_origin_regex=cors_regex,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-Correlation-ID"],
+        allow_headers=["*"],
         expose_headers=["X-Request-ID"],
     )
     application.add_middleware(RequestCorrelationMiddleware)

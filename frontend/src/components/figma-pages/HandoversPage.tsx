@@ -349,6 +349,9 @@ const RECON_STAGES = [
   'Drafting handover document'
 ]
 
+const isUUID = (val?: string | null): boolean =>
+  Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(val))
+
 export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string }) {
   const s = useStore()
   const router = useRouter()
@@ -362,13 +365,19 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
   const [pid, setPid] = useState(
     projectParam && availableProjects.some((p) => p.id === projectParam)
       ? projectParam
-      : activeProject?.id || availableProjects[0]?.id || ''
+      : activeProject?.id || availableProjects[0]?.id || 'ed33c53a-7678-4d5b-8212-64c233897142'
   )
+
+  useEffect(() => {
+    if (activeProject?.id && (!pid || !isUUID(pid) || pid === 'northwind')) {
+      setPid(activeProject.id)
+    }
+  }, [activeProject?.id, pid])
 
   const projectMembers = useMemo(() => {
     if (liveMembers && liveMembers.length > 0) {
       return liveMembers.map((m) => ({
-        personId: m.id,
+        personId: m.user_id || m.id,
         name: m.full_name || (m.email ? m.email.split('@')[0] : 'Member'),
         role: m.role_name || 'member',
         email: m.email || '',
@@ -457,12 +466,16 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
     setIsGenerating(true)
     setGenPct(15)
     try {
+      const targetPid = (isUUID(pid) ? pid : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
+      const targetOut = (isUUID(out) ? out : user?.id) || '977051df-2ea5-492e-b6a9-83bc8ef55711'
+      const targetInc = isUUID(inc) && inc !== targetOut ? inc : undefined
+
       // 1. Create Case in PostgreSQL
-      const caseRes = await api.handover.createCase(pid, {
-        title: `Handover: ${project?.name || 'Skillpassport'} Transfer`,
+      const caseRes = await api.handover.createCase(targetPid, {
+        title: `Handover: ${project?.name || activeProject?.name || 'Skillpassport'} Transfer`,
         description: scope.notes || 'Knowledge reconstruction for departing team member',
-        departing_member_id: out || user?.id || '',
-        successor_id: inc || undefined,
+        departing_member_id: targetOut,
+        successor_id: targetInc,
         metadata_json: {
           scope_areas: scope.areas,
           from: scope.from,
@@ -485,7 +498,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
       }
       const mappedDomains = scope.areas.map(a => domainMap[a] || a.toLowerCase()).concat(['project_overview_context', 'operational_historical'])
 
-      const asmRes = await api.handover.assemblePackage(pid, newCaseId, {
+      const asmRes = await api.handover.assemblePackage(targetPid, newCaseId, {
         assembly_notes: scope.notes || 'Automated handover compilation',
         include_domains: mappedDomains,
       })
@@ -499,7 +512,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
 
       // 3. Assess readiness
       try {
-        const rdRes = await api.handover.assessReadiness(pid, newCaseId, newVerId, 'Readiness gate assessment')
+        const rdRes = await api.handover.assessReadiness(targetPid, newCaseId, newVerId, 'Readiness gate assessment')
         setReadinessData(rdRes)
       } catch (err) {
         console.warn('Readiness assessment warning:', err)
@@ -508,7 +521,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
 
       // 4. Generate checklists
       try {
-        await api.handover.generateChecklists(pid, newCaseId, newVerId)
+        await api.handover.generateChecklists(targetPid, newCaseId, newVerId)
       } catch (err) {
         console.warn('Checklists generation warning:', err)
       }
@@ -554,10 +567,11 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
 
   const submit = async () => {
     const finalId = createdCaseId || `ho-${1045 + s.handovers.length}`
-    if (createdCaseId) {
+    const targetPid = (isUUID(pid) ? pid : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
+    if (createdCaseId && isUUID(createdCaseId)) {
       try {
         if (submitMode === 'verify') {
-          await api.handover.submitSignoff(pid, createdCaseId, {
+          await api.handover.submitSignoff(targetPid, createdCaseId, {
             version_id: assembledVersionId || '',
             signoff_type: 'departing_verification',
             decision: 'approved',
@@ -992,7 +1006,7 @@ export function HandoverLayout({
 }) {
   const s = useStore()
   const router = useRouter()
-  const { handoverCases, refreshHandovers } = useLiveApp()
+  const { activeProject, handoverCases, refreshHandovers } = useLiveApp()
   const { h, project, role } = useHandover(id)
   const [dlg, setDlg] = useState<null | 'submit' | 'approve' | 'publish' | 'changes' | 'start'>(null)
   const [note, setNote] = useState('')
@@ -1164,8 +1178,9 @@ export function HandoverLayout({
           setDlg(null)
           try {
             const liveC = (handoverCases || []).find((c) => c.id === h.id)
-            if (liveC?.current_version_id) {
-              await api.handover.submitSignoff(h.projectId, h.id, {
+            if (liveC?.current_version_id && isUUID(h.id)) {
+              const targetPid = (isUUID(h.projectId) ? h.projectId : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
+              await api.handover.submitSignoff(targetPid, h.id, {
                 version_id: liveC.current_version_id,
                 signoff_type: 'departing_verification',
                 decision: 'approved',
@@ -1202,8 +1217,9 @@ export function HandoverLayout({
           setDlg(null)
           try {
             const liveC = (handoverCases || []).find((c) => c.id === h.id)
-            if (liveC?.current_version_id) {
-              await api.handover.submitSignoff(h.projectId, h.id, {
+            if (liveC?.current_version_id && isUUID(h.id)) {
+              const targetPid = (isUUID(h.projectId) ? h.projectId : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
+              await api.handover.submitSignoff(targetPid, h.id, {
                 version_id: liveC.current_version_id,
                 signoff_type: 'reviewer_approval',
                 decision: 'approved',
@@ -1230,10 +1246,12 @@ export function HandoverLayout({
           setDlg(null)
           try {
             const liveC = (handoverCases || []).find((c) => c.id === h.id)
-            if (liveC?.current_version_id) {
-              await api.handover.deliverPackage(h.projectId, h.id, {
+            if (liveC?.current_version_id && isUUID(h.id)) {
+              const targetPid = (isUUID(h.projectId) ? h.projectId : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
+              const targetIncoming = isUUID(h.incomingId) ? [h.incomingId] : []
+              await api.handover.deliverPackage(targetPid, h.id, {
                 version_id: liveC.current_version_id,
-                deliver_to_user_ids: [h.incomingId],
+                deliver_to_user_ids: targetIncoming,
                 delivery_method: 'in_app',
                 message: `Handover package ${h.code} published.`
               })
@@ -1262,8 +1280,9 @@ export function HandoverLayout({
                 setNote('')
                 try {
                   const liveC = (handoverCases || []).find((c) => c.id === h.id)
-                  if (liveC?.current_version_id) {
-                    await api.handover.submitSignoff(h.projectId, h.id, {
+                  if (liveC?.current_version_id && isUUID(h.id)) {
+                    const targetPid = (isUUID(h.projectId) ? h.projectId : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
+                    await api.handover.submitSignoff(targetPid, h.id, {
                       version_id: liveC.current_version_id,
                       signoff_type: 'reviewer_approval',
                       decision: 'rejected',
@@ -1326,6 +1345,7 @@ function FindingList({ items, onOpen }: { items: AnyFinding[]; onOpen: (f: AnyFi
 export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?: HTab }) {
   const s = useStore()
   const router = useRouter()
+  const { activeProject } = useLiveApp()
   const searchParams = useSearchParams()
   const queryTab = searchParams?.get('tab') as HTab | null
   const tab = initialTab || queryTab || 'overview'
@@ -1337,11 +1357,11 @@ export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?:
   useEffect(() => {
     let active = true
     async function loadChecklists() {
-      if (!id) return
+      if (!id || !isUUID(id)) return
       setIsLoadingChecklists(true)
       try {
         const targetCase = s.handovers.find((x) => x.id === id)
-        const pId = targetCase?.projectId || 'ed33c53a-7678-4d5b-8212-64c233897142'
+        const pId = (targetCase?.projectId && isUUID(targetCase.projectId) ? targetCase.projectId : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
         const res = await api.handover.getChecklists(pId, id)
         if (active) {
           setChecklists(res || [])

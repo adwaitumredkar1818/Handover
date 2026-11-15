@@ -157,10 +157,16 @@ export function Breadcrumbs({ crumbs }: { crumbs?: Crumb[] }) {
     <nav aria-label="Breadcrumb" className="hidden min-w-0 items-center gap-1.5 text-[13px] md:flex font-sans">
       {/* Workspace Root Node */}
       <span className="flex shrink-0 items-center gap-1.5 text-muted">
-        <span className="flex size-[18px] items-center justify-center rounded-[5px] bg-navy text-[9px] font-bold text-white shadow-2xs">
+        <span
+          className="flex size-[18px] items-center justify-center rounded-[5px] bg-navy text-[9px] font-bold text-white shadow-2xs"
+          suppressHydrationWarning
+        >
           {orgInitial}
         </span>
-        <span className="hidden lg:inline font-medium text-slate-600 truncate max-w-[140px]">
+        <span
+          className="hidden lg:inline font-medium text-slate-600 truncate max-w-[140px]"
+          suppressHydrationWarning
+        >
           {orgName}
         </span>
       </span>
@@ -175,6 +181,7 @@ export function Breadcrumbs({ crumbs }: { crumbs?: Crumb[] }) {
               <Link
                 href={c.to}
                 className="truncate text-muted transition-colors hover:text-navy"
+                suppressHydrationWarning
               >
                 {c.label}
               </Link>
@@ -184,6 +191,7 @@ export function Breadcrumbs({ crumbs }: { crumbs?: Crumb[] }) {
                   "truncate",
                   isLast ? "font-semibold text-navy" : "text-muted"
                 )}
+                suppressHydrationWarning
               >
                 {c.label}
               </span>

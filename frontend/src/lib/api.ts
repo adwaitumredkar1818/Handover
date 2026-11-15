@@ -18,8 +18,29 @@ import type {
   AssistantAnswerResponse,
 } from "./types";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000/api/v1";
+export function getApiBaseUrl(): string {
+  const configured =
+    process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000/api/v1";
+  if (typeof window !== "undefined") {
+    try {
+      const parsed = new URL(configured);
+      if (parsed.hostname === "localhost" && window.location.hostname === "127.0.0.1") {
+        parsed.hostname = "127.0.0.1";
+        return parsed.toString().replace(/\/$/, "");
+      }
+      if (parsed.hostname === "127.0.0.1" && window.location.hostname === "localhost") {
+        parsed.hostname = "localhost";
+        return parsed.toString().replace(/\/$/, "");
+      }
+      return configured.replace(/\/$/, "");
+    } catch {
+      return configured.replace(/\/$/, "");
+    }
+  }
+  return configured.replace(/\/$/, "");
+}
+
+const API_BASE_URL = getApiBaseUrl();
 
 export class ApiError extends Error {
   status: number;
@@ -177,7 +198,7 @@ async function request<T>(
   options: RequestInit = {},
   isRetry = false
 ): Promise<T> {
-  const url = `${API_BASE_URL}${path}`;
+  const url = `${getApiBaseUrl()}${path}`;
   const token = getToken();
 
   const headers: Record<string, string> = {

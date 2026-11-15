@@ -555,7 +555,12 @@ class Settings(BaseSettings):
     backend_host: str = Field(default="0.0.0.0", min_length=1)  # noqa: S104
     backend_port: int = Field(default=8000, ge=1, le=65535)
     cors_allowed_origins: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["http://localhost:3000"]
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3001",
+        ]
     )
 
     # PostgreSQL configuration fields (grouped into `settings.database`)
