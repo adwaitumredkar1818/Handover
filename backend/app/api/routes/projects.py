@@ -13,10 +13,17 @@ from app.api.deps import (
     require_project_permission,
     resolve_project_read_context,
 )
-from app.models.enums import ProjectMembershipStatus, ProjectStatus
-from app.schemas.organisation import RemoveMembershipResponse
+from app.core.exceptions import NotFoundError
+from app.models.enums import InvitationStatus, ProjectMembershipStatus, ProjectStatus
+from app.schemas.organisation import (
+    CreateInvitationResponse,
+    InvitationListResponse,
+    InvitationSummaryResponse,
+    RemoveMembershipResponse,
+)
 from app.schemas.project import (
     AddProjectMemberRequest,
+    CreateProjectInvitationRequest,
     CreateProjectRequest,
     ProjectActivityListResponse,
     ProjectListResponse,
@@ -276,3 +283,76 @@ def upsert_project_transition(
 ) -> ProjectTransitionResponse:
     """Upsert departing member, incoming successor, and knowledge capture scope."""
     return project_service.upsert_project_transition(ctx=project_ctx, payload=payload)
+
+
+@router.post(
+    "/organisations/{organisation_id}/projects/{project_id}/invitations",
+    response_model=CreateInvitationResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a project invitation (requires project.invitations.manage)",
+)
+def create_project_invitation(
+    organisation_id: uuid.UUID,
+    project_id: uuid.UUID,
+    payload: CreateProjectInvitationRequest,
+    project_ctx: Annotated[
+        ProjectContext,
+        Depends(require_project_permission("project.invitations.manage")),
+    ],
+    project_service: Annotated[ProjectService, Depends(get_project_service)],
+) -> CreateInvitationResponse:
+    """Issue a SHA-256 hashed single-use project invitation."""
+    if project_ctx.project.organisation_id != organisation_id:
+        raise NotFoundError("Project was not found in this organisation.", code="PROJECT_NOT_FOUND")
+    return project_service.create_project_invitation(ctx=project_ctx, payload=payload)
+
+
+@router.get(
+    "/organisations/{organisation_id}/projects/{project_id}/invitations",
+    response_model=InvitationListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List project invitations (requires project.invitations.read)",
+)
+def list_project_invitations(
+    organisation_id: uuid.UUID,
+    project_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext,
+        Depends(require_project_permission("project.invitations.read")),
+    ],
+    project_service: Annotated[ProjectService, Depends(get_project_service)],
+    invitation_status: Annotated[InvitationStatus | None, Query(alias="status")] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> InvitationListResponse:
+    """List hashed invitation metadata scoped to this project workspace."""
+    if project_ctx.project.organisation_id != organisation_id:
+        raise NotFoundError("Project was not found in this organisation.", code="PROJECT_NOT_FOUND")
+    return project_service.list_project_invitations(
+        ctx=project_ctx,
+        status=invitation_status.value if invitation_status is not None else None,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.delete(
+    "/organisations/{organisation_id}/projects/{project_id}/invitations/{invitation_id}",
+    response_model=InvitationSummaryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Revoke a pending project invitation (requires project.invitations.manage)",
+)
+def revoke_project_invitation(
+    organisation_id: uuid.UUID,
+    project_id: uuid.UUID,
+    invitation_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext,
+        Depends(require_project_permission("project.invitations.manage")),
+    ],
+    project_service: Annotated[ProjectService, Depends(get_project_service)],
+) -> InvitationSummaryResponse:
+    """Revoke a pending project invitation so its token can no longer be accepted."""
+    if project_ctx.project.organisation_id != organisation_id:
+        raise NotFoundError("Project was not found in this organisation.", code="PROJECT_NOT_FOUND")
+    return project_service.revoke_project_invitation(ctx=project_ctx, invitation_id=invitation_id)

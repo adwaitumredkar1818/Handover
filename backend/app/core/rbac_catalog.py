@@ -176,6 +176,18 @@ SYSTEM_PERMISSIONS: tuple[PermissionSpec, ...] = (
         scope_type=RoleScopeType.PROJECT,
     ),
     PermissionSpec(
+        code="project.invitations.read",
+        name="Read Project Invitations",
+        description="List and inspect invitations issued for an assigned project.",
+        scope_type=RoleScopeType.PROJECT,
+    ),
+    PermissionSpec(
+        code="project.invitations.manage",
+        name="Manage Project Invitations",
+        description="Create, re-send, or revoke project-scoped invitations.",
+        scope_type=RoleScopeType.PROJECT,
+    ),
+    PermissionSpec(
         code="project.evidence.contribute",
         name="Contribute Project Evidence",
         description="Upload documents and sync authorised sources within an assigned project.",
@@ -334,6 +346,12 @@ ORG_ROLE_RANK: dict[str, int] = {
     RoleName.ORG_OWNER.value: 3,
 }
 
+PROJECT_ROLE_RANK: dict[str, int] = {
+    RoleName.PROJECT_MEMBER.value: 1,
+    RoleName.REVIEWER.value: 1,
+    RoleName.PROJECT_MANAGER.value: 2,
+}
+
 SYSTEM_ROLES: tuple[RoleSpec, ...] = (
     RoleSpec(
         name=RoleName.STANDARD_USER.value,
@@ -382,6 +400,8 @@ SYSTEM_ROLES: tuple[RoleSpec, ...] = (
             "project.manage",
             "project.members.read",
             "project.members.manage",
+            "project.invitations.read",
+            "project.invitations.manage",
             "project.transition.manage",
             "project.sources.manage",
             "project.evidence.read",
@@ -424,6 +444,8 @@ SYSTEM_ROLES: tuple[RoleSpec, ...] = (
             "project.manage",
             "project.members.read",
             "project.members.manage",
+            "project.invitations.read",
+            "project.invitations.manage",
             "project.transition.manage",
             "project.sources.manage",
             "project.evidence.read",
@@ -469,6 +491,8 @@ SYSTEM_ROLES: tuple[RoleSpec, ...] = (
             "project.manage",
             "project.members.read",
             "project.members.manage",
+            "project.invitations.read",
+            "project.invitations.manage",
             "project.evidence.contribute",
             "project.transition.manage",
             "project.sources.manage",

@@ -6,11 +6,12 @@ import uuid
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, ConfigDict, Field, field_validator, model_validator
 
 from app.core.validators import normalize_and_validate_slug, normalize_display_name
 from app.schemas.common import BaseSchema
 from app.schemas.organisation import _clean_optional_description, _clean_role_name
+from app.schemas.user import NormalisedEmail
 
 
 class CreateProjectRequest(BaseSchema):
@@ -182,6 +183,25 @@ class UpdateProjectMemberRoleRequest(BaseSchema):
     @field_validator("role_name")
     @classmethod
     def _validate_role_name(cls, value: str) -> str:
+        return _clean_role_name(value)
+
+
+class CreateProjectInvitationRequest(BaseSchema):
+    """Request payload to issue a hashed single-use project invitation."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    email: NormalisedEmail
+    project_role_name: str = Field(
+        min_length=1,
+        max_length=64,
+        validation_alias=AliasChoices("project_role_name", "role_name"),
+    )
+    expires_in_hours: int = Field(default=72, ge=1, le=720)
+
+    @field_validator("project_role_name")
+    @classmethod
+    def _validate_project_role_name(cls, value: str) -> str:
         return _clean_role_name(value)
 
 

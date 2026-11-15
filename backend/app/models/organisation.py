@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     String,
     Text,
@@ -175,7 +176,7 @@ class OrganisationMembership(Base):
 
 
 class OrganisationInvitation(Base):
-    """Hashed, time-bounded, single-use organisation invitation record."""
+    """Hashed, time-bounded, single-use organisation/project invitation record."""
 
     __tablename__ = "organisation_invitations"
     __table_args__ = (
@@ -188,14 +189,34 @@ class OrganisationInvitation(Base):
             "length(token_hash) = 64",
             name="organisation_invitation_token_hash_sha256_len",
         ),
+        CheckConstraint(
+            "(project_id IS NULL AND project_role_id IS NULL) "
+            "OR (project_id IS NOT NULL AND project_role_id IS NOT NULL)",
+            name="organisation_invitation_project_fields_pair",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "organisation_id"],
+            ["projects.id", "projects.organisation_id"],
+            name="fk_organisation_invitations_project_organisation",
+            ondelete="CASCADE",
+        ),
         Index(
             "uq_org_invitations_pending_org_email",
             "organisation_id",
             "email",
             unique=True,
-            postgresql_where=text("status = 'pending'"),
-            sqlite_where=text("status = 'pending'"),
+            postgresql_where=text("status = 'pending' AND project_id IS NULL"),
+            sqlite_where=text("status = 'pending' AND project_id IS NULL"),
         ),
+        Index(
+            "uq_project_invitations_pending_project_email",
+            "project_id",
+            "email",
+            unique=True,
+            postgresql_where=text("status = 'pending' AND project_id IS NOT NULL"),
+            sqlite_where=text("status = 'pending' AND project_id IS NOT NULL"),
+        ),
+        Index("ix_organisation_invitations_project_status", "project_id", "status"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -214,6 +235,17 @@ class OrganisationInvitation(Base):
         Uuid(as_uuid=True),
         ForeignKey("roles.id", ondelete="RESTRICT"),
         nullable=False,
+        index=True,
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
+        index=True,
+    )
+    project_role_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("roles.id", ondelete="RESTRICT"),
+        nullable=True,
         index=True,
     )
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
@@ -260,6 +292,12 @@ class OrganisationInvitation(Base):
 
     organisation: Mapped[Organisation] = relationship(back_populates="invitations")
     role: Mapped[Role] = relationship(foreign_keys=[role_id])
+    project: Mapped[Project | None] = relationship(
+        foreign_keys=[project_id],
+        back_populates="invitations",
+        overlaps="invitations,organisation",
+    )
+    project_role: Mapped[Role | None] = relationship(foreign_keys=[project_role_id])
     invited_by: Mapped[User] = relationship(foreign_keys=[invited_by_id])
     accepted_by_user: Mapped[User | None] = relationship(foreign_keys=[accepted_by_user_id])
     revoked_by: Mapped[User | None] = relationship(foreign_keys=[revoked_by_id])

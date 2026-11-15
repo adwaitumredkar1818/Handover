@@ -26,6 +26,7 @@ from app.models.enums import (
     OrganisationStatus,
     ProjectSourceMappingStatus,
     ProjectStatus,
+    RoleName,
     SourceConnectionStatus,
     SourcePermissionVerificationStatus,
     SourceSyncRunStatus,
@@ -372,13 +373,10 @@ class SourceIntegrationService:
     ) -> OAuthStartResponse:
         self._require_org_active(org_ctx.organisation.status)
         if source_connection_id is None:
-            can_create = (
+            is_read_only_member = org_ctx.role.name == RoleName.ORG_MEMBER.value
+            can_create = not is_read_only_member and (
                 org_ctx.has_permission("organisation.manage")
-                or org_ctx.has_permission("organisation.projects.create")
-                or self._repo.user_has_project_contribution_in_org(
-                    organisation_id=org_ctx.organisation.id,
-                    user_id=org_ctx.principal.user.id,
-                )
+                or org_ctx.role.name in (RoleName.ORG_OWNER.value, RoleName.ORG_ADMIN.value)
             )
             if not can_create:
                 raise ForbiddenError(
@@ -435,10 +433,10 @@ class SourceIntegrationService:
                 code="SOURCE_CONNECTION_NOT_FOUND",
             ) from exc
 
-        can_disconnect = (
+        is_read_only_member = org_ctx.role.name == RoleName.ORG_MEMBER.value
+        can_disconnect = not is_read_only_member and (
             org_ctx.has_permission("organisation.manage")
-            or org_ctx.has_permission("organisation.projects.create")
-            or connection.created_by_user_id == principal.user.id
+            or org_ctx.role.name in (RoleName.ORG_OWNER.value, RoleName.ORG_ADMIN.value)
         )
         if not can_disconnect:
             raise ForbiddenError(

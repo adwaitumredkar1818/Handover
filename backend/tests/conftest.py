@@ -54,6 +54,7 @@ def build_test_settings(**overrides: Any) -> Settings:
         "cookie_secure": False,
         "cookie_samesite": "lax",
         "cookie_domain": None,
+        "auth_rate_limit_verify_email_max_attempts": 50,
     }
     defaults.update(overrides)
     return Settings(_env_file=None, **defaults)
@@ -148,6 +149,7 @@ def register_and_login_user(
     email: str,
     full_name: str,
     password: str = DEFAULT_TEST_PASSWORD,
+    verified: bool = True,
 ) -> RegisteredUserSession:
     """Register a platform account and return its active Bearer session."""
     reg = client.post(
@@ -157,6 +159,23 @@ def register_and_login_user(
     if reg.status_code != 201:
         raise AssertionError(f"Failed test user registration ({reg.status_code}): {reg.text}")
     reg_user = reg.json()["user"]
+    reg_data = reg.json()
+
+    if verified:
+        token = reg_data.get("development_verification_token")
+        if not token:
+            app = getattr(client, "app", None)
+            if app and hasattr(app, "state") and hasattr(app.state, "settings"):
+                from app.core.security import generate_email_verification_token
+
+                token = generate_email_verification_token(
+                    user_id=uuid.UUID(reg_user["id"]),
+                    email=reg_user["email"],
+                    settings=app.state.settings,
+                )
+        if token:
+            ver = client.post("/api/v1/auth/verify-email", json={"token": token})
+            assert ver.status_code == 200, f"Failed email verification: {ver.text}"
 
     login = client.post(
         "/api/v1/auth/login",

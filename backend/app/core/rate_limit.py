@@ -88,6 +88,8 @@ def check_auth_rate_limit(
     settings: Settings,
     limiter: RateLimiterProtocol | None,
     action: str,
+    max_attempts: int | None = None,
+    window_seconds: int | None = None,
 ) -> None:
     """Enforce configurable rate limits cleanly without storing raw client IPs."""
     sec = settings.security
@@ -95,10 +97,22 @@ def check_auth_rate_limit(
         return
 
     bucket_key = _anonymised_client_key(request, action)
+
+    if max_attempts is not None:
+        effective_max = max_attempts
+    elif action == "verify_email":
+        effective_max = getattr(sec, "auth_rate_limit_verify_email_max_attempts", 5)
+    elif action in ("resend_verification", "request_email_verification"):
+        effective_max = getattr(sec, "auth_rate_limit_resend_verification_max_attempts", 3)
+    else:
+        effective_max = sec.auth_rate_limit_max_attempts
+
+    effective_window = window_seconds if window_seconds is not None else sec.auth_rate_limit_window_seconds
+
     retry_after = limiter.check_rate_limit(
         bucket_key,
-        max_attempts=sec.auth_rate_limit_max_attempts,
-        window_seconds=sec.auth_rate_limit_window_seconds,
+        max_attempts=effective_max,
+        window_seconds=effective_window,
     )
     if retry_after is not None:
         log_security_event(

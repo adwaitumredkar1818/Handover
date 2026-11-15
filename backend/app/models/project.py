@@ -27,7 +27,7 @@ from app.db.base import Base
 from app.models.enums import ProjectMembershipStatus, ProjectStatus, ProjectVisibility
 
 if TYPE_CHECKING:
-    from app.models.organisation import Organisation
+    from app.models.organisation import Organisation, OrganisationInvitation
     from app.models.rbac import Role
     from app.models.user import User
 
@@ -40,6 +40,7 @@ class Project(Base):
     __tablename__ = "projects"
     __table_args__ = (
         UniqueConstraint("organisation_id", "slug", name="uq_projects_organisation_slug"),
+        UniqueConstraint("id", "organisation_id", name="uq_projects_id_organisation_id"),
         CheckConstraint(
             "status IN ('planning', 'active', 'on_hold', 'completed', 'archived')",
             name="project_status",
@@ -121,6 +122,11 @@ class Project(Base):
     memberships: Mapped[list[ProjectMembership]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
+    )
+    invitations: Mapped[list[OrganisationInvitation]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        overlaps="invitations,organisation",
     )
     transition: Mapped[ProjectTransition | None] = relationship(
         back_populates="project",

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from app.core.validators import validate_password_strength
 from app.schemas.common import BaseSchema
@@ -39,8 +39,87 @@ class RegisterResponse(BaseSchema):
 
     user: UserSummaryResponse
     email_verification_required: bool = True
-    email_verification_delivery: Literal["not_configured"] = "not_configured"
+    email_verification_delivery: Literal["not_configured", "submitted", "failed"] = "not_configured"
+    development_verification_token: str | None = None
     message: str
+
+
+class RegisterWithInvitationRequest(BaseSchema):
+    """Platform registration payload using an invitation token."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    invitation_token: str = Field(min_length=1, max_length=512)
+    full_name: str = Field(min_length=2, max_length=255)
+    password: str = Field(min_length=12, max_length=128)
+    email: NormalisedEmail | None = None
+
+    @field_validator("full_name")
+    @classmethod
+    def _normalize_full_name(cls, value: str) -> str:
+        cleaned = " ".join(value.split())
+        if len(cleaned) < 2:
+            raise ValueError("Full name must contain at least 2 non-whitespace characters.")
+        return cleaned
+
+    @field_validator("invitation_token")
+    @classmethod
+    def _normalize_token(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Invitation token cannot be empty.")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _validate_password(self) -> RegisterWithInvitationRequest:
+        validate_password_strength(self.password, email=self.email)
+        return self
+
+
+class RegisterWithInvitationResponse(BaseSchema):
+    """Result of registering a new account using an invitation."""
+
+    user: UserSummaryResponse
+    email_verification_required: bool = True
+    email_verification_delivery: Literal["not_configured", "submitted", "failed"] = "not_configured"
+    organisation_id: uuid.UUID
+    organisation_name: str
+    project_id: uuid.UUID | None = None
+    project_name: str | None = None
+    project_role_name: str | None = None
+    project_membership_status: str | None = None
+    can_access_project_immediately: bool = False
+    development_verification_token: str | None = None
+    message: str
+
+
+class VerifyEmailRequest(BaseSchema):
+    """Payload to confirm account email verification using signed token."""
+
+    token: str = Field(min_length=16, max_length=2048, description="Signed email verification token")
+
+
+class VerifyEmailResponse(BaseSchema):
+    """Confirmation of successful email verification."""
+
+    message: str
+    email: str
+    is_email_verified: bool
+    can_access_project_immediately: bool
+
+
+class RequestEmailVerificationRequest(BaseSchema):
+    """Payload to request or re-send email verification instructions."""
+
+    email: NormalisedEmail = Field(description="Account email address")
+
+
+class RequestEmailVerificationResponse(BaseSchema):
+    """Confirmation of email verification request."""
+
+    message: str
+    email_verification_delivery: Literal["not_configured", "submitted", "failed"] = "not_configured"
+    development_verification_token: str | None = None
 
 
 class LoginRequest(BaseSchema):

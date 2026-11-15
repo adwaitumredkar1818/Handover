@@ -18,7 +18,7 @@ from pwdlib import PasswordHash
 from pwdlib.hashers.argon2 import Argon2Hasher
 
 from app.core.config import Settings
-from app.core.exceptions import ForbiddenError, UnauthorizedError
+from app.core.exceptions import BadRequestError, ForbiddenError, GoneError, UnauthorizedError
 from app.core.logging import log_security_event
 from app.core.validators import (
     derive_slug_from_name,
@@ -35,8 +35,10 @@ __all__ = [
     "clear_refresh_cookie",
     "create_access_token",
     "decode_access_token",
+    "decode_email_verification_token",
     "derive_slug_from_name",
     "ensure_utc",
+    "generate_email_verification_token",
     "generate_opaque_token",
     "generate_refresh_token",
     "hash_opaque_token",
@@ -205,6 +207,88 @@ def decode_access_token(token: str, settings: Settings) -> AccessTokenClaims:
         issued_at=issued_at,
         expires_at=expires_at,
     )
+
+
+def generate_email_verification_token(
+    user_id: uuid.UUID,
+    email: str,
+    settings: Settings,
+    *,
+    expires_in_minutes: int = 1440,
+    now: datetime | None = None,
+) -> str:
+    """Generate a tamper-proof signed JWT for email verification."""
+    sec = settings.security
+    issued_at = now or utc_now()
+    expires_at = issued_at + timedelta(minutes=expires_in_minutes)
+    payload: dict[str, Any] = {
+        "sub": str(user_id),
+        "email": email.strip().lower(),
+        "type": "email_verification",
+        "jti": str(uuid.uuid4()),
+        "iat": int(issued_at.timestamp()),
+        "exp": int(expires_at.timestamp()),
+    }
+    if sec.jwt_issuer:
+        payload["iss"] = sec.jwt_issuer
+    if sec.jwt_audience:
+        payload["aud"] = sec.jwt_audience
+
+    return jwt.encode(
+        payload,
+        sec.jwt_secret_key.get_secret_value(),
+        algorithm=sec.jwt_algorithm,
+    )
+
+
+def decode_email_verification_token(token: str, settings: Settings) -> tuple[uuid.UUID, str]:
+    """Validate signature, lifetime, and type of an email verification JWT."""
+    sec = settings.security
+    decode_options: Options = {
+        "require": ["exp", "iat", "sub", "email", "type"],
+        "verify_signature": True,
+        "verify_exp": True,
+        "verify_iat": True,
+        "verify_iss": bool(sec.jwt_issuer),
+        "verify_aud": bool(sec.jwt_audience),
+    }
+
+    try:
+        payload = jwt.decode(
+            token,
+            sec.jwt_secret_key.get_secret_value(),
+            algorithms=[sec.jwt_algorithm],
+            issuer=sec.jwt_issuer,
+            audience=sec.jwt_audience,
+            options=decode_options,
+        )
+    except jwt.ExpiredSignatureError as exc:
+        raise GoneError(
+            "Email verification link has expired.",
+            code="VERIFICATION_TOKEN_EXPIRED",
+        ) from exc
+    except jwt.InvalidTokenError as exc:
+        raise BadRequestError(
+            "Invalid email verification token.",
+            code="INVALID_VERIFICATION_TOKEN",
+        ) from exc
+
+    if payload.get("type") != "email_verification":
+        raise BadRequestError(
+            "Invalid email verification token type.",
+            code="INVALID_VERIFICATION_TOKEN",
+        )
+
+    try:
+        user_id = uuid.UUID(str(payload["sub"]))
+        email = str(payload["email"]).strip().lower()
+    except (KeyError, ValueError, TypeError) as exc:
+        raise BadRequestError(
+            "Invalid email verification token payload.",
+            code="INVALID_VERIFICATION_TOKEN",
+        ) from exc
+
+    return user_id, email
 
 
 def set_refresh_cookie(

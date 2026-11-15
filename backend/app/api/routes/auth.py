@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from app.api.deps import (
     get_app_settings,
     get_auth_service,
+    get_organisation_service,
     require_auth_rate_limit,
     require_permission,
 )
@@ -27,14 +28,21 @@ from app.schemas.auth import (
     LogoutResponse,
     RegisterRequest,
     RegisterResponse,
+    RegisterWithInvitationRequest,
+    RegisterWithInvitationResponse,
+    RequestEmailVerificationRequest,
+    RequestEmailVerificationResponse,
     ResetPasswordRequest,
     ResetPasswordResponse,
     RevokeSessionResponse,
     SessionListResponse,
     SupabaseExchangeRequest,
+    VerifyEmailRequest,
+    VerifyEmailResponse,
 )
 from app.schemas.user import AuthenticatedUserResponse
 from app.services.auth import AuthService, build_authenticated_user
+from app.services.organisation import OrganisationService
 from app.services.rbac import AuthenticatedPrincipal
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -64,6 +72,22 @@ def register(
 ) -> RegisterResponse:
     """Create a platform account with Argon2id password hashing and default user role."""
     return auth_service.register(payload)
+
+
+@router.post(
+    "/register-with-invitation",
+    response_model=RegisterWithInvitationResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a new platform user account using an invitation",
+    dependencies=[Depends(require_auth_rate_limit("register"))],
+)
+def register_with_invitation(
+    payload: RegisterWithInvitationRequest,
+    auth_service: AuthService = Depends(get_auth_service),  # noqa: B008
+    org_service: OrganisationService = Depends(get_organisation_service),  # noqa: B008
+) -> RegisterWithInvitationResponse:
+    """Create a platform account and accept an organisation/project invitation atomically."""
+    return auth_service.register_with_invitation(payload=payload, org_service=org_service)
 
 
 @router.post(
@@ -144,6 +168,51 @@ def reset_password(
 ) -> ResetPasswordResponse:
     """Validate reset token, update password hash, and revoke existing sessions."""
     return auth_service.reset_password(payload=payload)
+
+
+@router.post(
+    "/verify-email",
+    response_model=VerifyEmailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Verify account email address using a signed verification token",
+    dependencies=[Depends(require_auth_rate_limit("verify_email"))],
+)
+def verify_email(
+    payload: VerifyEmailRequest,
+    auth_service: AuthService = Depends(get_auth_service),  # noqa: B008
+) -> VerifyEmailResponse:
+    """Activate email verified status for an account using a cryptographically signed token."""
+    return auth_service.verify_email(token=payload.token)
+
+
+@router.post(
+    "/request-email-verification",
+    response_model=RequestEmailVerificationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Request a new email verification link",
+    dependencies=[Depends(require_auth_rate_limit("resend_verification"))],
+)
+def request_email_verification(
+    payload: RequestEmailVerificationRequest,
+    auth_service: AuthService = Depends(get_auth_service),  # noqa: B008
+) -> RequestEmailVerificationResponse:
+    """Generate email verification link for an unverified account."""
+    return auth_service.request_email_verification(payload=payload)
+
+
+@router.post(
+    "/resend-verification",
+    response_model=RequestEmailVerificationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Resend email verification link (alias)",
+    dependencies=[Depends(require_auth_rate_limit("resend_verification"))],
+)
+def resend_email_verification(
+    payload: RequestEmailVerificationRequest,
+    auth_service: AuthService = Depends(get_auth_service),  # noqa: B008
+) -> RequestEmailVerificationResponse:
+    """Resend email verification link for an unverified account."""
+    return auth_service.request_email_verification(payload=payload)
 
 
 

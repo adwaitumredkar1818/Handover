@@ -15,8 +15,9 @@ from app.core.rbac_catalog import (
     ORG_ROLE_RANK,
     ORGANISATION_PERMISSION_CODES,
     PROJECT_PERMISSION_CODES,
+    PROJECT_ROLE_RANK,
 )
-from app.models.enums import ProjectVisibility, RoleScopeType
+from app.models.enums import ProjectVisibility, RoleName, RoleScopeType
 from app.models.organisation import Organisation, OrganisationMembership
 from app.models.project import Project, ProjectMembership
 from app.models.rbac import Role
@@ -211,6 +212,20 @@ class RbacService:
         principal: AuthenticatedPrincipal,
     ) -> OrganisationContext:
         """Resolve verified active membership & role for one organisation (404 on non-member)."""
+        if not principal.user.is_email_verified:
+            log_security_event(
+                event_type="auth.email_verification_required",
+                outcome="denied",
+                actor_user_id=str(principal.user.id),
+                organisation_id=str(organisation_id),
+                message="Denied organisation access because user email is not verified.",
+                level=logging.WARNING,
+            )
+            raise ForbiddenError(
+                "Email verification is required to access organisation resources.",
+                code="EMAIL_VERIFICATION_REQUIRED",
+            )
+
         organisation = self._org_repo.get_by_id(organisation_id)
         if organisation is None:
             raise NotFoundError("Organisation was not found.", code="ORGANISATION_NOT_FOUND")
@@ -271,6 +286,20 @@ class RbacService:
         require_explicit_membership: bool = False,
     ) -> ProjectContext:
         """Resolve verified multi-tenant project context; parent org membership is mandatory."""
+        if not principal.user.is_email_verified:
+            log_security_event(
+                event_type="auth.email_verification_required",
+                outcome="denied",
+                actor_user_id=str(principal.user.id),
+                project_id=str(project_id),
+                message="Denied project access because user email is not verified.",
+                level=logging.WARNING,
+            )
+            raise ForbiddenError(
+                "Email verification is required to access project resources.",
+                code="EMAIL_VERIFICATION_REQUIRED",
+            )
+
         project = self._project_repo.get_by_id(project_id)
         if project is None or project.organisation is None:
             raise NotFoundError("Project was not found.", code="PROJECT_NOT_FOUND")
@@ -448,6 +477,43 @@ class RbacService:
             )
             raise ForbiddenError(
                 "You cannot assign or manage an organisation role above your own authority.",
+                code="INSUFFICIENT_ROLE_AUTHORITY",
+            )
+
+    def require_project_role_authority(
+        self,
+        *,
+        actor_role_name: str,
+        target_role_name: str,
+        actor_user_id: uuid.UUID,
+        project_id: uuid.UUID,
+        organisation_id: uuid.UUID,
+        action_label: str,
+    ) -> None:
+        """Prevent privilege escalation beyond an actor's own project role rank.
+
+        Organisation owners and administrators possess override authority to assign
+        project roles within their organisation's projects.
+        """
+        if actor_role_name in (RoleName.ORG_OWNER.value, RoleName.ORG_ADMIN.value):
+            return
+
+        actor_rank = PROJECT_ROLE_RANK.get(actor_role_name, 0)
+        target_rank = PROJECT_ROLE_RANK.get(target_role_name, 999)
+        if actor_rank < target_rank:
+            log_security_event(
+                event_type="rbac.privilege_escalation_blocked",
+                outcome="denied",
+                actor_user_id=str(actor_user_id),
+                organisation_id=str(organisation_id),
+                project_id=str(project_id),
+                message=(
+                    f"Blocked '{actor_role_name}' from {action_label} project role '{target_role_name}'."
+                ),
+                level=logging.WARNING,
+            )
+            raise ForbiddenError(
+                "You cannot assign or manage a project role above your own authority.",
                 code="INSUFFICIENT_ROLE_AUTHORITY",
             )
 

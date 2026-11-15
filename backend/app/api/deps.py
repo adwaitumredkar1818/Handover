@@ -31,6 +31,7 @@ from app.repositories.system import SystemRepository
 from app.repositories.user import UserRepository
 from app.services.audit import AuditService
 from app.services.auth import AuthService
+from app.services.email import TransactionalEmailService, build_email_provider
 from app.services.embedding import (
     DisabledEmbeddingService,
     EmbeddingService,
@@ -118,6 +119,8 @@ def get_auth_rate_limiter(request: Request) -> RateLimiterProtocol | None:
 
 def require_auth_rate_limit(
     action: str,
+    max_attempts: int | None = None,
+    window_seconds: int | None = None,
 ) -> Callable[[Request, Settings, RateLimiterProtocol | None], None]:
     """Dependency enforcing per-action authentication rate limits."""
 
@@ -131,6 +134,8 @@ def require_auth_rate_limit(
             settings=settings,
             limiter=limiter,
             action=action,
+            max_attempts=max_attempts,
+            window_seconds=window_seconds,
         )
 
     return _dependency
@@ -169,9 +174,20 @@ def get_audit_service(
     return AuditService(audit_repository=AuditLogRepository(db_session))
 
 
+def get_email_service(
+    request: Request,
+    settings: Settings = Depends(get_app_settings),  # noqa: B008
+) -> TransactionalEmailService:
+    """Construct TransactionalEmailService using an app-scoped provider override if present."""
+    provider_override = getattr(request.app.state, "email_provider", None)
+    provider = provider_override if provider_override is not None else build_email_provider(settings)
+    return TransactionalEmailService(settings=settings, provider=provider)
+
+
 def get_auth_service(
     settings: Settings = Depends(get_app_settings),  # noqa: B008
     db_session: Session = Depends(get_db_session),  # noqa: B008
+    email_service: TransactionalEmailService = Depends(get_email_service),  # noqa: B008
 ) -> AuthService:
     """Construct AuthService for the current request scope."""
     return AuthService(
@@ -180,6 +196,9 @@ def get_auth_service(
         user_repository=UserRepository(db_session),
         refresh_repository=RefreshSessionRepository(db_session),
         rbac_repository=RbacRepository(db_session),
+        org_repository=OrganisationRepository(db_session),
+        project_repository=ProjectRepository(db_session),
+        email_service=email_service,
     )
 
 
@@ -201,6 +220,7 @@ def get_organisation_service(
     db_session: Session = Depends(get_db_session),  # noqa: B008
     rbac_service: RbacService = Depends(get_rbac_service),  # noqa: B008
     audit_service: AuditService = Depends(get_audit_service),  # noqa: B008
+    email_service: TransactionalEmailService = Depends(get_email_service),  # noqa: B008
 ) -> OrganisationService:
     """Construct OrganisationService for the current request scope."""
     return OrganisationService(
@@ -212,22 +232,27 @@ def get_organisation_service(
         user_repository=UserRepository(db_session),
         rbac_service=rbac_service,
         audit_service=audit_service,
+        email_service=email_service,
     )
 
 
 def get_project_service(
+    settings: Settings = Depends(get_app_settings),  # noqa: B008
     db_session: Session = Depends(get_db_session),  # noqa: B008
     rbac_service: RbacService = Depends(get_rbac_service),  # noqa: B008
     audit_service: AuditService = Depends(get_audit_service),  # noqa: B008
+    email_service: TransactionalEmailService = Depends(get_email_service),  # noqa: B008
 ) -> ProjectService:
     """Construct ProjectService for the current request scope."""
     return ProjectService(
+        settings=settings,
         db_session=db_session,
         org_repository=OrganisationRepository(db_session),
         project_repository=ProjectRepository(db_session),
         rbac_repository=RbacRepository(db_session),
         rbac_service=rbac_service,
         audit_service=audit_service,
+        email_service=email_service,
     )
 
 

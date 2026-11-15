@@ -183,6 +183,8 @@ class InvitationSummaryResponse(BaseSchema):
     organisation_id: uuid.UUID
     email: str
     role_name: str
+    project_id: uuid.UUID | None = None
+    project_role_name: str | None = None
     status: str
     invited_by_id: uuid.UUID
     expires_at: datetime
@@ -195,9 +197,27 @@ class CreateInvitationResponse(BaseSchema):
     """Invitation creation response reporting honest email-delivery configuration."""
 
     invitation: InvitationSummaryResponse
-    invitation_delivery: Literal["not_configured"]
+    invitation_delivery: Literal["not_configured", "submitted", "failed"]
     message: str
     development_invitation_token: str | None = None
+
+
+class InvitationPreviewResponse(BaseSchema):
+    """Safe, token-validated invitation metadata without account-existence disclosure."""
+
+    email: str
+    organisation_id: uuid.UUID
+    organisation_name: str
+    organisation_slug: str
+    role_name: str
+    project_id: uuid.UUID | None = None
+    project_name: str | None = None
+    project_slug: str | None = None
+    project_role_name: str | None = None
+    inviter_name: str | None = None
+    status: str
+    expires_at: datetime
+    is_actionable: bool
 
 
 class InvitationListResponse(BaseSchema):
@@ -208,7 +228,7 @@ class InvitationListResponse(BaseSchema):
 
 
 class AcceptInvitationResponse(BaseSchema):
-    """Confirmation of invitation acceptance and active organisation membership."""
+    """Confirmation of invitation acceptance and active membership status."""
 
     organisation_id: uuid.UUID
     organisation_name: str
@@ -216,6 +236,12 @@ class AcceptInvitationResponse(BaseSchema):
     role_name: str
     membership_status: str
     joined_at: datetime
+    project_id: uuid.UUID | None = None
+    project_name: str | None = None
+    project_slug: str | None = None
+    project_role_name: str | None = None
+    project_membership_status: str | None = None
+    is_new_organisation_member: bool = False
 
 
 class AuditLogEntryResponse(BaseSchema):

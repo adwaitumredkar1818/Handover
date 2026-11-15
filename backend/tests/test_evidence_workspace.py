@@ -27,7 +27,11 @@ def _register_and_login(
         json={"full_name": full_name, "email": email, "password": _PASSWORD},
     )
     assert reg.status_code == 201
-    user_id = str(reg.json()["user"]["id"])
+    reg_data = reg.json()
+    user_id = str(reg_data["user"]["id"])
+    v_token = reg_data.get("development_verification_token")
+    if v_token:
+        client.post("/api/v1/auth/verify-email", json={"token": v_token})
 
     login = client.post(
         "/api/v1/auth/login",

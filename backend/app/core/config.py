@@ -430,6 +430,17 @@ class SecuritySettings(BaseModel):
     auth_rate_limit_enabled: bool = True
     auth_rate_limit_max_attempts: int = Field(default=20, ge=1, le=10000)
     auth_rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
+    auth_rate_limit_verify_email_max_attempts: int = Field(default=5, ge=1, le=10000)
+    auth_rate_limit_resend_verification_max_attempts: int = Field(default=3, ge=1, le=10000)
+
+    # Transactional email configuration (`settings.email`)
+    email_delivery_enabled: bool = False
+    email_provider: Literal["none", "mock", "resend"] = "none"
+    resend_api_key: SecretStr | None = None
+    email_from_address: str = Field(default="noreply@handover.local", min_length=3)
+    email_from_name: str = Field(default="The Handover", min_length=1)
+    frontend_base_url: str = Field(default="http://localhost:3000", min_length=1)
+    email_http_timeout_seconds: float = Field(default=10.0, gt=0.5, le=60.0)
 
     @field_validator("refresh_cookie_path")
     @classmethod
@@ -533,6 +544,18 @@ class IntegrationsSettings(BaseModel):
     allowed_post_auth_redirects: tuple[str, ...] = ()
     default_github_commits_limit: int = Field(default=50, ge=1, le=500)
     default_github_docs_limit: int = Field(default=20, ge=1, le=100)
+
+
+class EmailSettings(BaseModel):
+    """Transactional email delivery settings (Resend / Mock / Disabled)."""
+
+    delivery_enabled: bool = False
+    provider: Literal["none", "mock", "resend"] = "none"
+    resend_api_key: SecretStr | None = None
+    from_address: str = "noreply@handover.local"
+    from_name: str = "The Handover"
+    frontend_base_url: str = "http://localhost:3000"
+    http_timeout_seconds: float = Field(default=10.0, gt=0.5, le=60.0)
 
 
 class Settings(BaseSettings):
@@ -670,6 +693,17 @@ class Settings(BaseSettings):
     auth_rate_limit_enabled: bool = True
     auth_rate_limit_max_attempts: int = Field(default=20, ge=1, le=10000)
     auth_rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
+    auth_rate_limit_verify_email_max_attempts: int = Field(default=5, ge=1, le=10000)
+    auth_rate_limit_resend_verification_max_attempts: int = Field(default=3, ge=1, le=10000)
+
+    # Transactional email configuration (`settings.email`)
+    email_delivery_enabled: bool = False
+    email_provider: Literal["none", "mock", "resend"] = "none"
+    resend_api_key: SecretStr | None = None
+    email_from_address: str = Field(default="noreply@handover.local", min_length=3)
+    email_from_name: str = Field(default="The Handover", min_length=1)
+    frontend_base_url: str = Field(default="http://localhost:3000", min_length=1)
+    email_http_timeout_seconds: float = Field(default=10.0, gt=0.5, le=60.0)
 
     # Delegated source integration fields (`settings.integrations`)
     github_enabled: bool = False
@@ -1022,6 +1056,8 @@ class Settings(BaseSettings):
             auth_rate_limit_enabled=self.auth_rate_limit_enabled,
             auth_rate_limit_max_attempts=self.auth_rate_limit_max_attempts,
             auth_rate_limit_window_seconds=self.auth_rate_limit_window_seconds,
+            auth_rate_limit_verify_email_max_attempts=self.auth_rate_limit_verify_email_max_attempts,
+            auth_rate_limit_resend_verification_max_attempts=self.auth_rate_limit_resend_verification_max_attempts,
         )
 
     @cached_property
@@ -1055,6 +1091,24 @@ class Settings(BaseSettings):
             allowed_post_auth_redirects=tuple(self.integration_allowed_post_auth_redirects),
             default_github_commits_limit=self.github_default_commits_limit,
             default_github_docs_limit=self.github_default_docs_limit,
+        )
+
+    @cached_property
+    def email(self) -> EmailSettings:
+        """Transactional email delivery settings."""
+        clean_frontend_url = self.frontend_base_url.strip().rstrip("/")
+        if self.is_production and self.email_delivery_enabled and not clean_frontend_url.startswith("https://"):
+            raise ValueError(
+                "FRONTEND_BASE_URL must use https:// when transactional email delivery is enabled in production."
+            )
+        return EmailSettings(
+            delivery_enabled=self.email_delivery_enabled,
+            provider=self.email_provider,
+            resend_api_key=self.resend_api_key,
+            from_address=self.email_from_address.strip(),
+            from_name=self.email_from_name.strip(),
+            frontend_base_url=clean_frontend_url,
+            http_timeout_seconds=self.email_http_timeout_seconds,
         )
 
     @cached_property

@@ -15,12 +15,14 @@ from sqlalchemy.orm import Session
 from app.api.deps import (
     get_current_principal,
     get_db_session,
+    get_rbac_service,
     get_source_integration_service,
     get_token_encryption_service,
+    require_organisation_permission,
     require_project_permission,
 )
-from app.core.exceptions import NotFoundError
-from app.models.enums import BackgroundJobStatus, BackgroundJobType
+from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError
+from app.models.enums import BackgroundJobStatus, BackgroundJobType, RoleName
 from app.models.integration import (
     ProjectSourceMapping,
     SourceAccessPolicy,
@@ -30,7 +32,7 @@ from app.models.integration import (
 from app.models.job import BackgroundJob
 from app.schemas.common import BaseSchema
 from app.services.integrations.service import SourceIntegrationService
-from app.services.rbac import AuthenticatedPrincipal, ProjectContext
+from app.services.rbac import AuthenticatedPrincipal, OrganisationContext, ProjectContext, RbacService
 from app.services.token_encryption import TokenEncryptionService
 
 logger = logging.getLogger("app.api.routes.sources")
@@ -145,6 +147,38 @@ class SourceSyncJobsListResponse(BaseSchema):
 
 
 # -----------------------------------------------------------------------------
+# Authorization Helpers
+# -----------------------------------------------------------------------------
+
+
+def _require_org_source_manager(org_ctx: OrganisationContext, message: str) -> None:
+    """Enforce organisation-level source management authority (org_owner / org_admin only)."""
+    is_org_manager = (
+        org_ctx.role.name != RoleName.ORG_MEMBER.value
+        and (
+            org_ctx.has_permission("organisation.manage")
+            or org_ctx.role.name in (RoleName.ORG_OWNER.value, RoleName.ORG_ADMIN.value)
+        )
+    )
+    if not is_org_manager:
+        raise ForbiddenError(message, code="FORBIDDEN")
+
+
+def _require_project_sync_or_mapping_permission(project_ctx: ProjectContext, message: str) -> None:
+    """Enforce least-privilege project source mapping/sync permissions."""
+    allowed = (
+        project_ctx.has_permission("project.sources.manage")
+        or project_ctx.has_permission("project.manage")
+        or (
+            project_ctx.project_membership is not None
+            and project_ctx.has_permission("project.evidence.contribute")
+        )
+    )
+    if not allowed:
+        raise ForbiddenError(message, code="FORBIDDEN")
+
+
+# -----------------------------------------------------------------------------
 # Endpoints
 # -----------------------------------------------------------------------------
 
@@ -158,10 +192,19 @@ class SourceSyncJobsListResponse(BaseSchema):
 def create_organisation_source(
     organisation_id: uuid.UUID,
     payload: CreateSourceConnectionRequest,
-    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
+    org_ctx: Annotated[
+        OrganisationContext,
+        Depends(require_organisation_permission("organisation.read")),
+    ],
     session: Annotated[Session, Depends(get_db_session)],
     token_encryption: Annotated[TokenEncryptionService, Depends(get_token_encryption_service)],
 ) -> SourceConnectionItemResponse:
+    principal = org_ctx.principal
+    _require_org_source_manager(
+        org_ctx,
+        "You do not have permission to register organisation sources.",
+    )
+
     encrypted_payload = token_encryption.encrypt_token(
         plaintext=payload.secret_token,
         organisation_id=organisation_id,
@@ -265,7 +308,10 @@ def create_organisation_source(
 )
 def list_organisation_sources(
     organisation_id: uuid.UUID,
-    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
+    org_ctx: Annotated[
+        OrganisationContext,
+        Depends(require_organisation_permission("organisation.read")),
+    ],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> SourceConnectionListResponse:
     from sqlalchemy import select
@@ -290,6 +336,42 @@ def list_organisation_sources(
     return SourceConnectionListResponse(items=items, total=len(items))
 
 
+@router.get(
+    "/sources/{connection_id}",
+    response_model=SourceConnectionItemResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get source connection details",
+)
+def get_source_connection(
+    connection_id: uuid.UUID,
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
+    session: Annotated[Session, Depends(get_db_session)],
+    rbac_service: Annotated[RbacService, Depends(get_rbac_service)],
+) -> SourceConnectionItemResponse:
+    from sqlalchemy import select
+
+    conn = session.execute(
+        select(SourceConnection).where(SourceConnection.id == connection_id)
+    ).scalar_one_or_none()
+    if conn is None:
+        raise NotFoundError("Source connection not found.", code="CONNECTION_NOT_FOUND")
+
+    rbac_service.resolve_organisation_context(
+        organisation_id=conn.organisation_id,
+        principal=principal,
+    )
+
+    return SourceConnectionItemResponse(
+        id=conn.id,
+        organisation_id=conn.organisation_id,
+        provider=conn.provider,
+        display_name=conn.display_name,
+        status=conn.status,
+        is_shared=bool((conn.metadata_json or {}).get("is_shared", False)),
+        created_at=conn.created_at,
+    )
+
+
 @router.patch(
     "/sources/{connection_id}",
     response_model=SourceConnectionItemResponse,
@@ -301,6 +383,7 @@ def patch_source_connection(
     payload: PatchSourceConnectionRequest,
     principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
     session: Annotated[Session, Depends(get_db_session)],
+    rbac_service: Annotated[RbacService, Depends(get_rbac_service)],
 ) -> SourceConnectionItemResponse:
     from sqlalchemy import select
 
@@ -311,6 +394,15 @@ def patch_source_connection(
     ).scalar_one_or_none()
     if conn is None:
         raise NotFoundError("Source connection not found.", code="CONNECTION_NOT_FOUND")
+
+    org_ctx = rbac_service.resolve_organisation_context(
+        organisation_id=conn.organisation_id,
+        principal=principal,
+    )
+    _require_org_source_manager(
+        org_ctx,
+        "You do not have permission to modify this source connection.",
+    )
 
     meta = dict(conn.metadata_json or {})
     meta["is_shared"] = payload.is_shared
@@ -349,6 +441,50 @@ def patch_source_connection(
 
 
 @router.post(
+    "/sources/{connection_id}/disconnect",
+    response_model=SourceConnectionItemResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Disconnect a source connection",
+)
+def disconnect_source_connection(
+    connection_id: uuid.UUID,
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
+    session: Annotated[Session, Depends(get_db_session)],
+    rbac_service: Annotated[RbacService, Depends(get_rbac_service)],
+) -> SourceConnectionItemResponse:
+    from sqlalchemy import select
+
+    conn = session.execute(
+        select(SourceConnection).where(SourceConnection.id == connection_id)
+    ).scalar_one_or_none()
+    if conn is None:
+        raise NotFoundError("Source connection not found.", code="CONNECTION_NOT_FOUND")
+
+    org_ctx = rbac_service.resolve_organisation_context(
+        organisation_id=conn.organisation_id,
+        principal=principal,
+    )
+    _require_org_source_manager(
+        org_ctx,
+        "You do not have permission to disconnect this source connection.",
+    )
+
+    conn.status = "disconnected"
+    session.commit()
+    session.refresh(conn)
+
+    return SourceConnectionItemResponse(
+        id=conn.id,
+        organisation_id=conn.organisation_id,
+        provider=conn.provider,
+        display_name=conn.display_name,
+        status=conn.status,
+        is_shared=bool((conn.metadata_json or {}).get("is_shared", False)),
+        created_at=conn.created_at,
+    )
+
+
+@router.post(
     "/projects/{project_id}/sources/mappings",
     response_model=SourceMappingItemResponse,
     status_code=status.HTTP_201_CREATED,
@@ -365,11 +501,18 @@ def create_project_source_mapping(
 ) -> SourceMappingItemResponse:
     from sqlalchemy import select
 
+    _require_project_sync_or_mapping_permission(
+        project_ctx,
+        "You do not have permission to map sources in this project.",
+    )
+
     conn = session.execute(
         select(SourceConnection).where(SourceConnection.id == payload.source_connection_id)
     ).scalar_one_or_none()
-    if conn is None:
+    if conn is None or conn.organisation_id != project_ctx.organisation.id:
         raise NotFoundError("Source connection not found.", code="CONNECTION_NOT_FOUND")
+    if conn.status != "active":
+        raise ConflictError("Source connection is not active.", code="CONNECTION_NOT_ACTIVE")
 
     is_shared = bool((conn.metadata_json or {}).get("is_shared", False))
     visibility = "project_members_verified" if is_shared else "restricted_fail_closed"
@@ -488,17 +631,52 @@ def trigger_source_mapping_sync(
 ) -> SourceSyncTriggerResponse:
     from sqlalchemy import select
 
-    from app.models.integration import SourceSyncRun, UserSourceAuthorisation
-    from app.models.enums import SourceSyncRunStatus
+    _require_project_sync_or_mapping_permission(
+        project_ctx,
+        "You do not have permission to trigger source sync in this project.",
+    )
 
     mapping = session.execute(
         select(ProjectSourceMapping).where(
             ProjectSourceMapping.id == mapping_id,
             ProjectSourceMapping.project_id == project_id,
+            ProjectSourceMapping.organisation_id == project_ctx.organisation.id,
         )
     ).scalar_one_or_none()
     if mapping is None:
         raise NotFoundError("Mapping not found.", code="MAPPING_NOT_FOUND")
+    if mapping.status not in {"active", "error"}:
+        raise ConflictError(
+            f"Source mapping is '{mapping.status}' and cannot run syncs.",
+            code="MAPPING_NOT_ACTIVE",
+        )
+
+    conn = session.execute(
+        select(SourceConnection).where(
+            SourceConnection.id == mapping.source_connection_id,
+            SourceConnection.organisation_id == project_ctx.organisation.id,
+        )
+    ).scalar_one_or_none()
+    if conn is None or conn.status != "active":
+        raise ConflictError(
+            "Source connection is not active and cannot run syncs.",
+            code="CONNECTION_NOT_ACTIVE",
+        )
+
+    active_jobs = session.execute(
+        select(BackgroundJob).where(
+            BackgroundJob.project_id == project_id,
+            BackgroundJob.job_type == BackgroundJobType.SOURCE_SYNC.value,
+            BackgroundJob.status.in_(
+                [BackgroundJobStatus.QUEUED.value, BackgroundJobStatus.RUNNING.value]
+            ),
+        )
+    ).scalars().all()
+    if any((j.payload_json or {}).get("mapping_id") == str(mapping.id) for j in active_jobs):
+        raise ConflictError(
+            "A sync job is already queued or running for this mapping.",
+            code="SYNC_ALREADY_ACTIVE",
+        )
 
     job = BackgroundJob(
         organisation_id=mapping.organisation_id,

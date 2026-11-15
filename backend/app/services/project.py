@@ -3,20 +3,31 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date, datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.cache import CacheKeys, CachePolicies, cache_service
+from app.core.config import Settings, get_settings
 from app.core.exceptions import (
     BadRequestError,
     ConflictError,
+    ForbiddenError,
+    GoneError,
     NotFoundError,
     ServiceUnavailableError,
 )
-from app.core.security import derive_slug_from_name, utc_now
+from app.core.security import (
+    derive_slug_from_name,
+    ensure_utc,
+    generate_opaque_token,
+    hash_opaque_token,
+    utc_now,
+)
 from app.models.enums import (
     EvidenceSourceType,
+    InvitationStatus,
     OrganisationStatus,
     ProjectMembershipStatus,
     ProjectSourceMappingStatus,
@@ -24,15 +35,23 @@ from app.models.enums import (
     RoleName,
     RoleScopeType,
 )
+from app.models.organisation import Organisation, OrganisationInvitation
 from app.models.project import Project, ProjectMembership, ProjectTransition
 from app.repositories.organisation import OrganisationRepository
 from app.repositories.project import ProjectRepository
 from app.repositories.rbac import RbacRepository
-from app.schemas.organisation import RemoveMembershipResponse
+from app.repositories.user import UserRepository
+from app.schemas.organisation import (
+    CreateInvitationResponse,
+    InvitationListResponse,
+    InvitationSummaryResponse,
+    RemoveMembershipResponse,
+)
 from app.schemas.project import (
     AddProjectMemberRequest,
     AttentionItemCard,
     ConnectedSourcesSummaryCard,
+    CreateProjectInvitationRequest,
     CreateProjectRequest,
     EvidenceOverviewCard,
     KnowledgeOverviewCard,
@@ -53,6 +72,7 @@ from app.schemas.project import (
     UpsertProjectTransitionRequest,
 )
 from app.services.audit import AuditService
+from app.services.email import TransactionalEmailService, build_email_provider
 from app.services.integrations.access_policy import SourceAccessPolicyService
 from app.services.rbac import OrganisationContext, ProjectContext, RbacService
 
@@ -159,6 +179,26 @@ def _build_project_transition_response(
     )
 
 
+def _build_invitation_summary(invitation: OrganisationInvitation) -> InvitationSummaryResponse:
+    project_role_name: str | None = None
+    if invitation.project_role is not None:
+        project_role_name = invitation.project_role.name
+    return InvitationSummaryResponse(
+        id=invitation.id,
+        organisation_id=invitation.organisation_id,
+        email=invitation.email,
+        role_name=invitation.role.name,
+        project_id=invitation.project_id,
+        project_role_name=project_role_name,
+        status=invitation.status,
+        invited_by_id=invitation.invited_by_id,
+        expires_at=invitation.expires_at,
+        accepted_at=invitation.accepted_at,
+        revoked_at=invitation.revoked_at,
+        created_at=invitation.created_at,
+    )
+
+
 class ProjectService:
     """Orchestrates project creation, lifecycle governance, and tenant-isolated membership."""
 
@@ -171,6 +211,9 @@ class ProjectService:
         rbac_repository: RbacRepository,
         rbac_service: RbacService,
         audit_service: AuditService,
+        user_repository: UserRepository | None = None,
+        settings: Settings | None = None,
+        email_service: TransactionalEmailService | None = None,
     ) -> None:
         self._db = db_session
         self._org_repo = org_repository
@@ -178,6 +221,12 @@ class ProjectService:
         self._rbac_repo = rbac_repository
         self._rbac_service = rbac_service
         self._audit = audit_service
+        self._user_repo = user_repository or UserRepository(db_session)
+        self._settings = settings or get_settings()
+        self._email_service = email_service or TransactionalEmailService(
+            settings=self._settings,
+            provider=build_email_provider(self._settings),
+        )
 
     def _require_active_organisation_and_project(
         self,
@@ -1022,3 +1071,266 @@ class ProjectService:
             ],
             total=total,
         )
+
+    def create_project_invitation(
+        self,
+        *,
+        ctx: ProjectContext,
+        payload: CreateProjectInvitationRequest,
+    ) -> CreateInvitationResponse:
+        """Issue a SHA-256 hashed single-use project invitation.
+
+        Grants project membership with the specified project role, and guarantees
+        parent organisation membership upon acceptance.
+        """
+        self._require_active_organisation_and_project(ctx=ctx)
+
+        if not ctx.has_permission("project.invitations.manage"):
+            raise ForbiddenError(
+                "You do not have permission to manage project invitations.",
+                code="FORBIDDEN",
+            )
+
+        target_project_role = self._rbac_service.get_scoped_role_or_fail(
+            role_name=payload.project_role_name,
+            expected_scope=RoleScopeType.PROJECT,
+            actor_user_id=ctx.principal.user.id,
+            organisation_id=ctx.organisation.id,
+            project_id=ctx.project.id,
+        )
+
+        actor_role_name = (
+            ctx.organisation_role.name
+            if ctx.organisation_role.name in (RoleName.ORG_OWNER.value, RoleName.ORG_ADMIN.value)
+            else (ctx.project_role.name if ctx.project_role else "")
+        )
+        self._rbac_service.require_project_role_authority(
+            actor_role_name=actor_role_name,
+            target_role_name=target_project_role.name,
+            actor_user_id=ctx.principal.user.id,
+            project_id=ctx.project.id,
+            organisation_id=ctx.organisation.id,
+            action_label="invite",
+        )
+
+        existing_user = self._user_repo.get_by_email(payload.email)
+        if existing_user is not None:
+            active_project_membership = self._project_repo.get_active_membership(
+                project_id=ctx.project.id,
+                user_id=existing_user.id,
+            )
+            if active_project_membership is not None:
+                raise ConflictError(
+                    "User is already an active member of this project.",
+                    code="MEMBERSHIP_ALREADY_EXISTS",
+                )
+
+        now = utc_now()
+        pending = self._org_repo.get_pending_project_invitation(
+            project_id=ctx.project.id,
+            normalised_email=payload.email,
+        )
+        if pending is not None:
+            if ensure_utc(pending.expires_at) <= now:
+                pending.status = InvitationStatus.EXPIRED.value
+                self._db.flush()
+            else:
+                raise ConflictError(
+                    "An active pending invitation already exists for this email address in this project.",
+                    code="INVITATION_ALREADY_EXISTS",
+                )
+
+        default_org_role = self._rbac_repo.get_role_by_name(RoleName.ORG_MEMBER.value)
+        if default_org_role is None:
+            raise ServiceUnavailableError(
+                "Organisation RBAC roles are not initialised.",
+                code="RBAC_CATALOG_NOT_READY",
+            )
+
+        raw_token = generate_opaque_token(48)
+        token_hash = hash_opaque_token(raw_token)
+        expires_at = now + timedelta(hours=payload.expires_in_hours)
+
+        invitation = self._org_repo.create_invitation(
+            organisation_id=ctx.organisation.id,
+            email=payload.email,
+            role_id=default_org_role.id,
+            token_hash=token_hash,
+            invited_by_id=ctx.principal.user.id,
+            expires_at=expires_at,
+            project_id=ctx.project.id,
+            project_role_id=target_project_role.id,
+        )
+        invitation.role = default_org_role
+        invitation.project = ctx.project
+        invitation.project_role = target_project_role
+
+        self._audit.record_event(
+            event_type="project.invitation.created",
+            resource_type="organisation_invitation",
+            actor_user_id=ctx.principal.user.id,
+            organisation_id=ctx.organisation.id,
+            project_id=ctx.project.id,
+            resource_id=str(invitation.id),
+            metadata={
+                "invitee_email": invitation.email,
+                "project_role_name": target_project_role.name,
+                "expires_at": expires_at.isoformat(),
+            },
+            message=f"Created project invitation '{invitation.id}' for project '{ctx.project.id}'.",
+        )
+        self._db.commit()
+
+        delivery_result = self._email_service.send_project_invitation_email(
+            to_email=invitation.email,
+            raw_token=raw_token,
+            organisation_name=ctx.organisation.name,
+            project_name=ctx.project.name,
+            project_role_name=target_project_role.name,
+            inviter_name=ctx.principal.user.full_name,
+            expires_in_hours=payload.expires_in_hours,
+        )
+        if delivery_result.status == "failed":
+            self._audit.record_event(
+                event_type="project.invitation.email_delivery_failed",
+                resource_type="organisation_invitation",
+                actor_user_id=ctx.principal.user.id,
+                organisation_id=ctx.organisation.id,
+                project_id=ctx.project.id,
+                resource_id=str(invitation.id),
+                outcome="failed",
+                metadata={
+                    "provider": delivery_result.provider,
+                    "error_message": delivery_result.error_message,
+                },
+                message=(
+                    f"Failed to deliver project invitation email for '{invitation.id}' "
+                    f"in project '{ctx.project.id}'."
+                ),
+            )
+            self._db.commit()
+            message = (
+                "Invitation created, but outbound email delivery failed. "
+                "Please verify email configuration or retry."
+            )
+        elif delivery_result.status == "submitted":
+            message = "Invitation created and sent via email."
+        else:
+            message = (
+                "Invitation created. Outbound email delivery is not configured in this "
+                "environment; handle invitation acceptance through the verified token flow."
+            )
+
+        dev_token = None if self._settings.is_production else raw_token
+        return CreateInvitationResponse(
+            invitation=_build_invitation_summary(invitation),
+            invitation_delivery=delivery_result.status,
+            message=message,
+            development_invitation_token=dev_token,
+        )
+
+    def list_project_invitations(
+        self,
+        *,
+        ctx: ProjectContext,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> InvitationListResponse:
+        """List invitation metadata scoped strictly to this project."""
+        self._require_active_organisation_and_project(ctx=ctx, allow_archived_project=True)
+        if not ctx.has_permission("project.invitations.read"):
+            raise ForbiddenError(
+                "You do not have permission to view project invitations.",
+                code="FORBIDDEN",
+            )
+
+        changed = self._org_repo.expire_stale_invitations_in_project(
+            project_id=ctx.project.id,
+            now=utc_now(),
+        )
+        if changed:
+            self._db.commit()
+
+        rows, total = self._org_repo.list_project_invitations(
+            project_id=ctx.project.id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+        return InvitationListResponse(
+            items=[_build_invitation_summary(row) for row in rows],
+            total=total,
+        )
+
+    def revoke_project_invitation(
+        self,
+        *,
+        ctx: ProjectContext,
+        invitation_id: uuid.UUID,
+    ) -> InvitationSummaryResponse:
+        """Revoke an active pending invitation belonging to this project."""
+        self._require_active_organisation_and_project(ctx=ctx)
+        if not ctx.has_permission("project.invitations.manage"):
+            raise ForbiddenError(
+                "You do not have permission to revoke project invitations.",
+                code="FORBIDDEN",
+            )
+
+        invitation = self._org_repo.get_project_invitation_by_id_for_update(
+            project_id=ctx.project.id,
+            invitation_id=invitation_id,
+        )
+        if invitation is None:
+            raise NotFoundError("Invitation was not found.", code="INVITATION_NOT_FOUND")
+
+        target_role_name = invitation.project_role.name if invitation.project_role else ""
+        actor_role_name = (
+            ctx.organisation_role.name
+            if ctx.organisation_role.name in (RoleName.ORG_OWNER.value, RoleName.ORG_ADMIN.value)
+            else (ctx.project_role.name if ctx.project_role else "")
+        )
+        self._rbac_service.require_project_role_authority(
+            actor_role_name=actor_role_name,
+            target_role_name=target_role_name,
+            actor_user_id=ctx.principal.user.id,
+            project_id=ctx.project.id,
+            organisation_id=ctx.organisation.id,
+            action_label="revoke",
+        )
+
+        now = utc_now()
+        if invitation.status == InvitationStatus.ACCEPTED.value:
+            raise ConflictError(
+                "Accepted invitations cannot be revoked.",
+                code="INVITATION_ALREADY_ACCEPTED",
+            )
+        if invitation.status == InvitationStatus.REVOKED.value:
+            raise ConflictError(
+                "Invitation has already been revoked.",
+                code="INVITATION_REVOKED",
+            )
+        if (
+            invitation.status == InvitationStatus.EXPIRED.value
+            or ensure_utc(invitation.expires_at) <= now
+        ):
+            if invitation.status == InvitationStatus.PENDING.value:
+                invitation.status = InvitationStatus.EXPIRED.value
+                self._db.commit()
+            raise GoneError("Expired invitations cannot be revoked.", code="INVITATION_EXPIRED")
+
+        invitation.status = InvitationStatus.REVOKED.value
+        invitation.revoked_at = now
+        invitation.revoked_by_id = ctx.principal.user.id
+        self._audit.record_event(
+            event_type="project.invitation.revoked",
+            resource_type="organisation_invitation",
+            actor_user_id=ctx.principal.user.id,
+            organisation_id=ctx.organisation.id,
+            project_id=ctx.project.id,
+            resource_id=str(invitation.id),
+            metadata={"invitee_email": invitation.email, "project_role_name": target_role_name},
+            message=f"Revoked project invitation '{invitation.id}'.",
+        )
+        self._db.commit()
+        return _build_invitation_summary(invitation)

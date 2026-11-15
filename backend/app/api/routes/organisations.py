@@ -11,6 +11,7 @@ from app.api.deps import (
     get_audit_service,
     get_current_principal,
     get_organisation_service,
+    require_auth_rate_limit,
     require_organisation_permission,
     require_permission,
 )
@@ -26,6 +27,7 @@ from app.schemas.organisation import (
     CreateInvitationResponse,
     CreateOrganisationRequest,
     InvitationListResponse,
+    InvitationPreviewResponse,
     InvitationSummaryResponse,
     OrganisationListResponse,
     OrganisationMemberListResponse,
@@ -264,6 +266,21 @@ def revoke_organisation_invitation(
 ) -> InvitationSummaryResponse:
     """Revoke a pending invitation so its token can no longer be accepted."""
     return org_service.revoke_invitation(ctx=org_ctx, invitation_id=invitation_id)
+
+
+@router.get(
+    "/invitations/{token}",
+    response_model=InvitationPreviewResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Preview safe invitation metadata for an invitation token",
+    dependencies=[Depends(require_auth_rate_limit("login"))],
+)
+def preview_invitation(
+    token: str,
+    org_service: Annotated[OrganisationService, Depends(get_organisation_service)],
+) -> InvitationPreviewResponse:
+    """Validate an invitation token and return safe metadata without disclosing account existence."""
+    return org_service.preview_invitation(raw_token=token)
 
 
 @router.post(

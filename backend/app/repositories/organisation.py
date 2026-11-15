@@ -185,6 +185,22 @@ class OrganisationRepository:
         self._session.flush()
         return membership
 
+    def get_invitation_by_token_hash(
+        self,
+        token_hash: str,
+    ) -> OrganisationInvitation | None:
+        stmt = (
+            select(OrganisationInvitation)
+            .where(OrganisationInvitation.token_hash == token_hash)
+            .options(
+                selectinload(OrganisationInvitation.organisation),
+                selectinload(OrganisationInvitation.role),
+                selectinload(OrganisationInvitation.project),
+                selectinload(OrganisationInvitation.project_role),
+            )
+        )
+        return self._session.scalar(stmt)
+
     def get_invitation_by_token_hash_for_update(
         self,
         token_hash: str,
@@ -195,6 +211,8 @@ class OrganisationRepository:
             .options(
                 selectinload(OrganisationInvitation.organisation),
                 selectinload(OrganisationInvitation.role),
+                selectinload(OrganisationInvitation.project),
+                selectinload(OrganisationInvitation.project_role),
             )
             .with_for_update()
         )
@@ -212,7 +230,11 @@ class OrganisationRepository:
                 OrganisationInvitation.id == invitation_id,
                 OrganisationInvitation.organisation_id == organisation_id,
             )
-            .options(selectinload(OrganisationInvitation.role))
+            .options(
+                selectinload(OrganisationInvitation.role),
+                selectinload(OrganisationInvitation.project),
+                selectinload(OrganisationInvitation.project_role),
+            )
             .with_for_update()
         )
         return self._session.scalar(stmt)
@@ -225,6 +247,20 @@ class OrganisationRepository:
     ) -> OrganisationInvitation | None:
         stmt = select(OrganisationInvitation).where(
             OrganisationInvitation.organisation_id == organisation_id,
+            OrganisationInvitation.email == normalised_email,
+            OrganisationInvitation.status == InvitationStatus.PENDING.value,
+            OrganisationInvitation.project_id.is_(None),
+        )
+        return self._session.scalar(stmt)
+
+    def get_pending_project_invitation(
+        self,
+        *,
+        project_id: uuid.UUID,
+        normalised_email: str,
+    ) -> OrganisationInvitation | None:
+        stmt = select(OrganisationInvitation).where(
+            OrganisationInvitation.project_id == project_id,
             OrganisationInvitation.email == normalised_email,
             OrganisationInvitation.status == InvitationStatus.PENDING.value,
         )
@@ -246,7 +282,11 @@ class OrganisationRepository:
 
         total = int(self._session.scalar(select(func.count()).select_from(base.subquery())) or 0)
         stmt = (
-            base.options(selectinload(OrganisationInvitation.role))
+            base.options(
+                selectinload(OrganisationInvitation.role),
+                selectinload(OrganisationInvitation.project),
+                selectinload(OrganisationInvitation.project_role),
+            )
             .order_by(OrganisationInvitation.created_at.desc(), OrganisationInvitation.id.asc())
             .offset(offset)
             .limit(limit)
@@ -280,11 +320,15 @@ class OrganisationRepository:
         token_hash: str,
         invited_by_id: uuid.UUID,
         expires_at: datetime,
+        project_id: uuid.UUID | None = None,
+        project_role_id: uuid.UUID | None = None,
     ) -> OrganisationInvitation:
         invitation = OrganisationInvitation(
             organisation_id=organisation_id,
             email=email,
             role_id=role_id,
+            project_id=project_id,
+            project_role_id=project_role_id,
             token_hash=token_hash,
             invited_by_id=invited_by_id,
             status=InvitationStatus.PENDING.value,
@@ -293,3 +337,69 @@ class OrganisationRepository:
         self._session.add(invitation)
         self._session.flush()
         return invitation
+
+    def list_project_invitations(
+        self,
+        *,
+        project_id: uuid.UUID,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[OrganisationInvitation], int]:
+        base = select(OrganisationInvitation).where(
+            OrganisationInvitation.project_id == project_id
+        )
+        if status is not None:
+            base = base.where(OrganisationInvitation.status == status)
+
+        total = int(self._session.scalar(select(func.count()).select_from(base.subquery())) or 0)
+        stmt = (
+            base.options(
+                selectinload(OrganisationInvitation.role),
+                selectinload(OrganisationInvitation.project),
+                selectinload(OrganisationInvitation.project_role),
+            )
+            .order_by(OrganisationInvitation.created_at.desc(), OrganisationInvitation.id.asc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self._session.scalars(stmt).all()), total
+
+    def expire_stale_invitations_in_project(
+        self,
+        *,
+        project_id: uuid.UUID,
+        now: datetime,
+    ) -> int:
+        stmt = (
+            update(OrganisationInvitation)
+            .where(
+                OrganisationInvitation.project_id == project_id,
+                OrganisationInvitation.status == InvitationStatus.PENDING.value,
+                OrganisationInvitation.expires_at <= now,
+            )
+            .values(status=InvitationStatus.EXPIRED.value)
+        )
+        result = cast(CursorResult[Any], self._session.execute(stmt))
+        return int(result.rowcount or 0)
+
+    def get_project_invitation_by_id_for_update(
+        self,
+        *,
+        project_id: uuid.UUID,
+        invitation_id: uuid.UUID,
+    ) -> OrganisationInvitation | None:
+        stmt = (
+            select(OrganisationInvitation)
+            .where(
+                OrganisationInvitation.id == invitation_id,
+                OrganisationInvitation.project_id == project_id,
+            )
+            .options(
+                selectinload(OrganisationInvitation.role),
+                selectinload(OrganisationInvitation.project),
+                selectinload(OrganisationInvitation.project_role),
+            )
+            .with_for_update()
+        )
+        return self._session.scalar(stmt)

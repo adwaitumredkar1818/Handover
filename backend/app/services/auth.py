@@ -7,20 +7,27 @@ import secrets
 import uuid
 from datetime import timedelta
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.exceptions import (
     ConflictError,
+    ForbiddenError,
+    GoneError,
     NotFoundError,
     ServiceUnavailableError,
     UnauthorizedError,
 )
 from app.core.logging import log_security_event
+from app.core.rbac_catalog import ORG_ROLE_RANK, PROJECT_ROLE_RANK
 from app.core.security import (
     create_access_token,
+    decode_email_verification_token,
     ensure_utc,
+    generate_email_verification_token,
     generate_refresh_token,
     hash_opaque_token,
     hash_password,
@@ -29,9 +36,20 @@ from app.core.security import (
     verify_dummy_password,
     verify_password,
 )
-from app.models.enums import RevocationReason, RoleName, RoleScopeType, UserStatus
+from app.core.validators import validate_password_strength
+from app.models.enums import (
+    InvitationStatus,
+    OrganisationStatus,
+    ProjectStatus,
+    RevocationReason,
+    RoleName,
+    RoleScopeType,
+    UserStatus,
+)
 from app.models.user import User
 from app.repositories.auth import PasswordResetTokenRepository, RefreshSessionRepository
+from app.repositories.organisation import OrganisationRepository
+from app.repositories.project import ProjectRepository
 from app.repositories.rbac import RbacRepository
 from app.repositories.user import UserRepository
 from app.schemas.auth import (
@@ -43,12 +61,22 @@ from app.schemas.auth import (
     RefreshSessionSummary,
     RegisterRequest,
     RegisterResponse,
+    RegisterWithInvitationRequest,
+    RegisterWithInvitationResponse,
+    RequestEmailVerificationRequest,
+    RequestEmailVerificationResponse,
     ResetPasswordRequest,
     ResetPasswordResponse,
     RevokeSessionResponse,
     SessionListResponse,
+    VerifyEmailRequest,
+    VerifyEmailResponse,
 )
+
+if TYPE_CHECKING:
+    from app.services.organisation import OrganisationService
 from app.schemas.user import AuthenticatedUserResponse, UserSummaryResponse
+from app.services.email import EmailDeliveryStatus, TransactionalEmailService, build_email_provider
 from app.services.rbac import AuthenticatedPrincipal
 from app.services.supabase_verifier import SupabaseTokenVerifier, VerifiedSupabaseIdentity
 
@@ -112,6 +140,10 @@ class AuthService:
         rbac_repository: RbacRepository,
         reset_token_repository: PasswordResetTokenRepository | None = None,
         supabase_verifier: SupabaseTokenVerifier | None = None,
+        org_repository: OrganisationRepository | None = None,
+        project_repository: ProjectRepository | None = None,
+        org_service: OrganisationService | None = None,
+        email_service: TransactionalEmailService | None = None,
     ) -> None:
         self._settings = settings
         self._db = db_session
@@ -120,10 +152,79 @@ class AuthService:
         self._rbac_repo = rbac_repository
         self._reset_token_repo = reset_token_repository or PasswordResetTokenRepository(db_session)
         self._supabase_verifier = supabase_verifier or SupabaseTokenVerifier(settings)
+        self._org_repo = org_repository or OrganisationRepository(db_session)
+        self._project_repo = project_repository or ProjectRepository(db_session)
+        self._org_service = org_service
+        self._email_service = email_service or TransactionalEmailService(
+            settings=settings,
+            provider=build_email_provider(settings),
+        )
 
-    def register(self, payload: RegisterRequest) -> RegisterResponse:
-        """Create a new platform account with Argon2id password hash and default role."""
-        if self._user_repo.get_by_email(payload.email) is not None:
+    def _get_or_create_org_service(self) -> OrganisationService:
+        if self._org_service is not None:
+            return self._org_service
+        from app.repositories.audit import AuditLogRepository
+        from app.services.audit import AuditService
+        from app.services.organisation import OrganisationService
+        from app.services.rbac import RbacService
+
+        rbac_service = RbacService(
+            rbac_repository=self._rbac_repo,
+            organisation_repository=self._org_repo,
+            project_repository=self._project_repo,
+        )
+        audit_service = AuditService(audit_repository=AuditLogRepository(self._db))
+        return OrganisationService(
+            settings=self._settings,
+            db_session=self._db,
+            org_repository=self._org_repo,
+            project_repository=self._project_repo,
+            rbac_repository=self._rbac_repo,
+            user_repository=self._user_repo,
+            rbac_service=rbac_service,
+            audit_service=audit_service,
+            email_service=self._email_service,
+        )
+
+    def _dispatch_verification_email(
+        self, *, user: User, raw_token: str
+    ) -> tuple[EmailDeliveryStatus, str]:
+        """Dispatch email verification message and return (delivery_status, user_message)."""
+        result = self._email_service.send_verification_email(
+            to_email=user.email,
+            recipient_name=user.full_name,
+            raw_token=raw_token,
+        )
+        if result.status == "submitted":
+            return (
+                "submitted",
+                "Verification email sent. Please check your inbox to verify your email address.",
+            )
+        if result.status == "failed":
+            log_security_event(
+                event_type="auth.email_verification_delivery_failed",
+                outcome="failed",
+                actor_user_id=str(user.id),
+                message=f"Verification email delivery failed via provider '{result.provider}'.",
+            )
+            return (
+                "failed",
+                "Account created, but verification email delivery failed. Please request a new verification email.",
+            )
+        return (
+            "not_configured",
+            "Email verification delivery is not yet configured in this environment.",
+        )
+
+    def _create_user_record_uncommitted(
+        self,
+        *,
+        full_name: str,
+        email: str,
+        password: str,
+    ) -> tuple[User, Any]:
+        """Create a platform user and assign standard_user role within the current transaction."""
+        if self._user_repo.get_by_email(email) is not None:
             log_security_event(
                 event_type="auth.register",
                 outcome="denied",
@@ -141,18 +242,29 @@ class AuthService:
                 code="RBAC_CATALOG_NOT_READY",
             )
 
-        password_digest = hash_password(payload.password)
+        password_digest = hash_password(password)
+        user = self._user_repo.create(
+            full_name=full_name,
+            email=email,
+            password_hash=password_digest,
+            status=UserStatus.ACTIVE.value,
+            is_email_verified=False,
+        )
+        self._rbac_repo.assign_role(
+            user_id=user.id,
+            role_id=default_role.id,
+            assigned_by_id=None,
+        )
+        self._db.flush()
+        return user, default_role
+
+    def register(self, payload: RegisterRequest) -> RegisterResponse:
+        """Create a new platform account with Argon2id password hash and default role."""
         try:
-            user = self._user_repo.create(
+            user, default_role = self._create_user_record_uncommitted(
                 full_name=payload.full_name,
                 email=payload.email,
-                password_hash=password_digest,
-                status=UserStatus.ACTIVE.value,
-            )
-            self._rbac_repo.assign_role(
-                user_id=user.id,
-                role_id=default_role.id,
-                assigned_by_id=None,
+                password=payload.password,
             )
             self._db.commit()
             self._db.refresh(user)
@@ -163,19 +275,253 @@ class AuthService:
                 code="ACCOUNT_ALREADY_EXISTS",
             ) from exc
 
+        now = utc_now()
         log_security_event(
             event_type="auth.register",
             outcome="success",
             actor_user_id=str(user.id),
             message="Registered new platform account with default standard_user role.",
         )
+        token = generate_email_verification_token(
+            user_id=user.id,
+            email=user.email,
+            settings=self._settings,
+            now=now,
+        )
+        delivery_status, delivery_message = self._dispatch_verification_email(
+            user=user,
+            raw_token=token,
+        )
+        is_dev = self._settings.app_env.lower() in ("development", "test", "testing", "local")
         return RegisterResponse(
             user=build_user_summary(user, roles=[default_role.name]),
             email_verification_required=True,
-            email_verification_delivery="not_configured",
+            email_verification_delivery=delivery_status,
+            development_verification_token=token if is_dev else None,
             message=(
                 "Account registered. Email verification delivery is not yet configured "
                 "in this environment."
+                if delivery_status == "not_configured"
+                else delivery_message
+            ),
+        )
+
+    def register_with_invitation(
+        self,
+        payload: RegisterWithInvitationRequest,
+        org_service: OrganisationService | None = None,
+    ) -> RegisterWithInvitationResponse:
+        """Register a new platform user account and accept an invitation atomically in one transaction."""
+        cleaned_token = payload.invitation_token.strip()
+        if not cleaned_token:
+            raise NotFoundError("Invitation was not found.", code="INVITATION_NOT_FOUND")
+
+        token_hash = hash_opaque_token(cleaned_token)
+        invitation = self._org_repo.get_invitation_by_token_hash_for_update(token_hash)
+        if invitation is None:
+            raise NotFoundError("Invitation was not found.", code="INVITATION_NOT_FOUND")
+
+        # Verify email match if client submitted email
+        if payload.email is not None and payload.email != invitation.email:
+            raise ForbiddenError(
+                "This invitation was issued for a different email address.",
+                code="INVITATION_EMAIL_MISMATCH",
+            )
+
+        # Pre-validate invitation status
+        if invitation.status == InvitationStatus.ACCEPTED.value:
+            raise ConflictError(
+                "This invitation has already been accepted.",
+                code="INVITATION_ALREADY_ACCEPTED",
+            )
+        if invitation.status == InvitationStatus.REVOKED.value:
+            raise ConflictError(
+                "This invitation has been revoked.",
+                code="INVITATION_REVOKED",
+            )
+
+        now = utc_now()
+        if (
+            invitation.status == InvitationStatus.EXPIRED.value
+            or ensure_utc(invitation.expires_at) <= now
+        ):
+            if invitation.status == InvitationStatus.PENDING.value:
+                invitation.status = InvitationStatus.EXPIRED.value
+                self._db.commit()
+            raise GoneError(
+                "This invitation has expired.",
+                code="INVITATION_EXPIRED",
+            )
+
+        # Pre-validate organisation
+        organisation = invitation.organisation
+        if organisation.status == OrganisationStatus.ARCHIVED.value:
+            raise ConflictError("Organisation is archived.", code="ORGANISATION_ARCHIVED")
+        if organisation.status != OrganisationStatus.ACTIVE.value:
+            raise ConflictError("Organisation is not active.", code="ORGANISATION_NOT_ACTIVE")
+
+        # Pre-validate inviter authority
+        inviter_org_membership = self._org_repo.get_active_membership(
+            organisation_id=invitation.organisation_id,
+            user_id=invitation.invited_by_id,
+        )
+        if inviter_org_membership is None:
+            raise ForbiddenError(
+                "The inviter no longer holds authority to grant this role.",
+                code="INVITER_NO_LONGER_AUTHORISED",
+            )
+
+        # Pre-validate project if project invitation
+        if invitation.project_id is not None:
+            project = invitation.project or self._project_repo.get_by_id(invitation.project_id)
+            if project is None:
+                raise NotFoundError("Project was not found.", code="PROJECT_NOT_FOUND")
+            if project.status == ProjectStatus.ARCHIVED.value:
+                raise ConflictError("Project is archived.", code="PROJECT_ARCHIVED")
+            if project.organisation_id != invitation.organisation_id:
+                raise ForbiddenError(
+                    "Project does not belong to the invitation organisation.",
+                    code="TENANT_MISMATCH",
+                )
+
+            target_project_role = invitation.project_role
+            if (
+                target_project_role is None
+                or target_project_role.scope_type != RoleScopeType.PROJECT.value
+            ):
+                raise ForbiddenError("Invalid project role scope.", code="INVALID_ROLE_SCOPE")
+
+            is_inviter_org_admin = inviter_org_membership.role.name in (
+                RoleName.ORG_OWNER.value,
+                RoleName.ORG_ADMIN.value,
+            )
+            if not is_inviter_org_admin:
+                inviter_proj_membership = self._project_repo.get_active_membership(
+                    project_id=project.id,
+                    user_id=invitation.invited_by_id,
+                )
+                inviter_proj_perms = (
+                    {
+                        rp.permission.code
+                        for rp in inviter_proj_membership.role.role_permissions
+                        if rp.permission is not None
+                    }
+                    if inviter_proj_membership is not None
+                    else set()
+                )
+                inviter_proj_rank = (
+                    PROJECT_ROLE_RANK.get(inviter_proj_membership.role.name, 0)
+                    if inviter_proj_membership is not None
+                    else 0
+                )
+                target_proj_rank = PROJECT_ROLE_RANK.get(target_project_role.name, 999)
+
+                if (
+                    inviter_proj_membership is None
+                    or "project.invitations.manage" not in inviter_proj_perms
+                    or inviter_proj_rank < target_proj_rank
+                ):
+                    raise ForbiddenError(
+                        "The inviter no longer holds authority to grant this project role.",
+                        code="INVITER_NO_LONGER_AUTHORISED",
+                    )
+        else:
+            target_role = invitation.role
+            if target_role is None or target_role.scope_type != RoleScopeType.ORGANISATION.value:
+                raise ForbiddenError("Invalid invitation role scope.", code="INVALID_ROLE_SCOPE")
+
+            inviter_perms = {
+                rp.permission.code
+                for rp in inviter_org_membership.role.role_permissions
+                if rp.permission is not None
+            }
+            inviter_rank = ORG_ROLE_RANK.get(inviter_org_membership.role.name, 0)
+            if (
+                "organisation.invitations.manage" not in inviter_perms
+                or inviter_rank < ORG_ROLE_RANK.get(target_role.name, 999)
+            ):
+                raise ForbiddenError(
+                    "The inviter no longer holds authority to grant this organisation role.",
+                    code="INVITER_NO_LONGER_AUTHORISED",
+                )
+
+        # Check if an account already exists for this email
+        existing_user = self._user_repo.get_by_email(invitation.email)
+        if existing_user is not None:
+            raise ConflictError(
+                "An account with this email address already exists. Please sign in to accept your invitation.",
+                code="ACCOUNT_ALREADY_EXISTS",
+            )
+
+        # Validate password strength against invitation.email
+        validate_password_strength(payload.password, email=invitation.email)
+
+        active_org_service = org_service or self._get_or_create_org_service()
+
+        # Atomic transaction boundary
+        try:
+            user, default_role = self._create_user_record_uncommitted(
+                full_name=payload.full_name,
+                email=invitation.email,
+                password=payload.password,
+            )
+
+            acting_principal = AuthenticatedPrincipal(
+                user=user,
+                session_family_id=uuid.uuid4(),
+                roles=(default_role.name,),
+                permissions=frozenset(),
+            )
+
+            accept_res = active_org_service.accept_invitation(
+                raw_token=cleaned_token,
+                acting_principal=acting_principal,
+                commit=False,
+            )
+
+            log_security_event(
+                event_type="auth.register",
+                outcome="success",
+                actor_user_id=str(user.id),
+                message="Registered new platform account via invitation.",
+            )
+
+            self._db.commit()
+            self._db.refresh(user)
+        except Exception:
+            self._db.rollback()
+            raise
+
+        token = generate_email_verification_token(
+            user_id=user.id,
+            email=user.email,
+            settings=self._settings,
+            now=now,
+        )
+        delivery_status, _ = self._dispatch_verification_email(
+            user=user,
+            raw_token=token,
+        )
+        is_dev = self._settings.app_env.lower() in ("development", "test", "testing", "local")
+        can_access = bool(user.is_email_verified)
+
+        return RegisterWithInvitationResponse(
+            user=build_user_summary(user, roles=[default_role.name]),
+            email_verification_required=True,
+            email_verification_delivery=delivery_status,
+            organisation_id=accept_res.organisation_id,
+            organisation_name=accept_res.organisation_name,
+            project_id=accept_res.project_id,
+            project_name=accept_res.project_name,
+            project_role_name=accept_res.project_role_name,
+            project_membership_status=accept_res.project_membership_status,
+            can_access_project_immediately=can_access,
+            development_verification_token=token if is_dev else None,
+            message=(
+                "Account registered and invitation accepted. "
+                "Email verification is required before accessing project resources."
+                if not can_access
+                else "Account registered and invitation accepted successfully."
             ),
         )
 
@@ -833,5 +1179,115 @@ class AuthService:
 
         return ResetPasswordResponse(
             message="Your password has been successfully reset. Please log in with your new password.",
+        )
+
+    def verify_email(self, *, token: str) -> VerifyEmailResponse:
+        """Verify signed email verification token and activate email verified status."""
+        user_id, token_email = decode_email_verification_token(token, self._settings)
+        user = self._user_repo.get_by_id(user_id)
+        if user is None:
+            log_security_event(
+                event_type="auth.email_verification.failed",
+                outcome="denied",
+                message=f"Email verification failed: user '{user_id}' not found.",
+                level=logging.WARNING,
+            )
+            raise NotFoundError("User account was not found.", code="USER_NOT_FOUND")
+
+        if user.email.lower() != token_email.lower():
+            log_security_event(
+                event_type="auth.email_verification.failed",
+                outcome="denied",
+                actor_user_id=str(user.id),
+                message=f"Email verification failed: token email '{token_email}' != account '{user.email}'.",
+                level=logging.WARNING,
+            )
+            raise ForbiddenError(
+                "This verification link was issued for a different email address.",
+                code="INVITATION_EMAIL_MISMATCH",
+            )
+
+        now = utc_now()
+        if not user.is_email_verified:
+            user.is_email_verified = True
+            user.email_verified_at = now
+            self._db.commit()
+            self._db.refresh(user)
+
+            log_security_event(
+                event_type="auth.email_verified",
+                outcome="success",
+                actor_user_id=str(user.id),
+                message=f"Successfully verified email address for user '{user.id}' ({user.email}).",
+            )
+            message = "Email address verified successfully. You may now access your organisation and project workspaces."
+        else:
+            message = "Email address is already verified."
+
+        can_access = bool(user.status == UserStatus.ACTIVE.value and user.is_email_verified)
+        return VerifyEmailResponse(
+            message=message,
+            email=user.email,
+            is_email_verified=user.is_email_verified,
+            can_access_project_immediately=can_access,
+        )
+
+    def request_email_verification(
+        self,
+        *,
+        payload: RequestEmailVerificationRequest,
+    ) -> RequestEmailVerificationResponse:
+        """Generate email verification link for unverified account without disclosing existence."""
+        normalised_email = str(payload.email).strip().lower()
+        user = self._user_repo.get_by_email(normalised_email)
+        now = utc_now()
+
+        generic_message = (
+            "If an account exists with this email address and is not yet verified, "
+            "verification instructions have been generated."
+        )
+
+        if user is None:
+            verify_dummy_password("dummy_timing_padding")
+            log_security_event(
+                event_type="auth.email_verification.requested",
+                outcome="denied",
+                message=f"Email verification requested for non-existent email '{normalised_email}'.",
+            )
+            return RequestEmailVerificationResponse(
+                message=generic_message,
+                email_verification_delivery="not_configured",
+                development_verification_token=None,
+            )
+
+        if user.is_email_verified:
+            return RequestEmailVerificationResponse(
+                message="This email address is already verified.",
+                email_verification_delivery="not_configured",
+                development_verification_token=None,
+            )
+
+        token = generate_email_verification_token(
+            user_id=user.id,
+            email=user.email,
+            settings=self._settings,
+            now=now,
+        )
+        delivery_status, _ = self._dispatch_verification_email(
+            user=user,
+            raw_token=token,
+        )
+        log_security_event(
+            event_type="auth.email_verification.token_issued",
+            outcome="success",
+            actor_user_id=str(user.id),
+            message=f"Issued email verification token for user '{user.id}'.",
+        )
+
+        is_dev = self._settings.app_env.lower() in ("development", "test", "testing", "local")
+        return RequestEmailVerificationResponse(
+            message=generic_message,
+            email_verification_delivery=delivery_status,
+            development_verification_token=token if is_dev else None,
         )
 
