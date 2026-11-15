@@ -13,13 +13,18 @@ import { UploadDocumentModal } from "../modals/UploadDocumentModal";
 import { ConnectSourceModal } from "../modals/ConnectSourceModal";
 import { AddMemberModal } from "../modals/AddMemberModal";
 import { useLiveApp } from "../../context/LiveAppContext";
+import { api } from "../../lib/api";
+import Link from "next/link";
+import { Mail, ShieldAlert } from "lucide-react";
 
 export { RoleBadge };
 
 export function AppLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isLoadingAuth } = useLiveApp();
+  const { user, isLoadingAuth, setUser } = useLiveApp();
+  const [resendMessage, setResendMessage] = useState<string | null>(null);
+  const [isResendingVerification, setIsResendingVerification] = useState(false);
 
   const [collapsed, setCollapsed] = useState(() => {
     if (typeof window !== "undefined") {
@@ -65,7 +70,10 @@ export function AppLayout({ children }: { children: ReactNode }) {
     pathname === "/login" ||
     pathname === "/signup" ||
     pathname === "/forgot-password" ||
+    pathname === "/reset-password" ||
+    pathname === "/verify-email" ||
     pathname === "/onboarding" ||
+    pathname?.startsWith("/invitations/") ||
     pathname?.startsWith("/auth/");
 
   const isPublicRoute = pathname === "/" || pathname === "/landing" || isAuthPage;
@@ -122,7 +130,80 @@ export function AppLayout({ children }: { children: ReactNode }) {
               isWide ? "max-w-[1600px]" : "max-w-[1360px]"
             }`}
           >
-            {children}
+            {user && !user.is_email_verified ? (
+              <div className="mx-auto max-w-xl rounded-2xl border border-amber-200 bg-white p-6 shadow-sm">
+                <div className="flex items-start gap-3">
+                  <div className="rounded-xl bg-amber-50 p-2.5 text-amber-700">
+                    <ShieldAlert className="size-5" />
+                  </div>
+                  <div className="space-y-2">
+                    <h2 className="text-base font-semibold text-[#203653]">
+                      Verify your email to access project workspaces
+                    </h2>
+                    <p className="text-xs leading-relaxed text-[#718096]">
+                      Your account (<strong>{user.email}</strong>) is signed in,
+                      but project evidence, knowledge, and handovers remain
+                      locked until your email address is verified.
+                    </p>
+                    {resendMessage && (
+                      <p className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+                        {resendMessage}
+                      </p>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2 pt-2">
+                      <button
+                        type="button"
+                        disabled={isResendingVerification}
+                        onClick={async () => {
+                          setIsResendingVerification(true);
+                          setResendMessage(null);
+                          try {
+                            const res = await api.auth.resendVerification(user.email);
+                            setResendMessage(res.message);
+                          } catch (err: unknown) {
+                            setResendMessage(
+                              err instanceof Error
+                                ? err.message
+                                : "Unable to resend verification email."
+                            );
+                          } finally {
+                            setIsResendingVerification(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-[#315FBA] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#264C98] disabled:opacity-60"
+                      >
+                        <Mail className="size-3.5" />
+                        {isResendingVerification
+                          ? "Sending..."
+                          : "Resend verification email"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const fresh = await api.auth.me();
+                            setUser(fresh);
+                          } catch {
+                            // ignore
+                          }
+                        }}
+                        className="inline-flex items-center rounded-xl border border-[#D9E1F0] bg-white px-3.5 py-2 text-xs font-semibold text-[#203653] hover:bg-[#F6F8FC]"
+                      >
+                        I&apos;ve verified — refresh
+                      </button>
+                      <Link
+                        href="/verify-email"
+                        className="text-xs font-semibold text-[#315FBA] hover:underline px-2"
+                      >
+                        Open verification page
+                      </Link>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              children
+            )}
           </div>
         </main>
       </div>

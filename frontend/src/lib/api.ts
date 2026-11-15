@@ -17,6 +17,14 @@ import type {
   AssistantConversationDetail,
   AssistantAnswerResponse,
   AssistantResponseMode,
+  InvitationSummary,
+  CreateInvitationResponse,
+  InvitationListResponse,
+  InvitationPreviewResponse,
+  AcceptInvitationResponse,
+  RegisterWithInvitationResponse,
+  VerifyEmailResponse,
+  RequestEmailVerificationResponse,
 } from "./types";
 
 export function getApiBaseUrl(): string {
@@ -308,6 +316,29 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
+    async registerWithInvitation(data: {
+      invitation_token: string;
+      full_name: string;
+      password: string;
+      email?: string;
+    }): Promise<RegisterWithInvitationResponse> {
+      return request<RegisterWithInvitationResponse>("/auth/register-with-invitation", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async verifyEmail(token: string): Promise<VerifyEmailResponse> {
+      return request<VerifyEmailResponse>("/auth/verify-email", {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      });
+    },
+    async resendVerification(email: string): Promise<RequestEmailVerificationResponse> {
+      return request<RequestEmailVerificationResponse>("/auth/resend-verification", {
+        method: "POST",
+        body: JSON.stringify({ email }),
+      });
+    },
     async login(data: { email: string; password: string }): Promise<AuthSessionResponse> {
       return request<AuthSessionResponse>("/auth/login", {
         method: "POST",
@@ -370,6 +401,18 @@ export const api = {
     async listMembers(orgId: string): Promise<OrganisationMember[]> {
       const res = await request<unknown>(`/organisations/${orgId}/members`);
       return unwrapList<OrganisationMember>(res);
+    },
+  },
+
+  // Invitations
+  invitations: {
+    async preview(token: string): Promise<InvitationPreviewResponse> {
+      return request<InvitationPreviewResponse>(`/invitations/${encodeURIComponent(token)}`);
+    },
+    async accept(token: string): Promise<AcceptInvitationResponse> {
+      return request<AcceptInvitationResponse>(`/invitations/${encodeURIComponent(token)}/accept`, {
+        method: "POST",
+      });
     },
   },
 
@@ -526,6 +569,45 @@ export const api = {
         method: "PUT",
         body: JSON.stringify(data),
       });
+    },
+    async listInvitations(
+      orgId: string,
+      projectId: string,
+      params?: { status?: string; limit?: number; offset?: number }
+    ): Promise<InvitationListResponse> {
+      const qs = new URLSearchParams();
+      if (params?.status) qs.set("status", params.status);
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.offset) qs.set("offset", String(params.offset));
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request<InvitationListResponse>(
+        `/organisations/${orgId}/projects/${projectId}/invitations${suffix}`
+      );
+    },
+    async createInvitation(
+      orgId: string,
+      projectId: string,
+      data: { email: string; role_name: string; expires_in_hours?: number }
+    ): Promise<CreateInvitationResponse> {
+      return request<CreateInvitationResponse>(
+        `/organisations/${orgId}/projects/${projectId}/invitations`,
+        {
+          method: "POST",
+          body: JSON.stringify(data),
+        }
+      );
+    },
+    async revokeInvitation(
+      orgId: string,
+      projectId: string,
+      invitationId: string
+    ): Promise<InvitationSummary> {
+      return request<InvitationSummary>(
+        `/organisations/${orgId}/projects/${projectId}/invitations/${invitationId}`,
+        {
+          method: "DELETE",
+        }
+      );
     },
   },
 

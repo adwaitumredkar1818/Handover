@@ -11,21 +11,27 @@ export function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const registered = searchParams.get("registered") === "1";
+  const invitationToken = searchParams.get("invitation_token");
+  const initialEmail = searchParams.get("email") || "";
 
   const { user, login, isLoadingAuth } = useLiveApp();
 
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const postAuthDestination = invitationToken
+    ? `/invitations/${encodeURIComponent(invitationToken)}`
+    : "/overview";
+
   useEffect(() => {
     if (user && !isLoadingAuth) {
-      router.push("/overview");
+      router.push(postAuthDestination);
     }
-  }, [user, isLoadingAuth, router]);
+  }, [user, isLoadingAuth, router, postAuthDestination]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -45,7 +51,7 @@ export function LoginPage() {
     setLoading(true);
     try {
       await login(cleanEmail, password);
-      router.push("/overview");
+      router.push(postAuthDestination);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to sign in. Please check your credentials.");
     } finally {

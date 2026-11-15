@@ -3,6 +3,8 @@
 import { useContext, useMemo, useState, type ReactNode } from 'react'
 import { useRouter, useParams } from 'next/navigation'
 import Link from 'next/link'
+import { useLiveApp } from '../../context/LiveAppContext'
+import { ProjectInvitationsPanel } from '../project-workspace/ProjectInvitationsPanel'
 import {
   ArrowLeft,
   ArrowRight,
@@ -792,6 +794,7 @@ const PERMS: [string, boolean, boolean, boolean, boolean][] = [
 export function ProjectTeam({ projectId }: { projectId: string }) {
   const router = useRouter()
   const s = useFigmaStore()
+  const liveApp = useLiveApp()
   const p = useProject(projectId)
   const [addOpen, setAddOpen] = useState(false)
   const [remove, setRemove] = useState<string | null>(null)
@@ -801,6 +804,8 @@ export function ProjectTeam({ projectId }: { projectId: string }) {
   if (!p) return <ProjectNotFound />
 
   const canManage = p.role === 'manager'
+  const liveOrgId = liveApp.activeOrg?.id || liveApp.activeProject?.organisation_id || null
+  const isLiveUuidProject = Boolean(liveApp.user && liveOrgId && /^[0-9a-f-]{36}$/i.test(projectId))
   const members = s.members.filter((m) => m.projectId === p.id)
   const f = projectFindings(p.id)
 
@@ -891,38 +896,47 @@ export function ProjectTeam({ projectId }: { projectId: string }) {
           </Table>
         </Card>
         <div className="space-y-5">
-          <Card>
-            <CardHeader title="Pending invitations" subtitle={`${invites.length} awaiting response`} icon={Mail} />
-            <ul className="space-y-2 px-5 pb-5">
-              {invites.map((i) => (
-                <li key={i.email} className="flex items-center gap-3 rounded-xl border border-line p-3">
-                  <Avatar name={i.email} size={28} />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-[13px] font-medium text-navy">{i.email}</p>
-                    <p className="text-xs text-muted">{ROLE_LABEL[i.role]} · sent {i.sent}</p>
-                  </div>
-                  {canManage && (
-                    <>
-                      <button className="rounded p-1 text-muted hover:text-brand" title="Resend" onClick={() => s.toast('Invitation resent', i.email)}>
-                        <RefreshCw className="size-3.5" />
-                      </button>
-                      <button
-                        className="rounded p-1 text-muted hover:text-bad"
-                        title="Revoke"
-                        onClick={() => {
-                          setInvites(invites.filter((x) => x.email !== i.email))
-                          s.toast('Invitation revoked', i.email, 'info')
-                        }}
-                      >
-                        <X className="size-3.5" />
-                      </button>
-                    </>
-                  )}
-                </li>
-              ))}
-              {!invites.length && <p className="text-[13px] text-muted">No pending invitations.</p>}
-            </ul>
-          </Card>
+          {isLiveUuidProject && liveOrgId ? (
+            <ProjectInvitationsPanel
+              organisationId={liveOrgId}
+              projectId={projectId}
+              projectName={p.name}
+              canManage={canManage}
+            />
+          ) : (
+            <Card>
+              <CardHeader title="Pending invitations" subtitle={`${invites.length} awaiting response`} icon={Mail} />
+              <ul className="space-y-2 px-5 pb-5">
+                {invites.map((i) => (
+                  <li key={i.email} className="flex items-center gap-3 rounded-xl border border-line p-3">
+                    <Avatar name={i.email} size={28} />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[13px] font-medium text-navy">{i.email}</p>
+                      <p className="text-xs text-muted">{ROLE_LABEL[i.role]} · sent {i.sent}</p>
+                    </div>
+                    {canManage && (
+                      <>
+                        <button className="rounded p-1 text-muted hover:text-brand" title="Resend" onClick={() => s.toast('Invitation resent', i.email)}>
+                          <RefreshCw className="size-3.5" />
+                        </button>
+                        <button
+                          className="rounded p-1 text-muted hover:text-bad"
+                          title="Revoke"
+                          onClick={() => {
+                            setInvites(invites.filter((x) => x.email !== i.email))
+                            s.toast('Invitation revoked', i.email, 'info')
+                          }}
+                        >
+                          <X className="size-3.5" />
+                        </button>
+                      </>
+                    )}
+                  </li>
+                ))}
+                {!invites.length && <p className="text-[13px] text-muted">No pending invitations.</p>}
+              </ul>
+            </Card>
+          )}
           <Card>
             <CardHeader title="Permission management" subtitle="What each project role can do" icon={ShieldCheck} />
             <div className="overflow-x-auto px-5 pb-5">

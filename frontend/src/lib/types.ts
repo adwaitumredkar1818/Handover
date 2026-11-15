@@ -576,3 +576,91 @@ export interface AssistantAnswerResponse {
   duration_ms: number;
   created_at: string;
 }
+
+export type InvitationStatus = "pending" | "accepted" | "expired" | "revoked";
+
+export interface InvitationSummary {
+  id: UUID;
+  organisation_id: UUID;
+  email: string;
+  role_name: string;
+  project_id?: UUID | null;
+  project_role_name?: string | null;
+  status: InvitationStatus | string;
+  invited_by_id: UUID;
+  expires_at: string;
+  accepted_at?: string | null;
+  revoked_at?: string | null;
+  created_at: string;
+}
+
+export interface CreateInvitationResponse {
+  invitation: InvitationSummary;
+  invitation_delivery: "not_configured" | "submitted" | "failed";
+  message: string;
+  development_invitation_token?: string | null;
+}
+
+export interface InvitationListResponse {
+  items: InvitationSummary[];
+  total: number;
+}
+
+export interface InvitationPreviewResponse {
+  email: string;
+  organisation_id: UUID;
+  organisation_name: string;
+  organisation_slug: string;
+  role_name: string;
+  project_id?: UUID | null;
+  project_name?: string | null;
+  project_slug?: string | null;
+  project_role_name?: string | null;
+  inviter_name?: string | null;
+  status: InvitationStatus | string;
+  expires_at: string;
+  is_actionable: boolean;
+}
+
+export interface AcceptInvitationResponse {
+  organisation_id: UUID;
+  organisation_name: string;
+  organisation_slug: string;
+  role_name: string;
+  membership_status: string;
+  joined_at: string;
+  project_id?: UUID | null;
+  project_name?: string | null;
+  project_slug?: string | null;
+  project_role_name?: string | null;
+  project_membership_status?: string | null;
+  is_new_organisation_member: boolean;
+}
+
+export interface RegisterWithInvitationResponse {
+  user: User;
+  email_verification_required: boolean;
+  email_verification_delivery: "not_configured" | "submitted" | "failed";
+  organisation_id: UUID;
+  organisation_name: string;
+  project_id?: UUID | null;
+  project_name?: string | null;
+  project_role_name?: string | null;
+  project_membership_status?: string | null;
+  can_access_project_immediately: boolean;
+  development_verification_token?: string | null;
+  message: string;
+}
+
+export interface VerifyEmailResponse {
+  message: string;
+  email: string;
+  is_email_verified: boolean;
+  can_access_project_immediately: boolean;
+}
+
+export interface RequestEmailVerificationResponse {
+  message: string;
+  email_verification_delivery: "not_configured" | "submitted" | "failed";
+  development_verification_token?: string | null;
+}

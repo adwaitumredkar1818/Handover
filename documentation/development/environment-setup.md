@@ -439,3 +439,14 @@ npm run dev
 ```
 
 - **Frontend Secret Hygiene**: Keep all secrets strictly in backend environment variables (`.env`). Only `NEXT_PUBLIC_API_BASE_URL` is intended for public client API routing.
+
+### 7.3 Transactional Email Environment Variables (`Phase 4.3`)
+
+| Variable | Required | Default | Purpose |
+| :--- | :--- | :--- | :--- |
+| `EMAIL_DELIVERY_ENABLED` | Optional | `false` | Enables outbound transactional email dispatch (`false` preserves `not_configured` mode in local/test). |
+| `EMAIL_PROVIDER` | Optional | `none` | Provider adapter (`none`, `mock`, `resend`). |
+| `RESEND_API_KEY` | When `EMAIL_PROVIDER=resend` | `""` | Server-only Resend API key (never exposed to frontend or logs). |
+| `EMAIL_FROM_ADDRESS` | Optional | `noreply@handover.local` | Sender email address for verification and invitation emails. |
+| `EMAIL_FROM_NAME` | Optional | `The Handover` | Sender display name. |
+| `FRONTEND_BASE_URL` | Required in production email mode | `http://localhost:3000` | Base URL for `/verify-email?token=...` and `/invitations/<token>` links (must use `https://` when `APP_ENV=production` and `EMAIL_DELIVERY_ENABLED=true`). |

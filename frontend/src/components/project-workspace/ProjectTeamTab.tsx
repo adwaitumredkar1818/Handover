@@ -35,6 +35,7 @@ import type {
   ProjectMember,
   OrganisationMember,
 } from "../../lib/types";
+import { ProjectInvitationsPanel } from "./ProjectInvitationsPanel";
 
 const ROLE_LABEL: Record<string, string> = {
   project_manager: "Project Manager",
@@ -351,20 +352,13 @@ export function ProjectTeamTab({ project, canManage }: ProjectTeamTabProps) {
 
         {/* Right Column: Invitations & Permission Matrix */}
         <div className="space-y-6">
-          {/* Pending Invitations Card */}
-          <Card>
-            <CardHeader
-              title="Pending Invitations"
-              subtitle="0 awaiting acceptance"
-              icon={Mail}
-            />
-            <div className="p-5 text-center text-xs text-muted">
-              <p>No pending invitations for this project.</p>
-              <p className="text-[11px] text-slate-400 mt-1">
-                Invited members receive secure access links via organisation email.
-              </p>
-            </div>
-          </Card>
+          {/* Real Backend Project Invitations Panel */}
+          <ProjectInvitationsPanel
+            organisationId={project.organisation_id}
+            projectId={project.id}
+            projectName={project.name}
+            canManage={canManage}
+          />
 
           {/* Permission Management Matrix Card */}
           <Card>

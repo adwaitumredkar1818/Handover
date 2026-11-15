@@ -170,9 +170,10 @@ All expected `AppError` exceptions, HTTP errors (`404`, `405`), request validati
 
 | Method & Path | Scope / Permission Required | Purpose & Token Security Rules |
 | :--- | :--- | :--- |
-| `POST /api/v1/organisations/{organisation_id}/invitations` | Active Org Member + `organisation.invitations.manage` | Creates a SHA-256 hashed (`token_hash`) single-use invitation matching inviter rank (`org_admin` cannot invite `org_owner`), reports `invitation_delivery: "not_configured"` honestly, and sets `development_invitation_token: null` when `APP_ENV=production`. |
+| `POST /api/v1/organisations/{organisation_id}/invitations` | Active Org Member + `organisation.invitations.manage` | Creates a SHA-256 hashed (`token_hash`) single-use invitation matching inviter rank (`org_admin` cannot invite `org_owner`), reports `invitation_delivery` (`not_configured`, `submitted`, or `failed`), and sets `development_invitation_token: null` when `APP_ENV=production`. |
 | `GET /api/v1/organisations/{organisation_id}/invitations` | Active Org Member + `organisation.invitations.read` | Lists non-secret invitation metadata scoped to the organisation (`status`, `limit`, `offset`). Never returns raw tokens or `token_hash`. |
 | `DELETE /api/v1/organisations/{organisation_id}/invitations/{invitation_id}` | Active Org Member + `organisation.invitations.manage` | Revokes a `pending` invitation so subsequent acceptance attempts fail cleanly (`409 INVITATION_REVOKED`). |
+| `GET /api/v1/invitations/{token}` | Rate-limited public token preview | Validates SHA-256 token hash and returns safe invitation metadata (`email`, `organisation_name`, `project_name`, `project_role_name`, `inviter_name`, `status`, `expires_at`, `is_actionable`) without mutating membership or disclosing account existence. |
 | `POST /api/v1/invitations/{token}/accept` | Authenticated user | Validates SHA-256 hash, case-normalised email match (`403 INVITATION_EMAIL_MISMATCH` without consuming token), expiry (`410 INVITATION_EXPIRED`), active org state, live inviter authority (`403 INVITER_NO_LONGER_AUTHORISED`), and single-use transition (`409 INVITATION_ALREADY_ACCEPTED`). |
 
 ### 6.3 Project Workspaces & Memberships (`/api/v1/organisations/{id}/projects`, `/api/v1/projects`)
