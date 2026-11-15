@@ -20,13 +20,15 @@ import type {
 } from "./types";
 
 export function getApiBaseUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_API_BASE_URL;
+  if (configured) {
+    return configured.replace(/\/$/, "");
+  }
   if (typeof window !== "undefined") {
-    // In browser, prefer same-origin relative URL so Next.js rewrites proxy to backend cleanly
+    // In browser without configured base url, fall back to same-origin relative URL
     return "/api/v1";
   }
-  const configured =
-    process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000/api/v1";
-  return configured.replace(/\/$/, "");
+  return "http://127.0.0.1:8000/api/v1";
 }
 
 const API_BASE_URL = getApiBaseUrl();
