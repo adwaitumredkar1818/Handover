@@ -19,24 +19,12 @@ import type {
 } from "./types";
 
 export function getApiBaseUrl(): string {
-  const configured =
-    process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000/api/v1";
   if (typeof window !== "undefined") {
-    try {
-      const parsed = new URL(configured);
-      if (parsed.hostname === "localhost" && window.location.hostname === "127.0.0.1") {
-        parsed.hostname = "127.0.0.1";
-        return parsed.toString().replace(/\/$/, "");
-      }
-      if (parsed.hostname === "127.0.0.1" && window.location.hostname === "localhost") {
-        parsed.hostname = "localhost";
-        return parsed.toString().replace(/\/$/, "");
-      }
-      return configured.replace(/\/$/, "");
-    } catch {
-      return configured.replace(/\/$/, "");
-    }
+    // In browser, prefer same-origin relative URL so Next.js rewrites proxy to backend cleanly
+    return "/api/v1";
   }
+  const configured =
+    process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000/api/v1";
   return configured.replace(/\/$/, "");
 }
 

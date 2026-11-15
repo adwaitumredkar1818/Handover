@@ -623,12 +623,16 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
     setIsLoadingSources(true);
     try {
-      const [mappings, conns] = await Promise.all([
+      const [mappingsRes, connsRes] = await Promise.allSettled([
         api.sources.listProjectMappings(activeProject.id),
         api.sources.listOrgConnections(activeOrg.id),
       ]);
-      setSourceMappings(mappings);
-      setOrgConnections(conns);
+      if (mappingsRes.status === "fulfilled") {
+        setSourceMappings(mappingsRes.value);
+      }
+      if (connsRes.status === "fulfilled") {
+        setOrgConnections(connsRes.value);
+      }
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 401) return;
       console.error("Error loading sources:", err);
@@ -650,12 +654,14 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     const currentProjectId = activeProject.id;
     setIsLoadingEvidence(true);
     try {
-      const [items, metrics] = await Promise.all([
+      const [itemsRes, metricsRes] = await Promise.allSettled([
         api.evidence.list(currentProjectId, {
           limit: 100,
         }),
         api.evidence.getMetrics(currentProjectId),
       ]);
+      const items = itemsRes.status === "fulfilled" ? itemsRes.value : [];
+      const metrics = metricsRes.status === "fulfilled" ? metricsRes.value : null;
       setEvidenceList(items);
       setEvidenceMetrics(metrics);
       if (items.length > 0 && items[0]) {
