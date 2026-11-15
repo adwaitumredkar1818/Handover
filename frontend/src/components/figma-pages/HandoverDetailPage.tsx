@@ -24,6 +24,7 @@ import {
 import {
   HandoverLayout, HandoverNotFound, handoverStats, useHandover, HandoverWorkspace, Link
 } from './HandoversPage'
+import { api } from '../../lib/api'
 
 /* ---------- 25. Review & Verification ---------- */
 const ORDER: Verification[] = ['conflicting', 'insufficient', 'needs_review', 'rejected', 'verified']
@@ -499,6 +500,42 @@ export function Report({ id }: { id: string }) {
           s.toast('Report downloaded', `${h.code}-handover-report.txt`)
         }
 
+        const downloadMarkdown = async () => {
+          try {
+            s.toast('Exporting Markdown', 'Generating markdown handover package...', 'info')
+            const md = await api.handover.exportMarkdown(h.projectId, h.id)
+            const blob = new Blob([md], { type: 'text/markdown' })
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = `${h.code}-handover.md`
+            a.click()
+            URL.revokeObjectURL(url)
+            s.toast('Report downloaded', `${h.code}-handover.md`, 'success')
+          } catch (err: unknown) {
+            console.error('Markdown export error:', err)
+            download()
+          }
+        }
+
+        const downloadJson = async () => {
+          try {
+            s.toast('Exporting JSON', 'Generating JSON handover package...', 'info')
+            const jsonData = await api.handover.exportJson(h.projectId, h.id)
+            const blob = new Blob([JSON.stringify(jsonData, null, 2)], { type: 'application/json' })
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = `${h.code}-handover.json`
+            a.click()
+            URL.revokeObjectURL(url)
+            s.toast('Report downloaded', `${h.code}-handover.json`, 'success')
+          } catch (err: unknown) {
+            console.error('JSON export error:', err)
+            s.toast('Export failed', err instanceof Error ? err.message : 'Failed to export JSON', 'error')
+          }
+        }
+
         const sec = (n: number, children: ReactNode) => (
           <section id={`sec-${n}`} className="scroll-mt-4 border-t border-line pt-7 first:border-0 first:pt-0">
             <h2 className="mb-3 flex items-baseline gap-3 text-[17px] font-semibold text-navy">
@@ -557,8 +594,11 @@ export function Report({ id }: { id: string }) {
                 >
                   Export PDF
                 </Button>
-                <Button variant="secondary" icon={Download} onClick={download}>
-                  Download
+                <Button variant="secondary" icon={FileText} onClick={downloadMarkdown}>
+                  Export Markdown
+                </Button>
+                <Button variant="secondary" icon={Download} onClick={downloadJson}>
+                  Export JSON
                 </Button>
                 <Button variant="secondary" icon={Share2} onClick={() => setShare(true)}>
                   Share

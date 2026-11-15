@@ -27,10 +27,13 @@ from app.core.security import utc_now
 from app.models.audit import AuditLog
 from app.models.enums import (
     AuditOutcome,
+    EpistemicStatus,
     HandoverCaseStatus,
     HandoverLinkType,
     HandoverPackageSectionType,
     KnowledgeCategory,
+    KnowledgeReviewStatus,
+    RelationshipVerificationStatus,
 )
 from app.models.handover import (
     HandoverCase,
@@ -188,6 +191,17 @@ class PackageAssemblyService:
         excluded_ki_ids: list[dict[str, Any]] = []
 
         for ki in filtered_kis:
+            if (
+                ki.epistemic_status != EpistemicStatus.HUMAN_VERIFIED.value
+                or ki.review_status != KnowledgeReviewStatus.APPROVED.value
+            ):
+                excluded_ki_ids.append({
+                    "id": str(ki.id),
+                    "title": ki.title or str(ki.id),
+                    "blockers": ["Knowledge item is not human-verified and approved."],
+                })
+                continue
+
             eligibility = self.eligibility_service.check_knowledge_item_eligibility(
                 ki.id,
                 viewer_user_id=user_id,
@@ -214,6 +228,8 @@ class PackageAssemblyService:
             sec: [] for sec in SECTION_ORDER
         }
         for rel in filtered_rels:
+            if rel.verification_status != RelationshipVerificationStatus.VERIFIED.value:
+                continue
             eligibility = self.eligibility_service.check_relationship_eligibility(
                 rel.id,
                 viewer_user_id=user_id,

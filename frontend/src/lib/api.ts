@@ -260,6 +260,17 @@ async function request<T>(
     return {} as T;
   }
 
+  const contentType = res.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return res.json() as Promise<T>;
+  }
+  if (contentType.includes("text/")) {
+    return res.text() as unknown as Promise<T>;
+  }
+  if (contentType.includes("application/pdf") || contentType.includes("octet-stream")) {
+    return res.blob() as unknown as Promise<T>;
+  }
+
   return res.json() as Promise<T>;
 }
 
@@ -1015,7 +1026,7 @@ export const api = {
     },
   },
   handover: {
-    async listCases(projectId: string): Promise<{
+    async listCases(projectId: string, status?: string): Promise<{
       items: Array<{
         id: string;
         project_id: string;
@@ -1024,18 +1035,27 @@ export const api = {
         version: number;
         created_at: string;
         updated_at: string;
-        outgoing_owner_user_id?: string;
-        incoming_owner_user_id?: string;
+        departing_member_id?: string;
+        successor_id?: string;
       }>;
       total: number;
     }> {
-      return request(`/projects/${projectId}/handover/cases`);
+      const q = status ? `?status=${encodeURIComponent(status)}` : "";
+      return request(`/projects/${projectId}/handover/cases${q}`);
     },
-    async createCase(projectId: string, data: { title: string; description?: string; outgoing_owner_user_id?: string; incoming_owner_user_id?: string }): Promise<{
+    async createCase(projectId: string, data: {
+      title: string;
+      description?: string;
+      departing_member_id: string;
+      successor_id?: string;
+      metadata_json?: Record<string, unknown>;
+    }): Promise<{
       id: string;
       title: string;
       status: string;
       version: number;
+      created_at: string;
+      updated_at: string;
     }> {
       return request(`/projects/${projectId}/handover/cases`, {
         method: "POST",
@@ -1043,68 +1063,177 @@ export const api = {
       });
     },
     async getCase(projectId: string, caseId: string): Promise<{
-      id: string;
-      project_id: string;
-      title: string;
-      description?: string;
-      status: string;
-      version: number;
-      created_at: string;
-      updated_at: string;
+      case: {
+        id: string;
+        project_id: string;
+        title: string;
+        description?: string;
+        status: string;
+        version: number;
+        departing_member_id?: string;
+        successor_id?: string;
+        created_at: string;
+        updated_at: string;
+      };
+      packages: Array<any>;
+      current_version?: any;
+      signoffs: Array<any>;
+      status_history: Array<any>;
+      responsibility_transfers: Array<any>;
     }> {
       return request(`/projects/${projectId}/handover/cases/${caseId}`);
     },
+    async updateCase(projectId: string, caseId: string, data: { title?: string; description?: string; successor_id?: string }): Promise<any> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}`, {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      });
+    },
+    async assemblePackage(projectId: string, caseId: string, data?: {
+      assembly_notes?: string;
+      include_domains?: string[];
+      exclude_knowledge_item_ids?: string[];
+      exclude_relationship_ids?: string[];
+    }): Promise<any> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/assemble`, {
+        method: "POST",
+        body: JSON.stringify(data || {}),
+      });
+    },
     async getVersions(projectId: string, caseId: string): Promise<Array<{
       id: string;
+      package_id: string;
       version_number: number;
-      package_hash: string;
-      assembled_at: string;
-      readiness_score?: number;
+      assembly_notes?: string;
+      is_current: boolean;
+      created_at: string;
     }>> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/versions`);
     },
-    async assemblePackage(projectId: string, caseId: string, expectedVersion: number): Promise<Record<string, unknown>> {
-      return request(`/projects/${projectId}/handover/cases/${caseId}/assemble`, {
+    async getVersionDetail(projectId: string, caseId: string, versionId: string): Promise<{
+      version: any;
+      sections: Array<{
+        id: string;
+        version_id: string;
+        section_type: string;
+        section_title: string;
+        section_content: string;
+        content_summary?: string;
+        section_order: number;
+        knowledge_item_count: number;
+        relationship_count: number;
+      }>;
+      readiness?: {
+        version_id: string;
+        overall_score: number;
+        overall_level: string;
+        is_ready_for_signoff: boolean;
+        blocker_count: number;
+        warning_count: number;
+        categories: Array<{
+          category: string;
+          score: number;
+          level: string;
+          findings_count: number;
+          blockers_json: string[];
+          warnings_json: string[];
+        }>;
+      };
+      checklists?: Array<any>;
+    }> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/versions/${versionId}`);
+    },
+    async assessReadiness(projectId: string, caseId: string, versionId: string, notes?: string): Promise<any> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/readiness`, {
         method: "POST",
-        body: JSON.stringify({ expected_version: expectedVersion }),
+        body: JSON.stringify({ version_id: versionId, notes: notes || "Readiness assessment" }),
       });
     },
-    async getReadiness(projectId: string, caseId: string, versionId: string): Promise<{
-      readiness_score: number;
-      dimension_scores: Record<string, number>;
-      unmet_requirements: string[];
-      recommendations: string[];
-    }> {
+    async getReadiness(projectId: string, caseId: string, versionId: string): Promise<any> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/readiness/${versionId}`);
+    },
+    async generateChecklists(projectId: string, caseId: string, versionId?: string): Promise<Array<any>> {
+      const q = versionId ? `?version_id=${versionId}` : "";
+      return request(`/projects/${projectId}/handover/cases/${caseId}/checklists/generate${q}`, {
+        method: "POST",
+      });
     },
     async getChecklists(projectId: string, caseId: string): Promise<Array<{
       id: string;
-      title: string;
-      is_mandatory: boolean;
-      status: string;
+      case_id: string;
+      checklist_type: string;
+      items: Array<{
+        id: string;
+        title: string;
+        description?: string;
+        item_type: string;
+        status: string;
+        is_mandatory: boolean;
+      }>;
     }>> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/checklists`);
     },
-    async getResponsibilities(projectId: string, caseId: string): Promise<Array<{
-      id: string;
-      component_id: string;
-      transfer_status: string;
-      from_user_id: string;
-      to_user_id: string;
-    }>> {
+    async updateChecklistItem(projectId: string, itemId: string, data: { status: string; notes?: string }): Promise<any> {
+      return request(`/projects/${projectId}/handover/checklists/items/${itemId}`, {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      });
+    },
+    async getResponsibilities(projectId: string, caseId: string): Promise<Array<any>> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/responsibilities`);
+    },
+    async createResponsibilities(projectId: string, caseId: string, transfers: Array<any>): Promise<any> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/responsibilities`, {
+        method: "POST",
+        body: JSON.stringify({ transfers }),
+      });
+    },
+    async updateResponsibility(projectId: string, transferId: string, status: string, notes?: string): Promise<any> {
+      const q = notes ? `?status=${encodeURIComponent(status)}&notes=${encodeURIComponent(notes)}` : `?status=${encodeURIComponent(status)}`;
+      return request(`/projects/${projectId}/handover/responsibilities/${transferId}${q}`, {
+        method: "PATCH",
+      });
     },
     async getSignoffs(projectId: string, caseId: string): Promise<Array<{
       id: string;
-      role: string;
-      user_id: string;
-      signed_at?: string;
-      status: string;
+      case_id: string;
+      version_id: string;
+      signoff_type: string;
+      signer_user_id: string;
+      decision: string;
+      comments?: string;
+      signed_at: string;
     }>> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/signoffs`);
     },
-    async recordSignoff(projectId: string, caseId: string, data: { signoff_id: string; role: string; notes?: string }): Promise<Record<string, unknown>> {
-      return request(`/projects/${projectId}/handover/cases/${caseId}/signoff`, {
+    async submitSignoff(projectId: string, caseId: string, data: {
+      version_id: string;
+      signoff_type: string;
+      decision: string;
+      comments?: string;
+    }): Promise<any> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/signoffs`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async deliverPackage(projectId: string, caseId: string, data: {
+      version_id: string;
+      deliver_to_user_ids: string[];
+      delivery_method?: string;
+      message?: string;
+    }): Promise<any> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/deliver`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async acknowledgeDelivery(projectId: string, deliveryId: string, data: {
+      acknowledgement_statement: string;
+      clarification_notes?: string;
+      confidence_level?: string;
+    }): Promise<any> {
+      return request(`/projects/${projectId}/handover/deliveries/${deliveryId}/acknowledge`, {
         method: "POST",
         body: JSON.stringify(data),
       });

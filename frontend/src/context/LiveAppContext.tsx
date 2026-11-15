@@ -115,7 +115,13 @@ interface LiveAppContextType {
   handoverCases: HandoverCaseItem[];
   isLoadingHandovers: boolean;
   refreshHandovers: () => Promise<void>;
-  createHandoverCase: (data: { title: string; description?: string }) => Promise<Record<string, unknown>>;
+  createHandoverCase: (data: {
+    title: string;
+    description?: string;
+    departing_member_id?: string;
+    successor_id?: string;
+    metadata_json?: Record<string, unknown>;
+  }) => Promise<Record<string, unknown>>;
 
   // UI state & modals
   isAuthModalOpen: boolean;
@@ -775,9 +781,18 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
   }, [user?.id, activeProject?.id]);
 
-  const createHandoverCase = useCallback(async (data: { title: string; description?: string }) => {
+  const createHandoverCase = useCallback(async (data: {
+    title: string;
+    description?: string;
+    departing_member_id?: string;
+    successor_id?: string;
+    metadata_json?: Record<string, unknown>;
+  }) => {
     if (!activeProject) throw new Error("No active project");
-    const res = await api.handover.createCase(activeProject.id, data);
+    const res = await api.handover.createCase(activeProject.id, {
+      ...data,
+      departing_member_id: data.departing_member_id || user?.id || "",
+    });
     addToast({
       type: "success",
       title: "Handover Case Created",
@@ -785,7 +800,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     });
     await refreshHandovers();
     return res;
-  }, [activeProject, refreshHandovers, addToast]);
+  }, [activeProject, user?.id, refreshHandovers, addToast]);
 
 
   // Trigger data refreshes when active project changes

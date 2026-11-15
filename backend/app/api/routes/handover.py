@@ -77,6 +77,7 @@ from app.services.handover_eligibility import HandoverEligibilityService
 from app.services.handover_export import HandoverExportService
 from app.services.handover_narrative import HandoverNarrativeService
 from app.services.handover_ownership import OwnershipTransferService
+from app.services.handover_readiness import HandoverReadinessEngine
 from app.services.handover_signoff import HandoverSignoffService
 from app.services.llm import StructuredLLMClient
 from app.services.rbac import ProjectContext
@@ -214,6 +215,7 @@ def update_handover_case(
         user_id=project_ctx.user_id,
         request=request,
     )
+    session.commit()
     return HandoverCaseResponse.model_validate(updated)
 
 
@@ -379,6 +381,7 @@ def assess_package_readiness(
         user_id=project_ctx.user_id,
         notes=request.notes,
     )
+    session.commit()
     return summary
 
 
@@ -444,6 +447,7 @@ def generate_checklists(
         user_id=project_ctx.user_id,
         version_id=version_id,
     )
+    session.commit()
     return [
         HandoverChecklistResponse(
             id=c.id,
@@ -504,6 +508,7 @@ def update_checklist_item(
         user_id=project_ctx.user_id,
         request=request,
     )
+    session.commit()
     return HandoverChecklistItemResponse.model_validate(item)
 
 
@@ -533,6 +538,7 @@ def create_responsibility_transfers(
         user_id=project_ctx.user_id,
         request=request,
     )
+    session.commit()
     return [HandoverResponsibilityTransferResponse.model_validate(t) for t in created]
 
 
@@ -575,6 +581,7 @@ def update_responsibility_status(
         status=status_value,
         notes=notes,
     )
+    session.commit()
     return HandoverResponsibilityTransferResponse.model_validate(updated)
 
 
@@ -609,6 +616,7 @@ def submit_handover_signoff(
         request=request,
         is_org_admin=is_org_admin,
     )
+    session.commit()
     return HandoverSignoffResponse.model_validate(signoff)
 
 
@@ -650,6 +658,7 @@ def deliver_handover_package(
         user_id=project_ctx.user_id,
         request=request,
     )
+    session.commit()
     return [HandoverDeliveryResponse.model_validate(d) for d in deliveries]
 
 
@@ -676,6 +685,7 @@ def acknowledge_delivery(
         user_id=project_ctx.user_id,
         request=request,
     )
+    session.commit()
     return HandoverAcknowledgementResponse.model_validate(ack)
 
 
@@ -705,6 +715,7 @@ def transfer_project_ownership(
         user_id=project_ctx.user_id,
         request=request,
     )
+    session.commit()
     return HandoverOwnershipTransferResponse.model_validate(transfer)
 
 
@@ -729,6 +740,7 @@ def rollback_ownership_transfer(
         user_id=project_ctx.user_id,
         request=request,
     )
+    session.commit()
     return HandoverOwnershipTransferResponse.model_validate(rolled_back)
 
 
@@ -777,6 +789,7 @@ def edit_section_content(
         user_id=project_ctx.user_id,
         request=request,
     )
+    session.commit()
     return HandoverSectionResponse(
         id=updated.id,
         version_id=updated.version_id,

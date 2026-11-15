@@ -377,7 +377,11 @@ export interface HandoverCaseItem {
   updated_at: string;
   outgoing_owner_user_id?: string;
   incoming_owner_user_id?: string;
+  departing_member_id?: string;
+  successor_id?: string;
+  current_version_id?: string;
   readiness_score?: number;
+  latest_readiness_score?: number;
 }
 
 export interface HandoverReadinessData {

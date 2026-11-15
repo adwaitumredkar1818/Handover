@@ -72,6 +72,7 @@ def check_evidence_accessibility(
     project_id: uuid.UUID,
     viewer_user_id: uuid.UUID,
     has_project_manage: bool = False,
+    cached_policies: list[SourceAccessPolicy] | None = None,
 ) -> tuple[bool, list[uuid.UUID]]:
     """Determine if the viewer has delegated permissions to all cited evidence IDs.
 
@@ -80,13 +81,16 @@ def check_evidence_accessibility(
     if not evidence_ids:
         return True, []
 
-    policies = list(
-        session.execute(
-            select(SourceAccessPolicy).where(SourceAccessPolicy.project_id == project_id)
+    if cached_policies is not None:
+        policies = cached_policies
+    else:
+        policies = list(
+            session.execute(
+                select(SourceAccessPolicy).where(SourceAccessPolicy.project_id == project_id)
+            )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
     viewer_str = str(viewer_user_id)
     allowed_policy_ids: set[uuid.UUID] = set()
     revoked_policy_ids: set[uuid.UUID] = set()
@@ -137,6 +141,18 @@ class HandoverEligibilityService:
         self.case_repo = VerificationCaseRepository(session)
         self.issue_repo = VerificationIssueRepository(session)
         self.conflict_repo = VerificationConflictRepository(session)
+        self._policy_cache: dict[uuid.UUID, list[SourceAccessPolicy]] = {}
+
+    def _get_policies(self, project_id: uuid.UUID) -> list[SourceAccessPolicy]:
+        if project_id not in self._policy_cache:
+            self._policy_cache[project_id] = list(
+                self.session.execute(
+                    select(SourceAccessPolicy).where(SourceAccessPolicy.project_id == project_id)
+                )
+                .scalars()
+                .all()
+            )
+        return self._policy_cache[project_id]
 
     def check_knowledge_item_eligibility(
         self,
@@ -180,13 +196,25 @@ class HandoverEligibilityService:
                 "Knowledge item is marked stale due to source disconnection or newer updates."
             )
 
+        # Early return if basic gates fail before expensive DB lookups
+        if blockers:
+            return HandoverEligibilityResult(
+                is_eligible=False,
+                target_type=VerificationTargetType.KNOWLEDGE_ITEM,
+                target_id=item.id,
+                case_status="ineligible_initial_gates",
+                epistemic_status=str(item.epistemic_status),
+                blockers=blockers,
+                warnings=warnings,
+            )
+
         # 4. Verification Case status
         case = self.case_repo.get_by_target(
             item.project_id,
             VerificationTargetType.KNOWLEDGE_ITEM,
             item.id,
             active_only=True,
-            load_relationships=True,
+            load_relationships=False,
         )
         if case is None:
             blockers.append("No active verification case found for this knowledge item.")
@@ -232,6 +260,7 @@ class HandoverEligibilityService:
                 project_id=item.project_id,
                 viewer_user_id=viewer_user_id,
                 has_project_manage=has_project_manage,
+                cached_policies=self._get_policies(item.project_id),
             )
             if not accessible:
                 blockers.append(
@@ -276,12 +305,24 @@ class HandoverEligibilityService:
                 "It must be verified by a human reviewer."
             )
 
+        # Early return if unverified before expensive lookups
+        if blockers:
+            return HandoverEligibilityResult(
+                is_eligible=False,
+                target_type=VerificationTargetType.RELATIONSHIP,
+                target_id=rel.id,
+                case_status="unverified",
+                epistemic_status=str(rel.verification_status),
+                blockers=blockers,
+                warnings=warnings,
+            )
+
         case = self.case_repo.get_by_target(
             rel.project_id,
             VerificationTargetType.RELATIONSHIP,
             rel.id,
             active_only=True,
-            load_relationships=True,
+            load_relationships=False,
         )
         if case is None:
             blockers.append("No active verification case found for this relationship.")
@@ -306,6 +347,7 @@ class HandoverEligibilityService:
                 project_id=rel.project_id,
                 viewer_user_id=viewer_user_id,
                 has_project_manage=has_project_manage,
+                cached_policies=self._get_policies(rel.project_id),
             )
             if not accessible:
                 blockers.append(
