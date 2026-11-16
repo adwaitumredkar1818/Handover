@@ -1,7 +1,9 @@
 'use client'
 
-import React, { useState, useMemo, useContext, Suspense, type ReactNode } from 'react'
+import React, { useState, useMemo, useContext, useEffect, Suspense, type ReactNode } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { useLiveApp } from '../../context/LiveAppContext'
+import { api } from '../../lib/api'
 import {
   ScrollText as ScrollTextIcon,
   Bell,
@@ -79,246 +81,329 @@ import {
 import { SourceIcon } from '../figma-ui/brand'
 
 /* 31. Workspace team */
+interface TeamRow {
+  id: string
+  name: string
+  email: string
+  wsRole: 'Owner' | 'Admin' | 'Member'
+  status: 'Active' | 'Invited'
+  joinedAt?: string
+  invitationId?: string
+}
+
+function mapOrgRoleToLabel(roleName?: string): 'Owner' | 'Admin' | 'Member' {
+  if (roleName === 'org_owner') return 'Owner'
+  if (roleName === 'org_admin') return 'Admin'
+  return 'Member'
+}
+
 export function SettingsTeam() {
   const router = useRouter()
   const s = useFigmaStore()
-  const [list, setList] = useState<Person[]>(people)
+  const { activeOrg, refreshNotifications } = useLiveApp()
+  const [rows, setRows] = useState<TeamRow[]>([])
+  const [loadingTeam, setLoadingTeam] = useState(false)
   const [q, setQ] = useState('')
   const [roleF, setRoleF] = useState('all')
   const [invite, setInvite] = useState(false)
-  const [inv, setInv] = useState({ email: '', role: 'Member' as Person['wsRole'] })
-  const [remove, setRemove] = useState<Person | null>(null)
+  const [inv, setInv] = useState<{ email: string; role: 'Member' | 'Admin' }>({
+    email: '',
+    role: 'Member',
+  })
+  const [inviting, setInviting] = useState(false)
+  const [inviteError, setInviteError] = useState<string | null>(null)
+  const [remove, setRemove] = useState<TeamRow | null>(null)
 
-  const shown = list.filter(
+  const loadTeam = React.useCallback(async () => {
+    if (!activeOrg?.id) {
+      setRows([])
+      return
+    }
+    setLoadingTeam(true)
+    try {
+      const [membersRes, invitationsRes] = await Promise.allSettled([
+        api.organisations.listMembers(activeOrg.id),
+        api.organisations.listInvitations(activeOrg.id, { status: 'pending' }),
+      ])
+      const nextRows: TeamRow[] = []
+      if (membersRes.status === 'fulfilled') {
+        for (const m of membersRes.value) {
+          nextRows.push({
+            id: m.user_id || m.id,
+            name: m.full_name || m.email.split('@')[0] || 'Member',
+            email: m.email,
+            wsRole: mapOrgRoleToLabel(m.role_name),
+            status: 'Active',
+            joinedAt: m.joined_at,
+          })
+        }
+      }
+      if (invitationsRes.status === 'fulfilled') {
+        for (const item of invitationsRes.value.items) {
+          nextRows.push({
+            id: `inv-${item.id}`,
+            invitationId: item.id,
+            name:
+              item.email
+                .split('@')[0]
+                ?.replace('.', ' ')
+                .replace(/\b\w/g, (c) => c.toUpperCase()) || item.email,
+            email: item.email,
+            wsRole: mapOrgRoleToLabel(item.role_name),
+            status: 'Invited',
+            joinedAt: item.created_at,
+          })
+        }
+      }
+      setRows(nextRows)
+    } finally {
+      setLoadingTeam(false)
+    }
+  }, [activeOrg?.id])
+
+  useEffect(() => {
+    void loadTeam()
+  }, [loadTeam])
+
+  const shown = rows.filter(
     (p) =>
       (p.name + p.email).toLowerCase().includes(q.toLowerCase()) &&
       (roleF === 'all' || p.wsRole === roleF),
   )
 
-  const setRole = (id: string, r: Person['wsRole']) => {
-    setList(list.map((p) => (p.id === id ? { ...p, wsRole: r } : p)))
-    s.toast('Workspace role updated', `${personById(id)?.name ?? id} is now ${r}.`)
+  const handleSendInvite = async () => {
+    if (!activeOrg?.id) {
+      setInviteError('Please select or create an organisation workspace first.')
+      return
+    }
+    setInviting(true)
+    setInviteError(null)
+    try {
+      const res = await api.organisations.createInvitation(activeOrg.id, {
+        email: inv.email.trim(),
+        role_name: inv.role === 'Admin' ? 'org_admin' : 'org_member',
+      })
+      s.toast('Invitation sent', `Invited ${inv.email.trim()} to ${activeOrg.name}.`)
+      if (res.development_invitation_token) {
+        s.toast('Dev invite token ready', `/invitations/${res.development_invitation_token}`, 'info')
+      }
+      setInvite(false)
+      setInv({ email: '', role: 'Member' })
+      await loadTeam()
+      void refreshNotifications()
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to send invitation'
+      setInviteError(msg)
+    } finally {
+      setInviting(false)
+    }
   }
 
-  if (s.workspaceId !== 'northwind') {
-    return (
-      <>
-        <PageHeader title="Team Management" />
-        <Card>
-          <EmptyState
-            icon={Users}
-            title="Just you so far"
-            body="Invite teammates to collaborate on projects and handovers."
-            action={
-              <Button icon={UserPlus} onClick={() => setInvite(true)}>
+  const handleRevokeOrRemove = async () => {
+    if (!remove || !activeOrg?.id) return
+    if (remove.status === 'Invited' && remove.invitationId) {
+      try {
+        await api.organisations.revokeInvitation(activeOrg.id, remove.invitationId)
+        s.toast('Invitation revoked', remove.email, 'info')
+        await loadTeam()
+      } catch (err: unknown) {
+        s.toast('Failed to revoke invitation', err instanceof Error ? err.message : undefined, 'error')
+      }
+    }
+    setRemove(null)
+  }
+
+  const isJustYou = !loadingTeam && rows.length <= 1
+
+  return (
+    <>
+      {isJustYou ? (
+        <>
+          <PageHeader title="Team Management" />
+          <Card>
+            <EmptyState
+              icon={Users}
+              title="Just you so far"
+              body="Invite teammates to collaborate on projects and handovers."
+              action={
+                <Button
+                  icon={UserPlus}
+                  onClick={() => {
+                    setInviteError(null)
+                    setInvite(true)
+                  }}
+                >
+                  Invite members
+                </Button>
+              }
+            />
+          </Card>
+        </>
+      ) : (
+        <>
+          <PageHeader
+            title="Team Management"
+            subtitle="Workspace members and roles. Project roles are managed inside each project."
+            actions={
+              <Button
+                icon={UserPlus}
+                onClick={() => {
+                  setInviteError(null)
+                  setInvite(true)
+                }}
+              >
                 Invite members
               </Button>
             }
           />
-        </Card>
-      </>
-    )
-  }
-
-  return (
-    <>
-      <PageHeader
-        title="Team Management"
-        subtitle="Workspace members and roles. Project roles are managed inside each project."
-        actions={
-          <Button icon={UserPlus} onClick={() => setInvite(true)}>
-            Invite members
-          </Button>
-        }
-      />
-      <MetricBand
-        className="mb-5"
-        items={[
-          { label: 'Members', value: list.filter((p) => p.status === 'Active').length },
-          {
-            label: 'Pending invitations',
-            value: list.filter((p) => p.status === 'Invited').length,
-            tone: 'amber',
-          },
-          {
-            label: 'Admins & owners',
-            value: list.filter((p) => p.wsRole !== 'Member').length,
-            tone: 'indigo',
-          },
-          {
-            label: 'Seats available',
-            value: 50 - list.length,
-            tone: 'gray',
-            hint: 'Enterprise plan · 50 seats',
-          },
-        ]}
-      />
-      <Card className="overflow-hidden">
-        <div className="flex flex-col gap-2 border-b border-line p-3 sm:flex-row">
-          <SearchInput
-            placeholder="Search members"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            className="sm:w-72"
+          <MetricBand
+            className="mb-5"
+            items={[
+              { label: 'Members', value: rows.filter((p) => p.status === 'Active').length },
+              {
+                label: 'Pending invitations',
+                value: rows.filter((p) => p.status === 'Invited').length,
+                tone: 'amber',
+              },
+              {
+                label: 'Admins & owners',
+                value: rows.filter((p) => p.wsRole !== 'Member').length,
+                tone: 'indigo',
+              },
+              {
+                label: 'Workspace',
+                value: activeOrg?.name || 'Active',
+                tone: 'gray',
+              },
+            ]}
           />
-          <Select
-            value={roleF}
-            onChange={(e) => setRoleF(e.target.value)}
-            className="sm:w-40"
-          >
-            <option value="all">All roles</option>
-            <option>Owner</option>
-            <option>Admin</option>
-            <option>Member</option>
-          </Select>
-        </div>
-        <Table>
-          <thead>
-            <tr>
-              <Th>Member</Th>
-              <Th>Workspace role</Th>
-              <Th>Projects</Th>
-              <Th>Status</Th>
-              <Th>Last active</Th>
-              <Th className="w-10" />
-            </tr>
-          </thead>
-          <tbody>
-            {shown.map((p, i) => (
-              <tr key={p.id} className="hover:bg-slate-50/50">
-                <Td>
-                  <PersonCell id={p.id} sub={p.email} />
-                </Td>
-                <Td>
-                  {p.wsRole === 'Owner' ? (
-                    <Badge tone="navy">Owner</Badge>
-                  ) : (
-                    <Select
-                      value={p.wsRole}
-                      onChange={(e) => setRole(p.id, e.target.value as Person['wsRole'])}
-                      className="w-32"
-                    >
-                      <option>Admin</option>
-                      <option>Member</option>
-                    </Select>
-                  )}
-                </Td>
-                <Td className="text-[13px]">
-                  {s.members.filter((m) => m.personId === p.id).length}
-                </Td>
-                <Td>
-                  <Badge
-                    tone={
-                      p.status === 'Active'
-                        ? 'green'
-                        : p.status === 'Invited'
-                        ? 'amber'
-                        : 'red'
-                    }
-                    dot
-                  >
-                    {p.status}
-                  </Badge>
-                </Td>
-                <Td className="text-[13px] text-muted">
-                  {p.status === 'Invited'
-                    ? 'Invited Jun 16'
-                    : ['Now', '12 min ago', '1 h ago', 'Today', 'Yesterday'][i % 5]}
-                </Td>
-                <Td>
-                  {p.wsRole !== 'Owner' && (
-                    <Dropdown
-                      trigger={() => (
-                        <button
-                          className="rounded-lg p-1.5 text-muted hover:bg-slate-100"
-                          aria-label="Actions"
-                        >
-                          <MoreHorizontal className="size-4" />
-                        </button>
-                      )}
-                    >
-                      {(close) => (
-                        <>
-                          {p.status === 'Invited' && (
-                            <MenuItem
-                              icon={RefreshCw}
-                              onClick={() => {
-                                close()
-                                s.toast('Invitation resent', p.email)
-                              }}
-                            >
-                              Resend invitation
-                            </MenuItem>
+          <Card className="overflow-hidden">
+            <div className="flex flex-col gap-2 border-b border-line p-3 sm:flex-row">
+              <SearchInput
+                placeholder="Search members"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                className="sm:w-72"
+              />
+              <Select
+                value={roleF}
+                onChange={(e) => setRoleF(e.target.value)}
+                className="sm:w-40"
+              >
+                <option value="all">All roles</option>
+                <option>Owner</option>
+                <option>Admin</option>
+                <option>Member</option>
+              </Select>
+            </div>
+            <Table>
+              <thead>
+                <tr>
+                  <Th>Member</Th>
+                  <Th>Workspace role</Th>
+                  <Th>Status</Th>
+                  <Th>Joined / Invited</Th>
+                  <Th className="w-10" />
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((p) => (
+                  <tr key={p.id} className="hover:bg-slate-50/50">
+                    <Td>
+                      <div className="min-w-0">
+                        <p className="text-[13px] font-medium text-navy truncate">{p.name}</p>
+                        <p className="text-[11.5px] text-muted truncate">{p.email}</p>
+                      </div>
+                    </Td>
+                    <Td>
+                      <Badge tone={p.wsRole === 'Owner' ? 'navy' : p.wsRole === 'Admin' ? 'blue' : 'gray'}>
+                        {p.wsRole}
+                      </Badge>
+                    </Td>
+                    <Td>
+                      <StatusBadge status={p.status} />
+                    </Td>
+                    <Td className="text-xs text-muted">
+                      {p.joinedAt ? new Date(p.joinedAt).toLocaleDateString() : '—'}
+                    </Td>
+                    <Td>
+                      {p.wsRole !== 'Owner' && (
+                        <Dropdown
+                          trigger={() => (
+                            <button className="flex size-7 items-center justify-center rounded-lg text-muted hover:bg-slate-100">
+                              <MoreHorizontal className="size-4" />
+                            </button>
                           )}
-                          <MenuItem
-                            icon={FolderKanban}
-                            onClick={() => {
-                              close()
-                              router.push('/projects')
-                            }}
-                          >
-                            View projects
-                          </MenuItem>
-                          <MenuItem
-                            icon={Trash2}
-                            danger
-                            onClick={() => {
-                              close()
-                              setRemove(p)
-                            }}
-                          >
-                            {p.status === 'Invited'
-                              ? 'Revoke invitation'
-                              : 'Remove from workspace'}
-                          </MenuItem>
-                        </>
+                        >
+                          {(close) => (
+                            <>
+                              <MenuItem
+                                icon={FolderKanban}
+                                onClick={() => {
+                                  close()
+                                  router.push('/projects')
+                                }}
+                              >
+                                View projects
+                              </MenuItem>
+                              {p.status === 'Invited' && (
+                                <MenuItem
+                                  icon={Trash2}
+                                  danger
+                                  onClick={() => {
+                                    close()
+                                    setRemove(p)
+                                  }}
+                                >
+                                  Revoke invitation
+                                </MenuItem>
+                              )}
+                            </>
+                          )}
+                        </Dropdown>
                       )}
-                    </Dropdown>
-                  )}
-                </Td>
-              </tr>
-            ))}
-          </tbody>
-        </Table>
-      </Card>
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+          </Card>
+        </>
+      )}
       <Modal
         open={invite}
-        onClose={() => setInvite(false)}
+        onClose={() => {
+          setInvite(false)
+          setInviteError(null)
+        }}
         title="Invite to workspace"
         footer={
           <>
-            <Button variant="secondary" onClick={() => setInvite(false)}>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setInvite(false)
+                setInviteError(null)
+              }}
+            >
               Cancel
             </Button>
             <Button
               icon={Send}
-              disabled={!/^\S+@\S+\.\S+$/.test(inv.email)}
-              onClick={() => {
-                setList([
-                  ...list,
-                  {
-                    id: `inv-${Date.now()}`,
-                    name: (inv.email.split('@')[0] ?? '')
-                      .replace('.', ' ')
-                      .replace(/\b\w/g, (c) => c.toUpperCase()),
-                    title: 'Invited',
-                    email: inv.email,
-                    color: '#718096',
-                    wsRole: inv.role,
-                    status: 'Invited',
-                  },
-                ])
-                s.toast('Invitation sent', inv.email)
-                setInvite(false)
-                setInv({ email: '', role: 'Member' })
-              }}
+              disabled={inviting || !/^\S+@\S+\.\S+$/.test(inv.email)}
+              onClick={() => void handleSendInvite()}
             >
-              Send invitation
+              {inviting ? 'Sending...' : 'Send invitation'}
             </Button>
           </>
         }
       >
         <div className="space-y-4">
+          {inviteError && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-bad">
+              {inviteError}
+            </div>
+          )}
           <Field label="Email address">
             <Input
               value={inv.email}
@@ -349,20 +434,17 @@ export function SettingsTeam() {
         open={!!remove}
         onClose={() => setRemove(null)}
         tone="danger"
-        title="Remove member?"
-        confirmLabel="Remove"
+        title="Revoke invitation?"
+        confirmLabel="Revoke"
         body={
           remove && (
             <>
-              {remove.name} will lose access to all projects in Northwind Labs. Handovers
-              they authored stay available.
+              The pending invitation for <strong>{remove.email}</strong> will be revoked and the
+              invite link will no longer work.
             </>
           )
         }
-        onConfirm={() => {
-          setList(list.filter((p) => p.id !== remove!.id))
-          s.toast('Member removed', remove!.name, 'info')
-        }}
+        onConfirm={() => void handleRevokeOrRemove()}
       />
     </>
   )
@@ -381,19 +463,47 @@ const N_META: Record<
   project: { icon: FolderKanban, label: 'Project updates', tone: 'bg-slate-100 text-slate-600' },
 }
 
+function groupForDate(isoDate: string): 'Today' | 'Yesterday' | 'Earlier' {
+  const d = new Date(isoDate)
+  if (Number.isNaN(d.getTime())) return 'Earlier'
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const startOfYesterday = startOfToday - 86_400_000
+  const ts = d.getTime()
+  if (ts >= startOfToday) return 'Today'
+  if (ts >= startOfYesterday) return 'Yesterday'
+  return 'Earlier'
+}
+
+function formatNotifTime(isoDate: string): string {
+  const d = new Date(isoDate)
+  if (Number.isNaN(d.getTime())) return isoDate
+  return d.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 export function Notifications() {
   const router = useRouter()
-  const s = useFigmaStore()
+  const {
+    notifications,
+    unreadNotificationCount,
+    markNotificationRead,
+    markAllNotificationsRead,
+  } = useLiveApp()
   const [type, setType] = useState<'all' | Notification['type']>('all')
   const [unreadOnly, setUnreadOnly] = useState(false)
 
-  const list = s.notifications.filter(
-    (n) => (type === 'all' || n.type === type) && (!unreadOnly || !n.read),
+  const list = notifications.filter(
+    (n) => (type === 'all' || n.type === type) && (!unreadOnly || !n.is_read),
   )
   const groups = (['Today', 'Yesterday', 'Earlier'] as const)
-    .map((g) => ({ g, items: list.filter((n) => n.group === g) }))
+    .map((g) => ({ g, items: list.filter((n) => groupForDate(n.created_at) === g) }))
     .filter((x) => x.items.length)
-  const unread = s.notifications.filter((n) => !n.read).length
+  const unread = unreadNotificationCount
 
   return (
     <>
@@ -406,9 +516,7 @@ export function Notifications() {
               variant="secondary"
               icon={CheckCheck}
               disabled={!unread}
-              onClick={() =>
-                s.setNotifications((ns) => ns.map((n) => ({ ...n, read: true })))
-              }
+              onClick={() => void markAllNotificationsRead()}
             >
               Mark all as read
             </Button>
@@ -428,8 +536,8 @@ export function Notifications() {
               (t) => {
                 const n =
                   t === 'all'
-                    ? s.notifications.filter((x) => !x.read).length
-                    : s.notifications.filter((x) => x.type === t && !x.read).length
+                    ? notifications.filter((x) => !x.is_read).length
+                    : notifications.filter((x) => x.type === t && !x.is_read).length
                 const M = t === 'all' ? null : N_META[t]
                 return (
                   <button
@@ -474,13 +582,14 @@ export function Notifications() {
                 </p>
                 <ul className="divide-y divide-line">
                   {items.map((n) => {
-                    const M = N_META[n.type]
+                    const nType = (n.type || (n as any).notification_type || 'project') as keyof typeof N_META
+                    const M = N_META[nType] || N_META.project
                     return (
                       <li
                         key={n.id}
                         className={cn(
                           'group flex gap-3.5 px-5 py-4 transition hover:bg-slate-50',
-                          !n.read && 'bg-tint/30',
+                          !n.is_read && 'bg-tint/30',
                         )}
                       >
                         <span
@@ -494,19 +603,19 @@ export function Notifications() {
                         <button
                           className="min-w-0 flex-1 text-left"
                           onClick={() => {
-                            s.setNotifications((ns) =>
-                              ns.map((x) => (x.id === n.id ? { ...x, read: true } : x)),
-                            )
+                            if (!n.is_read) {
+                              void markNotificationRead(n.id, true)
+                            }
                             if (n.link) router.push(n.link)
                           }}
                         >
                           <p className="flex items-center gap-2 text-[13.5px] font-medium text-navy">
                             {n.title}
-                            {!n.read && <span className="size-2 rounded-full bg-brand" />}
+                            {!n.is_read && <span className="size-2 rounded-full bg-brand" />}
                           </p>
                           <p className="mt-0.5 text-[13px] text-muted">{n.body}</p>
                           <p className="mt-1 text-[11px] text-slate-400">
-                            {n.time} · {M.label}
+                            {formatNotifTime(n.created_at)} · {M.label}
                           </p>
                         </button>
                         <div className="flex shrink-0 flex-col items-end gap-2">
@@ -536,16 +645,10 @@ export function Notifications() {
                             </Button>
                           )}
                           <button
-                            onClick={() =>
-                              s.setNotifications((ns) =>
-                                ns.map((x) =>
-                                  x.id === n.id ? { ...x, read: !x.read } : x,
-                                ),
-                              )
-                            }
+                            onClick={() => void markNotificationRead(n.id, !n.is_read)}
                             className="text-[11px] font-medium text-muted opacity-0 transition group-hover:opacity-100 hover:text-brand"
                           >
-                            {n.read ? 'Mark unread' : 'Mark read'}
+                            {n.is_read ? 'Mark unread' : 'Mark read'}
                           </button>
                         </div>
                       </li>
@@ -1257,10 +1360,33 @@ export function Profile() {
   const [prefs, setPrefs] = useState({
     emailReview: true,
     emailPublished: true,
-    emailIngestion: false,
+    emailIngestion: true,
     digest: 'daily',
     density: 'comfortable',
   })
+  const [savingPrefs, setSavingPrefs] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    api.notifications
+      .getPreferences()
+      .then((res) => {
+        if (!active) return
+        setPrefs((prev) => ({
+          ...prev,
+          emailReview: res.review_requests,
+          emailPublished: res.approvals,
+          emailIngestion: res.ingestion_updates,
+          digest: res.email_digest_enabled ? 'daily' : 'off',
+        }))
+      })
+      .catch(() => {
+        // Ignore if unauthenticated
+      })
+    return () => {
+      active = false
+    }
+  }, [])
 
   const pwErr =
     pw.next && pw.next.length < 8
@@ -1549,8 +1675,27 @@ export function Profile() {
             </Select>
           </Row>
           <div className="flex justify-end py-4">
-            <Button icon={Check} onClick={() => s.toast('Preferences saved')}>
-              Save preferences
+            <Button
+              icon={Check}
+              disabled={savingPrefs}
+              onClick={async () => {
+                setSavingPrefs(true)
+                try {
+                  await api.notifications.updatePreferences({
+                    review_requests: prefs.emailReview,
+                    approvals: prefs.emailPublished,
+                    ingestion_updates: prefs.emailIngestion,
+                    email_digest_enabled: prefs.digest !== 'off',
+                  })
+                  s.toast('Preferences saved')
+                } catch {
+                  s.toast('Failed to save preferences', undefined, 'error')
+                } finally {
+                  setSavingPrefs(false)
+                }
+              }}
+            >
+              {savingPrefs ? 'Saving...' : 'Save preferences'}
             </Button>
           </div>
         </Card>

@@ -94,3 +94,8 @@ class NotificationItem(Base):
     organisation: Mapped[Organisation] = relationship(foreign_keys=[organisation_id])
     project: Mapped[Project | None] = relationship(foreign_keys=[project_id])
     user: Mapped[User | None] = relationship(foreign_keys=[user_id])
+
+
+# Backward compatibility aliases
+Notification = NotificationItem
+

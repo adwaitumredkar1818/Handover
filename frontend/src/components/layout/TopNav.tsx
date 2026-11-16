@@ -190,6 +190,7 @@ function NotificationsMenu() {
     overview,
     notifications,
     unreadNotificationsCount,
+    unreadNotificationCount,
     markNotificationRead,
     markAllNotificationsRead,
   } = useLiveApp();
@@ -198,8 +199,9 @@ function NotificationsMenu() {
     setMounted(true);
   }, []);
 
+  const activeUnread = unreadNotificationsCount ?? unreadNotificationCount ?? 0;
   const attentionItems = overview?.attention_items || [];
-  const totalCount = unreadNotificationsCount + attentionItems.length;
+  const totalCount = activeUnread + attentionItems.length;
 
   return (
     <Dropdown
@@ -217,16 +219,16 @@ function NotificationsMenu() {
           <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-line bg-slate-50/40">
             <div className="flex items-center gap-2">
               <p className="text-sm font-semibold text-navy">Notifications</p>
-              {unreadNotificationsCount > 0 && (
+              {activeUnread > 0 && (
                 <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10.5px] font-bold text-sky-700">
-                  {unreadNotificationsCount} unread
+                  {activeUnread} unread
                 </span>
               )}
             </div>
-            {unreadNotificationsCount > 0 && (
+            {activeUnread > 0 && (
               <button
                 type="button"
-                onClick={() => markAllNotificationsRead()}
+                onClick={() => void markAllNotificationsRead()}
                 className="text-[11px] font-medium text-brand hover:underline cursor-pointer"
               >
                 Mark all read
@@ -251,7 +253,10 @@ function NotificationsMenu() {
                       key={n.id}
                       onClick={() => {
                         if (isUnread) markNotificationRead(n.id);
-                        if (n.notification_type?.includes("sync") || n.notification_type?.includes("evidence")) {
+                        if ((n as any).link) {
+                          close();
+                          router.push((n as any).link);
+                        } else if (n.notification_type?.includes("sync") || n.notification_type?.includes("evidence")) {
                           close();
                           router.push("/evidence");
                         }
@@ -291,7 +296,6 @@ function NotificationsMenu() {
                     </div>
                   );
                 })}
-
                 {attentionItems.map((item) => (
                   <button
                     key={item.id}

@@ -672,8 +672,10 @@ export interface NotificationItem {
   project_id?: string | null;
   user_id?: string | null;
   notification_type: string;
+  type?: string;
   title: string;
   body: string;
+  link?: string | null;
   severity: "info" | "success" | "warning" | "error";
   is_read: boolean;
   read_at?: string | null;
@@ -731,4 +733,46 @@ export interface ContributionAttributionItem {
   responsibility_alignment?: "ALIGNED" | "PARTIALLY_ALIGNED" | "OUTSIDE_DECLARED_RESPONSIBILITY" | "UNCERTAIN" | "NOT_APPLICABLE" | string;
   alignment_explanation?: string;
   created_at: string;
+}
+
+export type NotificationType =
+  | "invitation"
+  | "review"
+  | "approval"
+  | "ingestion"
+  | "integration"
+  | "project";
+
+export interface AppNotification {
+  id: UUID;
+  user_id: UUID;
+  organisation_id?: UUID | null;
+  project_id?: UUID | null;
+  type: NotificationType;
+  title: string;
+  body: string;
+  link?: string | null;
+  is_read: boolean;
+  read_at?: string | null;
+  metadata_json?: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface NotificationListResponse {
+  items: AppNotification[];
+  total: number;
+  unread_count: number;
+}
+
+export interface NotificationPreferences {
+  user_id: UUID;
+  in_app_enabled: boolean;
+  email_digest_enabled: boolean;
+  invitations: boolean;
+  review_requests: boolean;
+  approvals: boolean;
+  ingestion_updates: boolean;
+  integration_alerts: boolean;
+  project_updates: boolean;
+  updated_at?: string | null;
 }

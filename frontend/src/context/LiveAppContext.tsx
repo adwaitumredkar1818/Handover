@@ -160,10 +160,11 @@ interface LiveAppContextType {
   // Persistent Notifications & Background Tasks
   notifications: NotificationItem[];
   unreadNotificationsCount: number;
+  unreadNotificationCount?: number;
   activeJobs: ActiveSyncJob[];
   refreshNotifications: () => Promise<void>;
   refreshActiveJobs: () => Promise<void>;
-  markNotificationRead: (id: string) => Promise<void>;
+  markNotificationRead: (id: string, isRead?: boolean) => Promise<void>;
   markAllNotificationsRead: () => Promise<void>;
 
   // Toasts
@@ -984,13 +985,17 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
   }, [user, activeProject, refreshEvidence, refreshSources, refreshOverview, refreshNotifications, addToast]);
 
-  const markNotificationRead = useCallback(async (id: string) => {
+  const markNotificationRead = useCallback(async (id: string, isRead: boolean = true) => {
     try {
-      await api.notifications.markRead(id);
+      await api.notifications.markRead(id, isRead);
       setNotifications((prev) =>
-        prev.map((n) => (n.id === id ? { ...n, is_read: true, read_at: new Date().toISOString() } : n))
+        prev.map((n) =>
+          n.id === id ? { ...n, is_read: isRead, read_at: isRead ? new Date().toISOString() : null } : n
+        )
       );
-      setUnreadNotificationsCount((prev) => Math.max(0, prev - 1));
+      setUnreadNotificationsCount((prev) =>
+        isRead ? Math.max(0, prev - 1) : prev + 1
+      );
     } catch (err: unknown) {
       console.error("Failed to mark notification read", err);
     }
@@ -1405,6 +1410,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     dismissToast,
     notifications,
     unreadNotificationsCount,
+    unreadNotificationCount: unreadNotificationsCount,
     activeJobs,
     refreshNotifications,
     refreshActiveJobs,

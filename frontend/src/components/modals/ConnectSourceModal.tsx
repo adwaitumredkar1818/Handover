@@ -563,34 +563,6 @@ export function ConnectSourceModal() {
           </button>
         </div>
 
-        {/* Navigation Tabs */}
-        <div className="flex border-b border-[#DCE3EB] px-6 bg-[#FAFCFF] gap-2 overflow-x-auto shrink-0">
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => {
-                setActiveTab(tab.id);
-                setStep("credentials");
-                setError(null);
-              }}
-              className={`py-2.5 px-3 text-xs font-medium border-b-2 transition-colors flex items-center gap-1.5 whitespace-nowrap ${
-                activeTab === tab.id
-                  ? "border-[#4774A9] text-[#25334B] font-bold"
-                  : "border-transparent text-[#69778D] hover:text-[#25334B]"
-              }`}
-            >
-              <SourceIcon type={tab.id as SourceType} size={16} />
-              <span>{tab.label}</span>
-              {tab.badge && (
-                <span className="text-[9px] px-1 py-0.2 bg-amber-50 text-amber-700 rounded border border-amber-200">
-                  {tab.badge}
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
-
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {/* Workspace Context & Target Project Info Bar */}

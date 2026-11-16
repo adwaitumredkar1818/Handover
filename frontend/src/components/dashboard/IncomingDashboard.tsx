@@ -32,6 +32,7 @@ export function IncomingDashboard() {
     activeProject,
     projects,
     overview,
+    notifications,
     members,
     user,
   } = useLiveApp();
@@ -255,24 +256,47 @@ export function IncomingDashboard() {
           </ul>
         </Panel>
 
-        <Panel title="Project notifications" actions={<ViewLink to="/audit">Audit</ViewLink>}>
+        <Panel title="Project notifications" actions={<ViewLink to="/notifications">View all</ViewLink>}>
           <ul className="px-3 pb-4 space-y-1">
-            {attentionItems.slice(0, 3).map((n) => (
+            {notifications.slice(0, 3).map((n) => (
               <li key={n.id}>
-                <div className="flex gap-2.5 rounded-lg px-2 py-2">
-                  <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-brand" />
+                <Link
+                  href={n.link || "/notifications"}
+                  className="flex gap-2.5 rounded-lg px-2 py-2 hover:bg-tint/50 transition-colors"
+                >
+                  <span
+                    className={`mt-1.5 size-1.5 shrink-0 rounded-full ${
+                      n.is_read ? "bg-slate-300" : "bg-brand"
+                    }`}
+                  />
                   <div className="min-w-0">
                     <span className="block truncate text-[13px] font-medium text-navy">
-                      {n.message}
+                      {n.title}
                     </span>
-                    <span className="block text-[11px] text-muted">
-                      Type: {n.type}
+                    <span className="block truncate text-[11px] text-muted">
+                      {n.body}
                     </span>
                   </div>
-                </div>
+                </Link>
               </li>
             ))}
-            {attentionItems.length === 0 && (
+            {notifications.length === 0 &&
+              attentionItems.slice(0, 3).map((n) => (
+                <li key={n.id}>
+                  <div className="flex gap-2.5 rounded-lg px-2 py-2">
+                    <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-brand" />
+                    <div className="min-w-0">
+                      <span className="block truncate text-[13px] font-medium text-navy">
+                        {n.message}
+                      </span>
+                      <span className="block text-[11px] text-muted">
+                        Type: {n.type}
+                      </span>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            {notifications.length === 0 && attentionItems.length === 0 && (
               <li className="text-xs text-muted py-4 text-center">
                 All clear. No notifications.
               </li>

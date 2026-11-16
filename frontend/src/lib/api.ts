@@ -416,6 +416,32 @@ export const api = {
       const res = await request<unknown>(`/organisations/${orgId}/members`);
       return unwrapList<OrganisationMember>(res);
     },
+    async listInvitations(
+      orgId: string,
+      params?: { status?: string; limit?: number; offset?: number }
+    ): Promise<InvitationListResponse> {
+      const qs = new URLSearchParams();
+      if (params?.status) qs.set("status", params.status);
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.offset) qs.set("offset", String(params.offset));
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request<InvitationListResponse>(`/organisations/${orgId}/invitations${suffix}`);
+    },
+    async createInvitation(
+      orgId: string,
+      data: { email: string; role_name: string; expires_in_hours?: number }
+    ): Promise<CreateInvitationResponse> {
+      return request<CreateInvitationResponse>(`/organisations/${orgId}/invitations`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async revokeInvitation(orgId: string, invitationId: string): Promise<InvitationSummary> {
+      return request<InvitationSummary>(
+        `/organisations/${orgId}/invitations/${invitationId}`,
+        { method: "DELETE" }
+      );
+    },
   },
 
   // Invitations
@@ -820,22 +846,58 @@ export const api = {
 
   // Persistent Notifications & Active Tasks
   notifications: {
-    async list(projectId?: string, unreadOnly = false): Promise<{ items: Array<{ id: string; organisation_id: string; project_id?: string; user_id?: string; notification_type: string; title: string; body: string; severity: "info" | "success" | "warning" | "error"; is_read: boolean; read_at?: string; metadata_json: Record<string, unknown>; created_at: string }>; unread_count: number; total: number }> {
+    async list(
+      paramsOrProjectId?:
+        | string
+        | {
+            type?: import("./types").NotificationType;
+            unread_only?: boolean;
+            project_id?: string;
+            limit?: number;
+            offset?: number;
+          },
+      unreadOnly = false
+    ): Promise<any> {
       const query = new URLSearchParams();
-      if (projectId) query.append("project_id", projectId);
-      if (unreadOnly) query.append("unread_only", "true");
+      if (typeof paramsOrProjectId === "string") {
+        if (paramsOrProjectId) query.append("project_id", paramsOrProjectId);
+        if (unreadOnly) query.append("unread_only", "true");
+      } else if (paramsOrProjectId) {
+        if (paramsOrProjectId.type) query.set("type", paramsOrProjectId.type);
+        if (paramsOrProjectId.unread_only) query.set("unread_only", "true");
+        if (paramsOrProjectId.project_id) query.set("project_id", paramsOrProjectId.project_id);
+        if (paramsOrProjectId.limit !== undefined) query.set("limit", String(paramsOrProjectId.limit));
+        if (paramsOrProjectId.offset !== undefined) query.set("offset", String(paramsOrProjectId.offset));
+      }
       const qs = query.toString() ? `?${query.toString()}` : "";
       return request(`/notifications${qs}`);
     },
-    async markRead(notificationId: string): Promise<unknown> {
-      return request(`/notifications/${notificationId}/read`, { method: "PATCH" });
+    async markRead(notificationId: string, isRead: boolean = true): Promise<unknown> {
+      return request(`/notifications/${notificationId}/read`, {
+        method: "PATCH",
+        body: JSON.stringify({ is_read: isRead }),
+      });
     },
-    async markAllRead(): Promise<{ marked_read: number }> {
-      return request(`/notifications/mark-all-read`, { method: "POST" });
+    async markAllRead(projectId?: string): Promise<{ marked_read?: number; updated_count?: number }> {
+      return request(`/notifications/mark-all-read`, {
+        method: "POST",
+        body: JSON.stringify(projectId ? { project_id: projectId } : {}),
+      });
     },
     async listActiveJobs(projectId: string): Promise<Array<{ id: string; project_id: string; job_type: string; status: string; stage?: string; progress_percent: number; attempt_count: number; message?: string; created_at: string; started_at?: string }>> {
       const res = await request<unknown>(`/projects/${projectId}/jobs/active`);
       return unwrapList(res);
+    },
+    async getPreferences(): Promise<import("./types").NotificationPreferences> {
+      return request("/notifications/preferences");
+    },
+    async updatePreferences(
+      data: Partial<Omit<import("./types").NotificationPreferences, "user_id" | "updated_at">>
+    ): Promise<import("./types").NotificationPreferences> {
+      return request("/notifications/preferences", {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
     },
   },
 
