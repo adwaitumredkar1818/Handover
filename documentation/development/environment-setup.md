@@ -440,13 +440,94 @@ npm run dev
 
 - **Frontend Secret Hygiene**: Keep all secrets strictly in backend environment variables (`.env`). Only `NEXT_PUBLIC_API_BASE_URL` is intended for public client API routing.
 
-### 7.3 Transactional Email Environment Variables (`Phase 4.3`)
+### 7.3 Transactional Email Environment Variables (`Phase 4.3` & `Milestone 2–5`)
 
-| Variable | Required | Default | Purpose |
-| :--- | :--- | :--- | :--- |
-| `EMAIL_DELIVERY_ENABLED` | Optional | `false` | Enables outbound transactional email dispatch (`false` preserves `not_configured` mode in local/test). Alias: `ENABLE_EMAIL_DELIVERY`. |
-| `EMAIL_PROVIDER` | Optional | `none` | Provider adapter (`none`, `mock`, `resend`). Alias: `MAIL_PROVIDER`. |
-| `RESEND_API_KEY` | When `EMAIL_PROVIDER=resend` | `""` | Server-only Resend API key (never exposed to frontend or logs). Alias: `RESEND_KEY`. |
-| `EMAIL_FROM_ADDRESS` | Optional | `onboarding@resend.dev` (Resend default) | Sender email address for verification and invitation emails. When using Resend without a custom verified domain, must use `onboarding@resend.dev` (the backend auto-falls back to this if `.local` is configured). **Note: Resend's free testing tier only delivers to the Resend account owner's email address.** To deliver to any address, configure and verify a custom domain in Resend and set `EMAIL_FROM_ADDRESS=noreply@yourdomain.com`. Aliases: `EMAIL_FROM`, `FROM_EMAIL`. |
-| `EMAIL_FROM_NAME` | Optional | `The Handover` | Sender display name. Aliases: `EMAIL_NAME`, `FROM_NAME`. |
-| `FRONTEND_BASE_URL` | Required in production email mode | `http://localhost:3000` | Base URL for `/verify-email?token=...` and `/invitations/<token>` links (must use `https://` when `APP_ENV=production` and `EMAIL_DELIVERY_ENABLED=true`). Aliases: `FRONTEND_URL`, `APP_URL`. |
+The platform supports four transactional email provider modes (`EMAIL_PROVIDER`):
+1. `none`: Delivery disabled (default). In dev/test environments, verification tokens and invitation tokens are honestly returned in API responses so workflows can be executed without live mail delivery.
+2. `mock`: In-memory recorded delivery for automated headless tests (`backend/tests/`).
+3. `gmail_smtp`: **Recommended for active development and staging**. Sends live emails via Google's SMTP relay (`smtp.gmail.com:587`) with STARTTLS and 16-character Google App Passwords. Requires zero domain DNS verification and sends directly to any recipient address.
+4. `resend`: **Recommended for production**. Dispatches emails via Resend's transactional REST API. Requires a valid `RESEND_API_KEY` and a verified custom domain for unconstrained recipient delivery.
+
+| Variable | Required | Default | Validation Aliases | Purpose & Constraints |
+| :--- | :--- | :--- | :--- | :--- |
+| `EMAIL_DELIVERY_ENABLED` | Optional | `false` | `enable_email_delivery` | Master switch for outbound transactional email delivery (`false` preserves `not_configured` mode in local/test). Set to `true` to dispatch real emails. |
+| `EMAIL_PROVIDER` | Optional | `none` | `mail_provider` | Active email provider adapter: `none`, `mock`, `resend`, `gmail_smtp`. |
+| `SMTP_HOST` | When `gmail_smtp` | `smtp.gmail.com` | `gmail_smtp_host` | SMTP server hostname for Gmail provider. Must be resolvable. |
+| `SMTP_PORT` | When `gmail_smtp` | `587` | `gmail_smtp_port` | SMTP server submission port. Port `587` is standard for STARTTLS submission. |
+| `SMTP_USERNAME` | When `gmail_smtp` | `None` | `smtp_user`, `gmail_smtp_user`, `gmail_user` | Full Gmail address (e.g., `developer@gmail.com`). |
+| `SMTP_APP_PASSWORD` | When `gmail_smtp` | `None` | `smtp_password`, `gmail_app_password` | 16-character Google App Password (secret, never logged or exposed). |
+| `SMTP_USE_TLS` | When `gmail_smtp` | `true` | `smtp_tls`, `gmail_smtp_tls` | Upgrades cleartext socket connection to TLS via STARTTLS handshake (`true`). |
+| `SMTP_TIMEOUT_SECONDS` | When `gmail_smtp` | `10.0` | `gmail_smtp_timeout_seconds` | Socket connection and read timeout in seconds (float between 0.5 and 60.0). |
+| `RESEND_API_KEY` | When `resend` | `None` | `resend_key` | Server-only Resend API key (never exposed to frontend or logs). |
+| `EMAIL_FROM_ADDRESS` | Optional | `noreply@handover.local` | `email_from`, `mail_from`, `from_email`, `from_address` | Outbound sender address. When `EMAIL_PROVIDER=gmail_smtp`, the backend **auto-aligns** this with `SMTP_USERNAME` if left as default/local. When using Resend test sandbox, defaults to `onboarding@resend.dev`. In production, set to your verified custom domain (e.g., `noreply@yourdomain.com`). |
+| `EMAIL_FROM_NAME` | Optional | `The Handover` | `email_name`, `from_name` | Outbound sender display name appearing in recipient email clients. |
+| `FRONTEND_BASE_URL` | Required when delivery enabled | `http://localhost:3000` | `frontend_url`, `app_url` | Base URL used to construct verification and invitation links (`/verify-email?token=...`, `/invitations/{token}`). **Must start with `https://` in production.** |
+
+---
+
+### 7.4 Gmail SMTP Setup Guide (Active Development & Staging)
+
+Gmail SMTP enables developers to test complete email verification, team invitations, and password reset flows with real inboxes without purchasing a domain or configuring DNS TXT/CNAME records.
+
+#### Step 1: Enable 2-Step Verification on Google Account
+Google requires 2-Step Verification to generate dedicated application credentials:
+1. Navigate to your [Google Account Security Settings](https://myaccount.google.com/security).
+2. Under "How you sign in to Google", select **2-Step Verification**.
+3. Follow the Google prompts to activate 2-Step Verification using an authenticator app, security key, or phone prompt.
+
+#### Step 2: Generate a 16-Character Google App Password
+1. Visit the [Google App Passwords Portal](https://myaccount.google.com/apppasswords).
+2. Enter an app name in the input field, such as `The Handover Dev`.
+3. Click **Create**.
+4. Google will display a 16-character password in a yellow box (e.g., `abcd efgh ijkl mnop`).
+5. Copy the 16 characters. You can enter them into your `.env` either with or without spaces (the backend normalizes whitespace automatically).
+
+> ⚠️ **CRITICAL WARNING**: Never use your personal Google account password! Google disables "Less Secure Apps" access on all modern accounts. Standard account passwords will fail immediately with SMTP authentication error `535 5.7.8 Username and Password not accepted`.
+
+#### Step 3: Configure Local `.env`
+Update your root `.env` file:
+```ini
+EMAIL_DELIVERY_ENABLED=true
+EMAIL_PROVIDER=gmail_smtp
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your-account@gmail.com
+SMTP_APP_PASSWORD=abcdefghijklmnop
+SMTP_USE_TLS=true
+SMTP_TIMEOUT_SECONDS=10.0
+EMAIL_FROM_ADDRESS=your-account@gmail.com
+EMAIL_FROM_NAME="The Handover"
+FRONTEND_BASE_URL=http://localhost:3000
+```
+
+#### Step 4: Sender Address Auto-Alignment
+Gmail requires that the SMTP envelope sender matches the authenticated user. If `EMAIL_FROM_ADDRESS` is left as `noreply@handover.local`, `onboarding@resend.dev`, or any `.local`/`.invalid` address, the platform backend **automatically replaces** it with `SMTP_USERNAME`. This prevents Gmail from rejecting the message or tagging it as an unauthorized spoofed envelope.
+
+---
+
+### 7.5 SMTP & Email Delivery Troubleshooting Guide
+
+| Issue / Error Code | Root Cause | Resolution |
+| :--- | :--- | :--- |
+| **Code 535: Authentication Failed** (`SMTPAuthenticationError`) | 1. 2-Step Verification is not enabled on the Google Account.<br>2. Standard Google account password was provided instead of a 16-char App Password.<br>3. Typo in App Password or username. | 1. Verify 2-Step Verification is active.<br>2. Generate a fresh 16-char App Password at `myaccount.google.com/apppasswords`.<br>3. Verify `SMTP_USERNAME` matches the exact Google email address.<br>4. Ensure no hidden trailing whitespace in `.env`. |
+| **Connection Timeout** (`EmailConnectionTimeoutError` / `socket.timeout`) | 1. Outbound port 587 blocked by local ISP or corporate firewall.<br>2. Antivirus blocking outbound SMTP connections.<br>3. Network latency exceeding `SMTP_TIMEOUT_SECONDS`. | 1. Check if `Test-NetConnection -ComputerName smtp.gmail.com -Port 587` succeeds.<br>2. Increase `SMTP_TIMEOUT_SECONDS=20.0`.<br>3. If port 587 is blocked by network policy, test from another network or use `EMAIL_PROVIDER=mock`. |
+| **Recipient Refused 550 / 553** (`SMTPRecipientsRefused`) | 1. Recipient email address does not exist.<br>2. Domain MX records invalid.<br>3. Gmail detected recipient address as spam or policy violation. | 1. Verify recipient email syntax and mailbox validity.<br>2. Inspect API response error message (sanitized domain is logged without leaking full user addresses). |
+| **Sender Address Mismatch / Refused** (`SMTPSenderRefused`) | The `From` header does not match the authenticated Google account or an authorized alias in Gmail settings. | Let `EMAIL_FROM_ADDRESS` auto-align with `SMTP_USERNAME`, or configure the target email as an authorized "Send mail as" alias in your Gmail Account Settings. |
+| **TLS Negotiation Failure** (`SSLError`) | SSL/TLS handshake failed during STARTTLS negotiation. Commonly caused by corporate TLS-intercepting proxies or outdated SSL root certificates. | Ensure your Python environment has updated certificates (`certifi`). If behind a corporate proxy, configure system trust store. |
+| **Google Daily Sending Limits (Quota 550)** | Free personal Gmail accounts have a sending limit of ~500 emails/day (~2,000 for Google Workspace). | For active testing, this limit is more than sufficient. Do not use personal Gmail SMTP for automated load testing, mass invites, or production. |
+
+---
+
+### 7.6 Architectural Guidance: Development vs. Production Delivery
+
+The platform intentionally separates development email delivery from production email architecture:
+
+1. **Development & Staging (`gmail_smtp`)**:
+   - **Target**: Local developer machines, CI integration environments, staging servers.
+   - **Strengths**: Zero DNS configuration, zero domain purchase requirement, instant setup with existing Google account, real email delivery to external tester inboxes.
+   - **Constraints**: Personal accounts limited to ~500 messages/24h rolling window; single SMTP connection stream; synchronous socket I/O offloaded to bounded internal `ThreadPoolExecutor(max_workers=4)`.
+
+2. **Production (`resend` / Enterprise SMTP Relay)**:
+   - **Target**: Cloud production web services (e.g. Render, AWS, Kubernetes).
+   - **Strengths**: High-throughput REST API dispatch, verified custom domains with DKIM (`CNAME`), SPF (`TXT`), and DMARC policies, webhook tracking for delivery/bounces/complaints, unlimited horizontal scaling without thread contention.
+   - **Security Rules**: Production requires `APP_ENV=production`, `FRONTEND_BASE_URL` starting with `https://`, and `EMAIL_DELIVERY_ENABLED=true` with a verified custom domain `EMAIL_FROM_ADDRESS`.

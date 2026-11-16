@@ -219,3 +219,54 @@ def render_organisation_invitation(
         f"Expires in {expires_in_hours} hours.\n"
     )
     return RenderedEmailTemplate(subject=subject, html_body=html_body, text_body=text_body)
+
+
+def render_password_reset(
+    *,
+    reset_url: str,
+    recipient_name: str,
+    expires_in_minutes: int = 30,
+) -> RenderedEmailTemplate:
+    """Render password reset email with secure reset link, expiration, and security notices."""
+    subject = "Reset your Handover password"
+    safe_name = html.escape(recipient_name or "there")
+    safe_url = html.escape(reset_url, quote=True)
+
+    body_html = f"""
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.6;">Hello {safe_name},</p>
+      <p style="margin:0 0 20px;font-size:15px;line-height:1.6;">
+        We received a request to reset the password for your account on <strong>The Handover</strong>. Click the button below to choose a new password.
+      </p>
+      <table role="presentation" cellspacing="0" cellpadding="0" style="margin:24px 0;">
+        <tr>
+          <td style="border-radius:8px;background-color:#245C4F;">
+            <a href="{safe_url}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:13px 26px;font-size:15px;font-weight:600;color:#FFFFFF;text-decoration:none;">
+              Reset Password
+            </a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px;font-size:13px;line-height:1.6;color:#4B5B55;">
+        <strong>Expiration notice:</strong> This password reset link expires in {expires_in_minutes} minutes. If it expires, you can request another reset link from the sign-in page.
+      </p>
+      <p style="margin:0 0 16px;font-size:13px;line-height:1.6;color:#4B5B55;">
+        <strong>Security notice:</strong> If you did not request a password reset, you can safely ignore this email. Your password will remain unchanged and your account is secure.
+      </p>
+      <p style="margin:20px 0 6px;font-size:12px;color:#5A6B65;">If the button above does not work, copy and paste this link into your browser:</p>
+      <p style="margin:0;font-size:12px;line-height:1.5;word-break:break-all;color:#1E5288;">{safe_url}</p>
+    """
+    html_body = _wrap_html_layout(
+        preheader="Reset your Handover workspace password.",
+        heading="Reset Your Password",
+        body_html=body_html,
+    )
+    text_body = (
+        f"Hello {recipient_name or 'there'},\n\n"
+        "We received a request to reset the password for your account on The Handover.\n\n"
+        f"Reset your password: {reset_url}\n\n"
+        f"Expiration notice: This password reset link expires in {expires_in_minutes} minutes.\n"
+        "Security notice: If you did not request a password reset, you can safely ignore this email. "
+        "Your password will remain unchanged.\n"
+    )
+    return RenderedEmailTemplate(subject=subject, html_body=html_body, text_body=text_body)
+

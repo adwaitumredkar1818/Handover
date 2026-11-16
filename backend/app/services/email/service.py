@@ -9,12 +9,14 @@ from app.core.config import Settings
 from app.services.email.base import EmailDeliveryResult, EmailMessage, EmailProviderProtocol
 from app.services.email.providers import (
     DisabledEmailProvider,
+    GmailSMTPEmailProvider,
     MockEmailProvider,
     ResendEmailProvider,
 )
 from app.services.email.templates import (
     render_email_verification,
     render_organisation_invitation,
+    render_password_reset,
     render_project_invitation,
 )
 
@@ -48,6 +50,22 @@ def build_email_provider(settings: Settings) -> EmailProviderProtocol:
             from_address=email_cfg.from_address,
             from_name=email_cfg.from_name,
             timeout_seconds=email_cfg.http_timeout_seconds,
+        )
+    if email_cfg.provider == "gmail_smtp":
+        app_password = (
+            email_cfg.smtp_app_password.get_secret_value()
+            if email_cfg.smtp_app_password is not None
+            else None
+        )
+        return GmailSMTPEmailProvider(
+            host=email_cfg.smtp_host,
+            port=email_cfg.smtp_port,
+            username=email_cfg.smtp_username,
+            app_password=app_password,
+            use_tls=email_cfg.smtp_use_tls,
+            from_address=email_cfg.from_address,
+            from_name=email_cfg.from_name,
+            timeout_seconds=email_cfg.smtp_timeout_seconds,
         )
     return DisabledEmailProvider()
 
@@ -123,6 +141,53 @@ class TransactionalEmailService:
         )
         if result.status == "failed":
             logger.warning("Verification email delivery failed: %s", result.error_message)
+        return result
+
+    def send_password_reset_email(
+        self,
+        *,
+        to_email: str,
+        recipient_name: str,
+        raw_token: str,
+        expires_in_minutes: int = 30,
+    ) -> EmailDeliveryResult:
+        """Render and send password reset link without ever logging the raw token."""
+        if not self._settings.email.delivery_enabled:
+            return EmailDeliveryResult(status="not_configured", provider="none")
+
+        base_url = self._validated_frontend_base_url()
+        if base_url is None:
+            return EmailDeliveryResult(
+                status="failed",
+                provider=self._provider.provider_name,
+                error_message="Frontend base URL configuration is invalid.",
+            )
+
+        query = urlencode({"token": raw_token})
+        reset_url = f"{base_url}/reset-password?{query}"
+        rendered = render_password_reset(
+            reset_url=reset_url,
+            recipient_name=recipient_name,
+            expires_in_minutes=expires_in_minutes,
+        )
+        result = self._provider.send(
+            EmailMessage(
+                to_email=to_email,
+                subject=rendered.subject,
+                html_body=rendered.html_body,
+                text_body=rendered.text_body,
+                tags={"category": "password_reset"},
+            )
+        )
+        recipient_domain = to_email.split("@")[-1] if "@" in to_email else "unknown"
+        logger.info(
+            "Password reset email dispatch completed: provider=%s status=%s recipient_domain=@%s",
+            result.provider,
+            result.status,
+            recipient_domain,
+        )
+        if result.status == "failed":
+            logger.warning("Password reset email delivery failed: %s", result.error_message)
         return result
 
     def send_project_invitation_email(

@@ -217,6 +217,38 @@ class AuthService:
             "Email verification delivery is not yet configured in this environment.",
         )
 
+    def _dispatch_password_reset_email(
+        self, *, user: User, raw_token: str
+    ) -> tuple[EmailDeliveryStatus, str]:
+        """Dispatch password reset message and return (delivery_status, user_message)."""
+        result = self._email_service.send_password_reset_email(
+            to_email=user.email,
+            recipient_name=user.full_name,
+            raw_token=raw_token,
+            expires_in_minutes=30,
+        )
+        if result.status == "submitted":
+            return (
+                "submitted",
+                "Password reset email dispatched successfully.",
+            )
+        if result.status == "failed":
+            log_security_event(
+                event_type="auth.password_reset_delivery_failed",
+                outcome="failed",
+                actor_user_id=str(user.id),
+                message=f"Password reset email delivery failed via provider '{result.provider}'.",
+            )
+            err_detail = f": {result.error_message}" if result.error_message else "."
+            return (
+                "failed",
+                f"Password reset email delivery failed{err_detail}",
+            )
+        return (
+            "not_configured",
+            "Password reset email delivery is not configured in this environment.",
+        )
+
     def _create_user_record_uncommitted(
         self,
         *,
@@ -1089,12 +1121,19 @@ class AuthService:
             message=f"Issued password reset token for user '{user.id}'.",
         )
 
+        # Dispatch transactional password reset email
+        delivery_status, _ = self._dispatch_password_reset_email(
+            user=user,
+            raw_token=raw_reset_token,
+        )
+
         # In development/local environments (APP_ENV!=production), expose the reset_token
         # so developers and automated tests can complete the reset flow without an SMTP relay.
         is_dev = self._settings.app_env.lower() in ("development", "test", "testing", "local")
         return ForgotPasswordResponse(
             message=generic_message,
             reset_token=raw_reset_token if is_dev else None,
+            email_delivery=delivery_status,
         )
 
     def reset_password(
@@ -1162,6 +1201,11 @@ class AuthService:
 
         # Mark token as used
         self._reset_token_repo.mark_used(token_record, now)
+
+        # If user was unverified, resetting password via token received at email proves ownership
+        if not user.is_email_verified:
+            user.is_email_verified = True
+            user.email_verified_at = now
 
         # Update password hash with Argon2id
         new_password_digest = hash_password(payload.new_password)

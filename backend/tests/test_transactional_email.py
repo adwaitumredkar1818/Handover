@@ -22,6 +22,7 @@ from app.services.email import (
     ResendEmailProvider,
     TransactionalEmailService,
 )
+from app.services.email.templates import render_password_reset
 from tests.conftest import isolated_auth_app
 
 _TRUSTED_ORIGIN = "http://localhost:3000"
@@ -483,4 +484,79 @@ def test_resend_defaults_sender_to_onboarding_domain_when_local() -> None:
         email_from_address="notifications@mycompany.com",
     )
     assert settings_custom.email.from_address == "notifications@mycompany.com"
+
+
+def test_render_password_reset_template() -> None:
+    """Verify render_password_reset contains branding, secure reset URL, expiration, and security notices."""
+    reset_url = "http://localhost:3000/reset-password?token=secret123"
+    rendered = render_password_reset(
+        reset_url=reset_url,
+        recipient_name="Dana Scully",
+        expires_in_minutes=30,
+    )
+    assert rendered.subject == "Reset your Handover password"
+    # Branding colors
+    assert "#1E3F35" in rendered.html_body
+    assert "#2E6F5E" in rendered.html_body
+    assert "#A7D7C5" in rendered.html_body
+    assert "#245C4F" in rendered.html_body
+    # Content and links
+    assert "Reset Your Password" in rendered.html_body
+    assert "Reset Password" in rendered.html_body
+    assert "Dana Scully" in rendered.html_body
+    assert reset_url in rendered.html_body
+    assert "30 minutes" in rendered.html_body
+    assert "Security notice" in rendered.html_body
+    assert "If you did not request a password reset" in rendered.html_body
+    # Plain text alternative
+    assert reset_url in rendered.text_body
+    assert "30 minutes" in rendered.text_body
+    assert "Dana Scully" in rendered.text_body
+    assert "If you did not request a password reset" in rendered.text_body
+
+
+def test_transactional_email_service_send_password_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify TransactionalEmailService.send_password_reset_email dispatches correctly."""
+    mock_provider = MockEmailProvider()
+    settings = Settings(
+        database_url="postgresql+psycopg://postgres:postgres@localhost:5432/handover",
+        jwt_secret_key="x" * 64,
+        token_encryption_key="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        email_delivery_enabled=True,
+        email_provider="mock",
+        frontend_base_url="http://localhost:3000",
+    )
+    svc = TransactionalEmailService(settings=settings, provider=mock_provider)
+
+    res = svc.send_password_reset_email(
+        to_email="test.recipient@example.com",
+        recipient_name="Test Recipient",
+        raw_token="raw_reset_token_xyz_987",
+        expires_in_minutes=30,
+    )
+    assert res.status == "submitted"
+    assert res.provider == "mock"
+    assert len(mock_provider.sent_messages) == 1
+    sent = mock_provider.sent_messages[0]
+    assert sent.to_email == "test.recipient@example.com"
+    assert sent.tags.get("category") == "password_reset"
+    assert "http://localhost:3000/reset-password?token=raw_reset_token_xyz_987" in sent.text_body
+
+    # Test delivery disabled
+    disabled_settings = Settings(
+        database_url="postgresql+psycopg://postgres:postgres@localhost:5432/handover",
+        jwt_secret_key="x" * 64,
+        token_encryption_key="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        email_delivery_enabled=False,
+    )
+    disabled_svc = TransactionalEmailService(settings=disabled_settings)
+    res_disabled = disabled_svc.send_password_reset_email(
+        to_email="test.recipient@example.com",
+        recipient_name="Test Recipient",
+        raw_token="raw_reset_token_xyz_987",
+    )
+    assert res_disabled.status == "not_configured"
+
 

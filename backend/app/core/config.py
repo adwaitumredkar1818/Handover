@@ -546,11 +546,17 @@ class IntegrationsSettings(BaseModel):
 
 
 class EmailSettings(BaseModel):
-    """Transactional email delivery settings (Resend / Mock / Disabled)."""
+    """Transactional email delivery settings (Gmail SMTP / Resend / Mock / Disabled)."""
 
     delivery_enabled: bool = False
-    provider: Literal["none", "mock", "resend"] = "none"
+    provider: Literal["none", "mock", "resend", "gmail_smtp"] = "none"
     resend_api_key: SecretStr | None = None
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str | None = None
+    smtp_app_password: SecretStr | None = None
+    smtp_use_tls: bool = True
+    smtp_timeout_seconds: float = Field(default=10.0, gt=0.5, le=60.0)
     from_address: str = "noreply@handover.local"
     from_name: str = "The Handover"
     frontend_base_url: str = "http://localhost:3000"
@@ -700,7 +706,7 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("email_delivery_enabled", "enable_email_delivery"),
     )
-    email_provider: Literal["none", "mock", "resend"] = Field(
+    email_provider: Literal["none", "mock", "resend", "gmail_smtp"] = Field(
         default="none",
         validation_alias=AliasChoices("email_provider", "mail_provider"),
     )
@@ -708,10 +714,39 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("resend_api_key", "resend_key"),
     )
+    smtp_host: str = Field(
+        default="smtp.gmail.com",
+        min_length=1,
+        validation_alias=AliasChoices("smtp_host", "gmail_smtp_host"),
+    )
+    smtp_port: int = Field(
+        default=587,
+        ge=1,
+        le=65535,
+        validation_alias=AliasChoices("smtp_port", "gmail_smtp_port"),
+    )
+    smtp_username: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("smtp_username", "smtp_user", "gmail_smtp_user", "gmail_user"),
+    )
+    smtp_app_password: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("smtp_app_password", "smtp_password", "gmail_app_password"),
+    )
+    smtp_use_tls: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("smtp_use_tls", "smtp_tls", "gmail_smtp_tls"),
+    )
+    smtp_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.5,
+        le=60.0,
+        validation_alias=AliasChoices("smtp_timeout_seconds", "gmail_smtp_timeout_seconds"),
+    )
     email_from_address: str = Field(
         default="noreply@handover.local",
         min_length=3,
-        validation_alias=AliasChoices("email_from_address", "email_from", "mail_from", "from_email"),
+        validation_alias=AliasChoices("email_from_address", "email_from", "mail_from", "from_email", "from_address"),
     )
     email_from_name: str = Field(
         default="The Handover",
@@ -1136,11 +1171,24 @@ class Settings(BaseSettings):
             or from_addr.endswith(".invalid")
         ):
             from_addr = "onboarding@resend.dev"
+        elif self.email_provider == "gmail_smtp" and (
+            from_addr in ("noreply@handover.local", "onboarding@resend.dev")
+            or from_addr.endswith(".local")
+            or from_addr.endswith(".invalid")
+        ):
+            if self.smtp_username and self.smtp_username.strip():
+                from_addr = self.smtp_username.strip()
 
         return EmailSettings(
             delivery_enabled=self.email_delivery_enabled,
             provider=self.email_provider,
             resend_api_key=self.resend_api_key,
+            smtp_host=self.smtp_host.strip(),
+            smtp_port=self.smtp_port,
+            smtp_username=self.smtp_username.strip() if self.smtp_username else None,
+            smtp_app_password=self.smtp_app_password,
+            smtp_use_tls=self.smtp_use_tls,
+            smtp_timeout_seconds=self.smtp_timeout_seconds,
             from_address=from_addr,
             from_name=self.email_from_name.strip(),
             frontend_base_url=clean_frontend_url,
