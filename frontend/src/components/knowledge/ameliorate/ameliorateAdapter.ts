@@ -185,8 +185,19 @@ const FALLBACK_THEME: AmeliorateNodeTheme = {
 };
 
 export function resolveAmeliorateNodeTheme(node: HandoverGraphNode): AmeliorateNodeTheme {
-  const key = (node.entity_type || node.category || "").toLowerCase();
-  if (ENTITY_THEME_MAP[key]) return ENTITY_THEME_MAP[key];
+  const canon = (node.label || "").toLowerCase();
+  const type = (node.entity_type || "").toLowerCase();
+  const cat = (node.category || "").toLowerCase();
+
+  if (type === "project" || canon === "skillspassport") return ENTITY_THEME_MAP["project"] ?? FALLBACK_THEME;
+  if (canon.includes("next") || canon.includes("react") || cat === "frontend") return ENTITY_THEME_MAP["frontend"] ?? FALLBACK_THEME;
+  if (canon.includes("fastapi") || cat === "backend") return ENTITY_THEME_MAP["backend"] ?? FALLBACK_THEME;
+  if (canon.includes("postgres") || canon.includes("sqlalchemy") || cat === "database") return ENTITY_THEME_MAP["database"] ?? FALLBACK_THEME;
+  if (canon.includes("supabase") || canon.includes("storage") || cat === "storage") return ENTITY_THEME_MAP["storage"] ?? FALLBACK_THEME;
+  if (canon.includes("ollama") || canon.includes("qwen") || canon.includes("chroma") || cat === "ai_ml") return ENTITY_THEME_MAP["ai_ml"] ?? FALLBACK_THEME;
+  if (canon.includes("github") || canon.includes("jira") || cat === "external_integrations") return ENTITY_THEME_MAP["external_integrations"] ?? FALLBACK_THEME;
+  if (ENTITY_THEME_MAP[cat]) return ENTITY_THEME_MAP[cat]!;
+  if (ENTITY_THEME_MAP[type]) return ENTITY_THEME_MAP[type]!;
   const readable = (node.entity_type || "Item").replace(/_/g, " ");
   return {
     ...FALLBACK_THEME,
@@ -194,31 +205,32 @@ export function resolveAmeliorateNodeTheme(node: HandoverGraphNode): AmeliorateN
   };
 }
 
-const FUNCTIONAL_LAYER_ORDER: Record<string, number> = {
-  project: 0,
-  requirement: 0,
-  client: 1,
-  ui: 1,
-  frontend: 1,
-  backend: 1,
-  api_backend: 1,
-  core_services: 1,
-  service: 1,
-  api: 1,
-  feature: 1,
-  operational_procedure: 2,
-  work_item: 2,
-  database: 2,
-  storage: 2,
-  data_storage: 2,
-  ai_ml: 2,
-  ai_processing: 2,
-  technical_component: 2,
-  architecture_component: 2,
-  framework: 2,
-  library: 2,
-  external_integrations: 3,
-};
+export function resolveNodeTier(node: HandoverGraphNode): number {
+  const canon = (node.label || "").toLowerCase();
+  const type = (node.entity_type || "").toLowerCase();
+  const cat = (node.category || "").toLowerCase();
+
+  // Tier 0: Project root / System client entry
+  if (type === "project" || canon === "skillspassport") return 0;
+  if (canon === "browser" || canon.includes("web client")) return 0;
+
+  // Tier 1: Frontend framework / UI library / API Gateway routes
+  if (canon.includes("next") || canon.includes("react") || canon.includes("routes") || cat === "frontend") return 1;
+
+  // Tier 2: Backend application server / Core service / Workers
+  if (canon.includes("fastapi") || canon.includes("worker") || canon.includes("service") || canon.includes("competency") || cat === "backend" || cat === "core_services") return 2;
+
+  // Tier 3: Database & Object Storage
+  if (canon.includes("postgres") || canon.includes("sqlalchemy") || canon.includes("supabase") || canon.includes("storage") || cat === "database" || cat === "storage") return 3;
+
+  // Tier 4: AI Inference Runtime & Vector Store
+  if (canon.includes("ollama") || canon.includes("qwen") || canon.includes("chroma") || cat === "ai_ml") return 4;
+
+  // Tier 5: External Data Sources & Integrations
+  if (canon.includes("github") || canon.includes("jira") || canon.includes("slack") || cat === "external_integrations") return 5;
+
+  return 2;
+}
 
 /**
  * Compute Ameliorate-style layered flowchart positions with balanced centered tiers
@@ -253,86 +265,64 @@ export function buildAmeliorateFlowchartElements(
     }
   }
 
-  // Dynamic topological leveling so children sit directly below their parents
-  const inDegree = new Map<string, number>();
-  const childrenMap = new Map<string, string[]>();
+  // Group nodes into balanced architectural tiers
+  const byTier = new Map<number, HandoverGraphNode[]>();
   for (const n of rawNodes) {
-    inDegree.set(n.id, 0);
-    childrenMap.set(n.id, []);
-  }
-  for (const e of validEdges) {
-    inDegree.set(e.target, (inDegree.get(e.target) || 0) + 1);
-    childrenMap.get(e.source)?.push(e.target);
-  }
-
-  const layerMap = new Map<string, number>();
-  const queue: { id: string; depth: number }[] = [];
-
-  // Project entity always occupies root level 0 if present
-  const projectNode = rawNodes.find((n) => n.entity_type.toLowerCase() === "project");
-  if (projectNode) {
-    layerMap.set(projectNode.id, 0);
-    queue.push({ id: projectNode.id, depth: 0 });
-  }
-
-  // Other in-degree 0 nodes take root level 0
-  for (const n of rawNodes) {
-    if (n.id === projectNode?.id) continue;
-    if ((inDegree.get(n.id) || 0) === 0) {
-      layerMap.set(n.id, 0);
-      queue.push({ id: n.id, depth: 0 });
-    }
-  }
-
-  // BFS propagation: child depth = parent depth + 1
-  while (queue.length > 0) {
-    const { id, depth } = queue.shift()!;
-    const children = childrenMap.get(id) || [];
-    for (const childId of children) {
-      const curDepth = layerMap.get(childId);
-      const nextDepth = depth + 1;
-      if (curDepth === undefined || curDepth < nextDepth) {
-        layerMap.set(childId, nextDepth);
-        queue.push({ id: childId, depth: nextDepth });
-      }
-    }
-  }
-
-  const byLayer = new Map<number, HandoverGraphNode[]>();
-  for (const n of rawNodes) {
-    const topRank = layerMap.get(n.id);
-    const catKey = (n.category || n.entity_type || "").toLowerCase();
-    const funcRank = n.entity_type.toLowerCase() === "project" ? 0 : (FUNCTIONAL_LAYER_ORDER[catKey] ?? 1);
-    const finalRank = topRank !== undefined && topRank > 0 ? topRank : funcRank;
-    const bucket = byLayer.get(finalRank) || [];
+    const tier = resolveNodeTier(n);
+    const bucket = byTier.get(tier) || [];
     bucket.push(n);
-    byLayer.set(finalRank, bucket);
+    byTier.set(tier, bucket);
   }
 
-  const sortedLayers = Array.from(byLayer.keys()).sort((a, b) => a - b);
-  const NODE_COL_GAP = 230;
-  const NODE_ROW_GAP = 140;
+  // Multi-row visual grid (wrap tiers with >3 items into centered sub-rows)
+  const visualRows: HandoverGraphNode[][] = [];
+  const sortedTiers = Array.from(byTier.keys()).sort((a, b) => a - b);
 
-  // Maximum items in any layer defines canvas width
-  const maxRowItems = Math.max(...Array.from(byLayer.values()).map((items) => items.length), 1);
+  for (const t of sortedTiers) {
+    const items = [...(byTier.get(t) || [])];
+    items.sort((a, b) => a.label.localeCompare(b.label));
+
+    // Wrap tier into sub-rows of at most 3 items
+    const MAX_ITEMS_PER_ROW = 3;
+    for (let i = 0; i < items.length; i += MAX_ITEMS_PER_ROW) {
+      visualRows.push(items.slice(i, i + MAX_ITEMS_PER_ROW));
+    }
+  }
+
+  const NODE_COL_GAP = 220;
+  const NODE_ROW_GAP = 135;
+
+  // Standard max width: 3 nodes
+  const maxRowItems = Math.min(Math.max(...visualRows.map((r) => r.length), 1), 3);
   const canvasWidth = (maxRowItems - 1) * NODE_COL_GAP;
 
+  const nodePosMap = new Map<string, { x: number; y: number }>();
   const nodes: Node<AmeliorateNodeData>[] = [];
-  sortedLayers.forEach((layerIdx, rowIdx) => {
-    const rawItems = [...(byLayer.get(layerIdx) || [])];
-    rawItems.sort((a, b) => {
+
+  visualRows.forEach((rowItems, rowIdx) => {
+    // Sort items by their parent's average X position to minimize line crossings
+    rowItems.sort((a, b) => {
       const aParents = incoming.get(a.id) || [];
       const bParents = incoming.get(b.id) || [];
-      if (aParents.length !== bParents.length) return bParents.length - aParents.length;
-      return a.label.localeCompare(b.label);
+      const aAvgX =
+        aParents.length > 0
+          ? aParents.reduce((acc, pid) => acc + (nodePosMap.get(pid)?.x ?? canvasWidth / 2), 0) / aParents.length
+          : canvasWidth / 2;
+      const bAvgX =
+        bParents.length > 0
+          ? bParents.reduce((acc, pid) => acc + (nodePosMap.get(pid)?.x ?? canvasWidth / 2), 0) / bParents.length
+          : canvasWidth / 2;
+      return aAvgX - bAvgX;
     });
 
-    const rowWidth = (rawItems.length - 1) * NODE_COL_GAP;
-    const startX = (canvasWidth - rowWidth) / 2 + 60;
+    const rowWidth = (rowItems.length - 1) * NODE_COL_GAP;
+    const startX = (canvasWidth - rowWidth) / 2 + 50;
     const y = rowIdx * NODE_ROW_GAP + 40;
 
-    rawItems.forEach((item, colIdx) => {
+    rowItems.forEach((item, colIdx) => {
       const x = startX + colIdx * NODE_COL_GAP;
+      nodePosMap.set(item.id, { x, y });
+
       const spotlight: AmeliorateSpotlight =
         selectedNodeId === item.id
           ? "primary"

@@ -68,10 +68,10 @@ function AmeliorateFlowEdgeBase({
               pointerEvents: "none",
               zIndex: isPrimary ? 10 : 1,
             }}
-            className={`px-1.5 py-0.5 text-[10px] leading-tight whitespace-nowrap rounded ${
+            className={`px-1 py-0.5 text-[10.5px] font-normal leading-none whitespace-nowrap rounded select-none ${
               isPrimary
-                ? "bg-white font-medium text-indigo-700 border border-indigo-400 shadow-xs"
-                : "bg-white/95 font-medium text-slate-500 border border-slate-200/80 shadow-xs"
+                ? "bg-white/95 font-semibold text-indigo-600 shadow-xs"
+                : "bg-white/80 text-slate-500"
             }`}
           >
             {String(label).toLowerCase()}

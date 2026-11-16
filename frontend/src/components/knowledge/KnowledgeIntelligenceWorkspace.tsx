@@ -108,31 +108,11 @@ export function KnowledgeIntelligenceWorkspace({
   const [domainFindings, setDomainFindings] = useState<Record<string, unknown>[]>([]);
   const [selectedFinding, setSelectedFinding] = useState<Record<string, unknown> | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [reloadCounter, setReloadCounter] = useState(0);
 
-  const loadGraph = useCallback(async () => {
-    if (!projectId || mode === "domains") return;
-    setLoading(true);
-    setError(null);
-    setSelectedNodeDetail(null);
-    try {
-      const res = await api.knowledgeIntelligence.getGraph(projectId, mode, {
-        search: searchQuery.trim() || undefined,
-        status: statusFilter !== "all" ? statusFilter : undefined,
-        verification_state: verificationFilter !== "all" ? verificationFilter : undefined,
-        include_suggested: includeSuggested,
-      });
-      const fetchedNodes = res.nodes || [];
-      const fetchedEdges = res.edges || [];
-      setRawNodes(fetchedNodes);
-      setRawEdges(fetchedEdges);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load Knowledge Intelligence graph.");
-      setRawNodes([]);
-      setRawEdges([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId, mode, searchQuery, statusFilter, verificationFilter, includeSuggested]);
+  const handleRefresh = useCallback(() => {
+    setReloadCounter((c) => c + 1);
+  }, []);
 
   const loadDomains = useCallback(async () => {
     if (!projectId || mode !== "domains") return;
@@ -154,12 +134,40 @@ export function KnowledgeIntelligenceWorkspace({
   }, [projectId, mode, selectedDomain]);
 
   useEffect(() => {
+    let isCurrent = true;
     if (mode === "domains") {
       loadDomains();
     } else {
-      loadGraph();
+      if (!projectId) return;
+      setLoading(true);
+      setError(null);
+      setSelectedNodeDetail(null);
+      api.knowledgeIntelligence
+        .getGraph(projectId, mode, {
+          search: searchQuery.trim() || undefined,
+          status: statusFilter !== "all" ? statusFilter : undefined,
+          verification_state: verificationFilter !== "all" ? verificationFilter : undefined,
+          include_suggested: includeSuggested,
+        })
+        .then((res) => {
+          if (!isCurrent) return;
+          setRawNodes(res.nodes || []);
+          setRawEdges(res.edges || []);
+        })
+        .catch((err) => {
+          if (!isCurrent) return;
+          setError(err instanceof Error ? err.message : "Failed to load Knowledge Intelligence graph.");
+          setRawNodes([]);
+          setRawEdges([]);
+        })
+        .finally(() => {
+          if (isCurrent) setLoading(false);
+        });
     }
-  }, [mode, loadGraph, loadDomains]);
+    return () => {
+      isCurrent = false;
+    };
+  }, [projectId, mode, searchQuery, statusFilter, verificationFilter, includeSuggested, loadDomains, reloadCounter]);
 
   const handleSelectNode = async (_: unknown, node: Node) => {
     if (mode === "domains") return;
@@ -258,7 +266,7 @@ export function KnowledgeIntelligenceWorkspace({
             )}
             <button
               type="button"
-              onClick={() => (mode === "domains" ? loadDomains() : loadGraph())}
+              onClick={handleRefresh}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
@@ -381,7 +389,7 @@ export function KnowledgeIntelligenceWorkspace({
             </span>
             <button
               type="button"
-              onClick={() => (mode === "domains" ? loadDomains() : loadGraph())}
+              onClick={handleRefresh}
               className="underline font-medium"
             >
               Retry
