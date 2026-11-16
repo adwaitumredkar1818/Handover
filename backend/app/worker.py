@@ -193,18 +193,22 @@ class CompositeWorkerService:
         return self.ingestion_worker.worker_id
 
     def process_next_job(self) -> bool:
-        """Claim one job across ingestion, sync, indexing, reconstruction,
-        and relationship queues."""
+        """Claim one job across reconstruction, ingestion, sync, indexing,
+        and relationship queues.
+
+        Reconstruction (interactive Ollama Qwen3 8B extraction) is prioritized first
+        so user-triggered knowledge extraction is never starved by background batch indexing.
+        """
+        if (
+            self.reconstruction_worker is not None
+            and self.reconstruction_worker.process_next_job()
+        ):
+            return True
         if self.ingestion_worker.process_next_job():
             return True
         if self.sync_worker.process_next_job():
             return True
         if self.indexing_worker is not None and self.indexing_worker.process_next_job():
-            return True
-        if (
-            self.reconstruction_worker is not None
-            and self.reconstruction_worker.process_next_job()
-        ):
             return True
         if (
             self.relationship_worker is not None

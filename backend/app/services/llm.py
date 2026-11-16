@@ -153,10 +153,10 @@ class OllamaLLMClient:
         self._base_url = base_url.rstrip("/")
         self._model = model.strip()
         self._num_ctx = max(2048, int(num_ctx))
-        self._num_predict = max(256, int(num_predict))
+        self._num_predict = int(num_predict) if num_predict is not None and int(num_predict) > 0 else -1
         self._temperature = float(temperature)
         self._timeout_seconds = (
-            None if timeout_seconds is None or timeout_seconds <= 0 else float(timeout_seconds)
+            float(timeout_seconds) if timeout_seconds is not None and float(timeout_seconds) > 0 else None
         )
         self._think = bool(think)
         self._http_client = http_client
@@ -167,6 +167,7 @@ class OllamaLLMClient:
         return self._model
 
     def _post_chat(self, payload: dict[str, Any]) -> httpx.Response:
+        # None timeout ensures generation is never aborted prematurely
         if self._http_client is not None:
             return self._http_client.post(
                 f"{self._base_url}/api/chat",
@@ -183,6 +184,11 @@ class OllamaLLMClient:
             )
 
     def generate_json(self, request: LLMGenerationRequest) -> LLMGenerationResult:
+        effective_predict = (
+            request.num_predict
+            if request.num_predict is not None
+            else self._num_predict
+        )
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": [
@@ -194,7 +200,7 @@ class OllamaLLMClient:
             "format": request.json_schema if request.json_schema is not None else "json",
             "options": {
                 "num_ctx": request.num_ctx or self._num_ctx,
-                "num_predict": request.num_predict or self._num_predict,
+                "num_predict": effective_predict,
                 "temperature": (
                     self._temperature if request.temperature is None else request.temperature
                 ),

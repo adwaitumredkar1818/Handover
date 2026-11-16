@@ -368,7 +368,7 @@ class OllamaSettings(BaseModel):
     ocr_model: str = Field(min_length=1)
     health_timeout_seconds: float = Field(default=2.0, gt=0.1, le=30.0)
     llm_num_ctx: int = Field(default=8192, ge=2048, le=40960)
-    llm_num_predict: int = Field(default=2048, ge=256, le=8192)
+    llm_num_predict: int = Field(default=-1, ge=-1, le=16384)
     llm_temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     llm_timeout_seconds: float | None = Field(default=None, ge=0.0)
     llm_think: bool = False
@@ -630,7 +630,7 @@ class Settings(BaseSettings):
     ollama_embedding_model: str = Field(default="nomic-embed-text", min_length=1)
     ollama_ocr_model: str = Field(default="glm-ocr:latest", min_length=1)
     ollama_llm_num_ctx: int = Field(default=8192, ge=2048, le=40960)
-    ollama_llm_num_predict: int = Field(default=2048, ge=256, le=8192)
+    ollama_llm_num_predict: int = Field(default=-1, ge=-1, le=16384)
     ollama_llm_temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     ollama_llm_timeout_seconds: float | None = Field(default=None, ge=0.0)
     ollama_llm_think: bool = False
