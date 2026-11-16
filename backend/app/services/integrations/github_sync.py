@@ -280,6 +280,14 @@ class GitHubSyncOrchestrator:
                 if not is_pr and not config.get("include_issues", True):
                     continue
 
+                pr_scope = str(config.get("pr_scope", "all")).lower()
+                issue_scope = str(config.get("issue_scope", "all")).lower()
+                item_state = str(item.get("state", "")).lower()
+                if is_pr and pr_scope == "open" and item_state != "open":
+                    continue
+                if not is_pr and issue_scope == "open" and item_state != "open":
+                    continue
+
                 item_updated = parse_provider_datetime(
                     str(item["updated_at"]) if item.get("updated_at") else None
                 )
@@ -292,17 +300,30 @@ class GitHubSyncOrchestrator:
 
                 item_warnings: list[str] = []
                 try:
-                    comments, comment_warn = self._client.fetch_issue_comments(
-                        access_token=access_token,
-                        owner=owner,
-                        repo=repo_name,
-                        issue_number=number,
-                    )
-                    if comment_warn:
-                        item_warnings.append(comment_warn)
-                        report.partial = True
+                    comments: list[dict[str, Any]] = []
+                    if config.get("include_comments", True):
+                        comments, comment_warn = self._client.fetch_issue_comments(
+                            access_token=access_token,
+                            owner=owner,
+                            repo=repo_name,
+                            issue_number=number,
+                        )
+                        if comment_warn:
+                            item_warnings.append(comment_warn)
+                            report.partial = True
 
                     if is_pr:
+                        pr_commits: list[str] = []
+                        try:
+                            pr_commits = self._client.fetch_pull_request_commits(
+                                access_token=access_token,
+                                owner=owner,
+                                repo=repo_name,
+                                pr_number=number,
+                            )
+                        except Exception as exc:
+                            item_warnings.append(f"PR #{number} commits restricted: {exc}")
+
                         pr_detail, reviews, review_comments, files, pr_warns = (
                             self._client.fetch_pull_request_bundle(
                                 access_token=access_token,
@@ -311,6 +332,9 @@ class GitHubSyncOrchestrator:
                                 pr_number=number,
                             )
                         )
+                        if not config.get("include_reviews", True):
+                            reviews = []
+                            review_comments = []
                         item_warnings.extend(pr_warns)
                         if pr_warns:
                             report.partial = True
@@ -327,6 +351,7 @@ class GitHubSyncOrchestrator:
                             review_comments=review_comments,
                             files=files,
                             warnings=tuple(item_warnings),
+                            associated_commits=pr_commits,
                         )
                     else:
                         record = self._normalize_issue(
@@ -357,28 +382,67 @@ class GitHubSyncOrchestrator:
                     report.partial = True
                     report.warnings.append(f"GitHub item #{number} failed: {exc.message}")
 
-        # 4. Commits (bounded metadata, optional since cursor)
+        # 4. Commits (branch-aware extraction, duplicate SHA suppression, co-authors & stats)
         if config.get("include_commits", True) and report.items_discovered < max_items:
-            commits_limit = min(
-                self._settings.integrations.default_github_commits_limit,
-                max_items - report.items_discovered,
+            branch_scope = str(config.get("branch_scope", "default")).lower()
+            selected_branches = [str(b) for b in config.get("selected_branches", []) if b]
+            branches_to_sync: list[str | None] = []
+
+            if selected_branches:
+                branches_to_sync = selected_branches
+            elif branch_scope == "all":
+                discovered_branches = self._client.fetch_branches(
+                    access_token=access_token,
+                    owner=owner,
+                    repo=repo_name,
+                    max_branches=20,
+                )
+                branches_to_sync = [
+                    str(b.get("name")) for b in discovered_branches if b.get("name")
+                ]
+                if not branches_to_sync and repo_candidate.default_branch:
+                    branches_to_sync = [repo_candidate.default_branch]
+            else:
+                branches_to_sync = [repo_candidate.default_branch]
+
+            seen_shas_to_branches: dict[str, set[str]] = {}
+            unique_commits: dict[str, dict[str, Any]] = {}
+
+            effective_commits_since = since_cursor or (
+                parse_provider_datetime(str(config.get("commit_since")))
+                if config.get("commit_since")
+                else None
             )
-            commits_res = self._client.fetch_commits(
-                access_token=access_token,
-                owner=owner,
-                repo=repo_name,
-                sha=repo_candidate.default_branch,
-                since=since_cursor,
-                etag=commits_etag,
-                max_items=commits_limit,
-            )
-            report.warnings.extend(commits_res.warnings)
-            if commits_res.etag:
-                new_cursor["commits_etag"] = commits_res.etag
-            for commit in commits_res.items:
-                sha = str(commit.get("sha") or "")
-                if not sha:
-                    continue
+
+            for branch_name in branches_to_sync:
+                commits_limit = self._settings.integrations.default_github_commits_limit
+                commits_res = self._client.fetch_commits(
+                    access_token=access_token,
+                    owner=owner,
+                    repo=repo_name,
+                    sha=branch_name,
+                    since=effective_commits_since,
+                    etag=commits_etag if branch_name == repo_candidate.default_branch else None,
+                    max_items=commits_limit,
+                )
+                report.warnings.extend(commits_res.warnings)
+                if branch_name == repo_candidate.default_branch and commits_res.etag:
+                    new_cursor["commits_etag"] = commits_res.etag
+
+                for commit in commits_res.items:
+                    sha = str(commit.get("sha") or "")
+                    if not sha:
+                        continue
+                    b_label = branch_name or repo_candidate.default_branch or "default"
+                    if sha not in seen_shas_to_branches:
+                        seen_shas_to_branches[sha] = set()
+                    seen_shas_to_branches[sha].add(b_label)
+                    if sha not in unique_commits:
+                        unique_commits[sha] = commit
+
+            for sha, commit in unique_commits.items():
+                if report.items_discovered >= max_items:
+                    break
                 record = self._normalize_commit(
                     repo_id=repo_id,
                     owner_repo=owner_repo,
@@ -386,6 +450,7 @@ class GitHubSyncOrchestrator:
                     policy_id=policy.id,
                     acl_scope=acl_scope,
                     commit=commit,
+                    discovered_branches=sorted(list(seen_shas_to_branches[sha])),
                 )
                 self._record_upsert(
                     report=report,
@@ -395,6 +460,19 @@ class GitHubSyncOrchestrator:
                     seen_external_ids=seen_external_ids,
                     record=record,
                 )
+
+            # Supplementary Contributor Statistics
+            try:
+                contributors = self._client.fetch_contributors(
+                    access_token=access_token,
+                    owner=owner,
+                    repo=repo_name,
+                    max_items=50,
+                )
+                if contributors:
+                    new_cursor["contributors_count"] = len(contributors)
+            except Exception:
+                pass
 
         # 5. README, Markdown documentation, ADRs, and repository code files
         include_code = bool(config.get("include_code", False))
@@ -636,6 +714,7 @@ class GitHubSyncOrchestrator:
         review_comments: list[dict[str, Any]],
         files: list[dict[str, Any]],
         warnings: tuple[str, ...],
+        associated_commits: list[str] | None = None,
     ) -> NormalizedSourceEvidence:
         merged_source = {**issue_item, **pr_detail}
         number = int(merged_source["number"])
@@ -766,6 +845,7 @@ class GitHubSyncOrchestrator:
                 "review_comments_count": len(review_comments),
                 "changed_files": changed_files_meta[:100],
                 "referenced_issue_numbers": referenced,
+                "associated_commit_shas": associated_commits or [],
                 "source_item_state": "active",
             },
         )
@@ -779,6 +859,7 @@ class GitHubSyncOrchestrator:
         policy_id: uuid.UUID,
         acl_scope: str,
         commit: dict[str, Any],
+        discovered_branches: list[str] | None = None,
     ) -> NormalizedSourceEvidence:
         sha = str(commit["sha"])
         raw_commit_inner = commit.get("commit")
@@ -789,23 +870,73 @@ class GitHubSyncOrchestrator:
         author_inner: dict[str, Any] = (
             raw_author_inner if isinstance(raw_author_inner, dict) else {}
         )
+        raw_committer_inner = commit_inner.get("committer")
+        committer_inner: dict[str, Any] = (
+            raw_committer_inner if isinstance(raw_committer_inner, dict) else {}
+        )
         raw_gh_author = commit.get("author")
         gh_author: dict[str, Any] = raw_gh_author if isinstance(raw_gh_author, dict) else {}
+        raw_gh_committer = commit.get("committer")
+        gh_committer: dict[str, Any] = raw_gh_committer if isinstance(raw_gh_committer, dict) else {}
+
         message = str(commit_inner.get("message") or "").strip()
         first_line = message.splitlines()[0] if message else sha[:12]
+
+        git_author_name = str(author_inner.get("name") or "") or None
+        git_author_email = str(author_inner.get("email") or "") or None
+        github_author_login = str(gh_author.get("login") or "") or None
+        github_author_id = gh_author.get("id")
+
+        git_committer_name = str(committer_inner.get("name") or "") or None
+        git_committer_email = str(committer_inner.get("email") or "") or None
+        github_committer_login = str(gh_committer.get("login") or "") or None
+        github_committer_id = gh_committer.get("id")
+
+        unlinked_git_author = bool(git_author_email and not github_author_login)
+        unlinked_git_committer = bool(git_committer_email and not github_committer_login)
+
+        parent_shas = [
+            str(p.get("sha"))
+            for p in (commit.get("parents") or [])
+            if isinstance(p, dict) and p.get("sha")
+        ]
+
+        raw_verif = commit_inner.get("verification") if isinstance(commit_inner.get("verification"), dict) else {}
+        is_verified = bool(raw_verif.get("verified", False))
+        verification_reason = str(raw_verif.get("reason") or "") or None
+
+        co_authors = [
+            {"name": name.strip(), "email": email.strip()}
+            for name, email in re.findall(r"(?i)Co-authored-by:\s*([^<\r\n]+)\s*<([^>\r\n]+)>", message)
+        ]
+
         author_identity = (
-            str(gh_author.get("login"))
-            if gh_author.get("login")
-            else str(author_inner.get("email") or author_inner.get("name") or "") or None
+            github_author_login
+            or (f"{git_author_name} <{git_author_email}>" if git_author_name and git_author_email else None)
+            or git_author_email
+            or git_author_name
+            or None
+        )
+        committer_identity = (
+            github_committer_login
+            or (f"{git_committer_name} <{git_committer_email}>" if git_committer_name and git_committer_email else None)
+            or git_committer_email
+            or git_committer_name
+            or None
         )
         authored_at = parse_provider_datetime(
             str(author_inner["date"]) if author_inner.get("date") else None
+        )
+        committed_at = parse_provider_datetime(
+            str(committer_inner["date"]) if committer_inner.get("date") else None
         )
         body_text = "\n".join(
             [
                 f"# Commit {sha[:12]} ({owner_repo})",
                 f"Author: {author_identity or 'unknown'}",
-                f"Date: {author_inner.get('date') or ''}",
+                f"Committer: {committer_identity or 'unknown'}",
+                f"Authored Date: {author_inner.get('date') or ''}",
+                f"Committed Date: {committer_inner.get('date') or ''}",
                 "",
                 message,
             ]
@@ -820,7 +951,7 @@ class GitHubSyncOrchestrator:
             source_author_identity=author_identity,
             title=f"{owner_repo}@{sha[:8]}: {first_line[:200]}",
             source_created_at=authored_at,
-            source_updated_at=authored_at,
+            source_updated_at=committed_at or authored_at,
             extraction_method=ConnectorExtractionMethod.GITHUB_API.value,
             acl_scope=acl_scope,
             source_access_policy_id=policy_id,
@@ -831,6 +962,21 @@ class GitHubSyncOrchestrator:
                 "github_item_type": "commit",
                 "repository": owner_repo,
                 "sha": sha,
+                "git_author_name": git_author_name,
+                "git_author_email": git_author_email,
+                "github_author_login": github_author_login,
+                "github_author_id": github_author_id,
+                "git_committer_name": git_committer_name,
+                "git_committer_email": git_committer_email,
+                "github_committer_login": github_committer_login,
+                "github_committer_id": github_committer_id,
+                "unlinked_git_author": unlinked_git_author,
+                "unlinked_git_committer": unlinked_git_committer,
+                "parent_shas": parent_shas,
+                "verified": is_verified,
+                "verification_reason": verification_reason,
+                "co_authors": co_authors,
+                "branches": discovered_branches or [],
                 "referenced_issue_numbers": referenced,
                 "source_item_state": "active",
             },
@@ -850,13 +996,14 @@ class GitHubSyncOrchestrator:
         path = str(doc["path"])
         text = str(doc.get("text") or "").strip()
         is_code = path.lower().endswith(
-            (".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml", ".toml", ".sql", ".sh", ".html", ".css")
+            (".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml", ".toml", ".sql", ".sh", ".html", ".css", ".go", ".rs", ".java")
         )
         item_type = "code" if is_code else "documentation"
+        doc_category = EvidenceCategory.SOURCE_CODE.value if is_code else EvidenceCategory.DESIGN_DOCUMENT.value
         return NormalizedSourceEvidence(
             source_type=EvidenceSourceType.GITHUB.value,
             source_provider="github",
-            category=EvidenceCategory.DESIGN_DOCUMENT.value,
+            category=doc_category,
             source_external_id=f"github:{repo_id}:doc:{path}",
             source_url=str(doc["html_url"]) if doc.get("html_url") else None,
             source_author_identity=None,

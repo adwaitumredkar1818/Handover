@@ -72,6 +72,8 @@ from app.models.assistant import (
     AssistantMessage,
     AssistantRetrievalRun,
 )
+from app.models.notification import NotificationItem
+from app.models.team_roster import ContributionAttribution, TeamRosterMember
 
 __all__ = [
     "AssistantCitation",
@@ -82,6 +84,7 @@ __all__ = [
     "AuditLog",
     "BackgroundJob",
     "Base",
+    "ContributionAttribution",
     "DecisionTraceabilityChain",
     "EntityAlias",
     "EvidenceChunk",
@@ -109,6 +112,7 @@ __all__ = [
     "KnowledgeItem",
     "KnowledgeRelationship",
     "KnowledgeTimelineEvent",
+    "NotificationItem",
     "OAuthState",
     "Organisation",
     "OrganisationInvitation",
@@ -128,6 +132,7 @@ __all__ = [
     "SourceAccessPolicy",
     "SourceConnection",
     "SourceSyncRun",
+    "TeamRosterMember",
     "User",
     "UserRole",
     "UserSourceAuthorisation",

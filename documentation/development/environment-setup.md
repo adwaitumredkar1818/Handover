@@ -444,9 +444,9 @@ npm run dev
 
 | Variable | Required | Default | Purpose |
 | :--- | :--- | :--- | :--- |
-| `EMAIL_DELIVERY_ENABLED` | Optional | `false` | Enables outbound transactional email dispatch (`false` preserves `not_configured` mode in local/test). |
-| `EMAIL_PROVIDER` | Optional | `none` | Provider adapter (`none`, `mock`, `resend`). |
-| `RESEND_API_KEY` | When `EMAIL_PROVIDER=resend` | `""` | Server-only Resend API key (never exposed to frontend or logs). |
-| `EMAIL_FROM_ADDRESS` | Optional | `noreply@handover.local` | Sender email address for verification and invitation emails. |
-| `EMAIL_FROM_NAME` | Optional | `The Handover` | Sender display name. |
-| `FRONTEND_BASE_URL` | Required in production email mode | `http://localhost:3000` | Base URL for `/verify-email?token=...` and `/invitations/<token>` links (must use `https://` when `APP_ENV=production` and `EMAIL_DELIVERY_ENABLED=true`). |
+| `EMAIL_DELIVERY_ENABLED` | Optional | `false` | Enables outbound transactional email dispatch (`false` preserves `not_configured` mode in local/test). Alias: `ENABLE_EMAIL_DELIVERY`. |
+| `EMAIL_PROVIDER` | Optional | `none` | Provider adapter (`none`, `mock`, `resend`). Alias: `MAIL_PROVIDER`. |
+| `RESEND_API_KEY` | When `EMAIL_PROVIDER=resend` | `""` | Server-only Resend API key (never exposed to frontend or logs). Alias: `RESEND_KEY`. |
+| `EMAIL_FROM_ADDRESS` | Optional | `onboarding@resend.dev` (Resend default) | Sender email address for verification and invitation emails. When using Resend without a custom verified domain, must use `onboarding@resend.dev` (the backend auto-falls back to this if `.local` is configured). **Note: Resend's free testing tier only delivers to the Resend account owner's email address.** To deliver to any address, configure and verify a custom domain in Resend and set `EMAIL_FROM_ADDRESS=noreply@yourdomain.com`. Aliases: `EMAIL_FROM`, `FROM_EMAIL`. |
+| `EMAIL_FROM_NAME` | Optional | `The Handover` | Sender display name. Aliases: `EMAIL_NAME`, `FROM_NAME`. |
+| `FRONTEND_BASE_URL` | Required in production email mode | `http://localhost:3000` | Base URL for `/verify-email?token=...` and `/invitations/<token>` links (must use `https://` when `APP_ENV=production` and `EMAIL_DELIVERY_ENABLED=true`). Aliases: `FRONTEND_URL`, `APP_URL`. |

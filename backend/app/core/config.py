@@ -10,7 +10,15 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import parse_qs, urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -433,15 +441,6 @@ class SecuritySettings(BaseModel):
     auth_rate_limit_verify_email_max_attempts: int = Field(default=5, ge=1, le=10000)
     auth_rate_limit_resend_verification_max_attempts: int = Field(default=3, ge=1, le=10000)
 
-    # Transactional email configuration (`settings.email`)
-    email_delivery_enabled: bool = False
-    email_provider: Literal["none", "mock", "resend"] = "none"
-    resend_api_key: SecretStr | None = None
-    email_from_address: str = Field(default="noreply@handover.local", min_length=3)
-    email_from_name: str = Field(default="The Handover", min_length=1)
-    frontend_base_url: str = Field(default="http://localhost:3000", min_length=1)
-    email_http_timeout_seconds: float = Field(default=10.0, gt=0.5, le=60.0)
-
     @field_validator("refresh_cookie_path")
     @classmethod
     def _validate_cookie_path(cls, value: str) -> str:
@@ -537,7 +536,7 @@ class IntegrationsSettings(BaseModel):
 
     github: GitHubIntegrationSettings
     jira: JiraIntegrationSettings
-    slack_enabled: bool = False
+    slack_enabled: bool = True
     oauth_state_expire_minutes: int = Field(default=10, ge=1, le=60)
     http_timeout_seconds: float = Field(default=20.0, gt=0.5, le=120.0)
     sync_max_items_per_run: int = Field(default=250, ge=1, le=5000)
@@ -697,13 +696,39 @@ class Settings(BaseSettings):
     auth_rate_limit_resend_verification_max_attempts: int = Field(default=3, ge=1, le=10000)
 
     # Transactional email configuration (`settings.email`)
-    email_delivery_enabled: bool = False
-    email_provider: Literal["none", "mock", "resend"] = "none"
-    resend_api_key: SecretStr | None = None
-    email_from_address: str = Field(default="noreply@handover.local", min_length=3)
-    email_from_name: str = Field(default="The Handover", min_length=1)
-    frontend_base_url: str = Field(default="http://localhost:3000", min_length=1)
-    email_http_timeout_seconds: float = Field(default=10.0, gt=0.5, le=60.0)
+    email_delivery_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("email_delivery_enabled", "enable_email_delivery"),
+    )
+    email_provider: Literal["none", "mock", "resend"] = Field(
+        default="none",
+        validation_alias=AliasChoices("email_provider", "mail_provider"),
+    )
+    resend_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("resend_api_key", "resend_key"),
+    )
+    email_from_address: str = Field(
+        default="noreply@handover.local",
+        min_length=3,
+        validation_alias=AliasChoices("email_from_address", "email_from", "mail_from", "from_email"),
+    )
+    email_from_name: str = Field(
+        default="The Handover",
+        min_length=1,
+        validation_alias=AliasChoices("email_from_name", "email_name", "from_name"),
+    )
+    frontend_base_url: str = Field(
+        default="http://localhost:3000",
+        min_length=1,
+        validation_alias=AliasChoices("frontend_base_url", "app_url", "frontend_url"),
+    )
+    email_http_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.5,
+        le=60.0,
+        validation_alias=AliasChoices("email_http_timeout_seconds", "email_timeout_seconds"),
+    )
 
     # Delegated source integration fields (`settings.integrations`)
     github_enabled: bool = False
@@ -724,8 +749,8 @@ class Settings(BaseSettings):
     jira_redirect_uri: str = "http://localhost:8000/api/v1/integrations/jira/callback"
     jira_oauth_scopes: str = "read:jira-work read:jira-user offline_access"
 
-    # Optional Slack MVP remains gated & disabled until formal approval
-    slack_enabled: bool = False
+    # Slack integration enabled for Phase 2 connected sources
+    slack_enabled: bool = True
 
     oauth_state_expire_minutes: int = Field(default=10, ge=1, le=60)
     integration_http_timeout_seconds: float = Field(default=20.0, gt=0.5, le=120.0)
@@ -1101,11 +1126,22 @@ class Settings(BaseSettings):
             raise ValueError(
                 "FRONTEND_BASE_URL must use https:// when transactional email delivery is enabled in production."
             )
+        from_addr = self.email_from_address.strip()
+        # If Resend provider is selected and the configured from_address is the default non-routable
+        # or local domain, automatically fall back to Resend's verified test domain 'onboarding@resend.dev'
+        # so testing works without failing on unverified domain errors.
+        if self.email_provider == "resend" and (
+            from_addr == "noreply@handover.local"
+            or from_addr.endswith(".local")
+            or from_addr.endswith(".invalid")
+        ):
+            from_addr = "onboarding@resend.dev"
+
         return EmailSettings(
             delivery_enabled=self.email_delivery_enabled,
             provider=self.email_provider,
             resend_api_key=self.resend_api_key,
-            from_address=self.email_from_address.strip(),
+            from_address=from_addr,
             from_name=self.email_from_name.strip(),
             frontend_base_url=clean_frontend_url,
             http_timeout_seconds=self.email_http_timeout_seconds,

@@ -27,6 +27,8 @@ import type {
   VerificationSummaryData,
   VerificationCaseQueueItem,
   HandoverCaseItem,
+  NotificationItem,
+  ActiveSyncJob,
 } from "../lib/types";
 
 export interface ToastMessage {
@@ -97,7 +99,11 @@ interface LiveAppContextType {
   setEvidenceFilter: React.Dispatch<React.SetStateAction<{ q: string; provider: string }>>;
   setSelectedEvidenceId: (id: string | null) => void;
   refreshEvidence: () => Promise<void>;
-  uploadDocument: (file: File, title?: string) => Promise<{ document_id: string; title: string }>;
+  uploadDocument: (
+    file: File,
+    title?: string,
+    options?: { documentCategory?: string; documentSubtype?: string }
+  ) => Promise<{ document_id: string; title: string }>;
   downloadEvidence: (evidenceId: string, filename?: string) => Promise<void>;
 
   // Downstream intelligence
@@ -149,6 +155,15 @@ interface LiveAppContextType {
   setIsAddMemberModalOpen: (open: boolean) => void;
   isMobileSidebarOpen: boolean;
   setIsMobileSidebarOpen: (open: boolean) => void;
+
+  // Persistent Notifications & Background Tasks
+  notifications: NotificationItem[];
+  unreadNotificationsCount: number;
+  activeJobs: ActiveSyncJob[];
+  refreshNotifications: () => Promise<void>;
+  refreshActiveJobs: () => Promise<void>;
+  markNotificationRead: (id: string) => Promise<void>;
+  markAllNotificationsRead: () => Promise<void>;
 
   // Toasts
   toasts: ToastMessage[];
@@ -211,6 +226,13 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     q: "",
     provider: "all",
   });
+
+  // Notifications & Active Background Jobs state
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState<number>(0);
+  const [activeJobs, setActiveJobs] = useState<ActiveSyncJob[]>([]);
+  const activeJobsRef = useRef<ActiveSyncJob[]>([]);
+  activeJobsRef.current = activeJobs;
 
   // Organisation selector wrapper that persists user workspace preference
   const setActiveOrg = useCallback(
@@ -880,6 +902,89 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     return res;
   }, [activeProject, user, refreshHandovers, addToast]);
 
+  // Notifications and Active Background Jobs
+  const refreshNotifications = useCallback(async () => {
+    if (!user) return;
+    try {
+      const res = await api.notifications.list(activeProject?.id);
+      setNotifications(res.items as NotificationItem[]);
+      setUnreadNotificationsCount(res.unread_count);
+    } catch {
+      // ignore
+    }
+  }, [user, activeProject?.id]);
+
+  const refreshActiveJobs = useCallback(async () => {
+    if (!user || !activeProject) {
+      setActiveJobs([]);
+      return;
+    }
+    try {
+      const jobs = await api.notifications.listActiveJobs(activeProject.id);
+      const prevJobs = activeJobsRef.current;
+      setActiveJobs(jobs as ActiveSyncJob[]);
+
+      // Check if any job completed
+      if (prevJobs.length > 0 && jobs.length === 0) {
+        void refreshEvidence();
+        void refreshSources();
+        void refreshOverview();
+        void refreshNotifications();
+        addToast({
+          type: "success",
+          title: "Background Task Finished",
+          message: "All background sync and extraction jobs have completed.",
+        });
+      } else if (prevJobs.length > jobs.length) {
+        void refreshEvidence();
+        void refreshSources();
+        void refreshNotifications();
+      }
+    } catch {
+      // ignore
+    }
+  }, [user, activeProject, refreshEvidence, refreshSources, refreshOverview, refreshNotifications, addToast]);
+
+  const markNotificationRead = useCallback(async (id: string) => {
+    try {
+      await api.notifications.markRead(id);
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === id ? { ...n, is_read: true, read_at: new Date().toISOString() } : n))
+      );
+      setUnreadNotificationsCount((prev) => Math.max(0, prev - 1));
+    } catch (err: unknown) {
+      console.error("Failed to mark notification read", err);
+    }
+  }, []);
+
+  const markAllNotificationsRead = useCallback(async () => {
+    try {
+      await api.notifications.markAllRead();
+      setNotifications((prev) =>
+        prev.map((n) => ({ ...n, is_read: true, read_at: new Date().toISOString() }))
+      );
+      setUnreadNotificationsCount(0);
+    } catch (err: unknown) {
+      console.error("Failed to mark all notifications read", err);
+    }
+  }, []);
+
+  // Poll for background sync jobs & notifications
+  useEffect(() => {
+    if (!user || !activeProject) return;
+
+    void refreshNotifications();
+    void refreshActiveJobs();
+
+    const intervalTime = activeJobs.length > 0 ? 3000 : 7000;
+    const timer = setInterval(() => {
+      void refreshActiveJobs();
+      void refreshNotifications();
+    }, intervalTime);
+
+    return () => clearInterval(timer);
+  }, [user, activeProject?.id, activeJobs.length, refreshActiveJobs, refreshNotifications]);
+
 
   // Trigger data refreshes when active project changes
   const activeProjectId = activeProject?.id;
@@ -1123,16 +1228,27 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   };
 
   // Evidence actions
-  const uploadDocument = async (file: File, title?: string) => {
+  const uploadDocument = async (
+    file: File,
+    title?: string,
+    options?: { documentCategory?: string; documentSubtype?: string }
+  ) => {
     if (!activeProject) throw new Error("No active project");
-    const res = await api.evidence.upload(activeProject.id, file, title);
+    const res = await api.evidence.upload(activeProject.id, file, {
+      title: title || file.name,
+      document_category: options?.documentCategory,
+      document_subtype: options?.documentSubtype,
+      custom_title: title,
+    });
     await refreshEvidence();
     await refreshOverview();
+    void refreshActiveJobs();
+    void refreshNotifications();
     setIsUploadModalOpen(false);
     addToast({
       type: "success",
       title: "Document Ingested",
-      message: `${file.name} uploaded and encrypted at rest`,
+      message: `${file.name} uploaded and queued for processing`,
     });
     return res;
   };
@@ -1248,6 +1364,13 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     toasts,
     addToast,
     dismissToast,
+    notifications,
+    unreadNotificationsCount,
+    activeJobs,
+    refreshNotifications,
+    refreshActiveJobs,
+    markNotificationRead,
+    markAllNotificationsRead,
   };
 
   return (

@@ -210,6 +210,12 @@ class SourceEvidenceIngestor:
                 trigger="connector_created",
                 now=timestamp,
             )
+            if created_item.category in ("commit", "pull_request"):
+                try:
+                    from app.services.contribution_attribution import ContributionAttributionService
+                    ContributionAttributionService(self._session).attribute_evidence(created_item)
+                except Exception as exc:
+                    logger.debug("Contribution attribution error on create: %s", exc)
             return UpsertEvidenceOutcome(action="created", evidence_item=created_item)
 
         if existing.content_hash == content_hash and existing.content is not None:
@@ -264,6 +270,12 @@ class SourceEvidenceIngestor:
             trigger="connector_updated",
             now=timestamp,
         )
+        if existing.category in ("commit", "pull_request"):
+            try:
+                from app.services.contribution_attribution import ContributionAttributionService
+                ContributionAttributionService(self._session).attribute_evidence(existing)
+            except Exception as exc:
+                logger.debug("Contribution attribution error on update: %s", exc)
         return UpsertEvidenceOutcome(action="updated", evidence_item=existing)
 
     def mark_item_inaccessible(

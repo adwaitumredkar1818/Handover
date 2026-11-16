@@ -373,6 +373,34 @@ class IngestionWorkerService:
                     f"Completed document extraction with status '{extracted.processing_status}'."
                 ),
             )
+
+            # Roster extraction trigger if document is a team roster
+            if evidence.category == "team_roster" or getattr(evidence, "document_category", None) == "team_roster":
+                try:
+                    from app.services.roster_extraction import TeamRosterExtractionService
+                    TeamRosterExtractionService(session, self._settings).extract_and_reconcile(
+                        evidence_id=evidence.id,
+                        actor_user_id=job.triggered_by_user_id,
+                    )
+                except Exception as exc:
+                    logger.warning("Roster extraction error on evidence %s: %s", evidence.id, exc)
+
+            # Persistent notification for processed document
+            from app.models.notification import NotificationItem
+            notif = NotificationItem(
+                organisation_id=evidence.organisation_id,
+                project_id=evidence.project_id,
+                user_id=job.triggered_by_user_id,
+                notification_type="document_processed",
+                title="Document Processed",
+                body=f"Document '{evidence.title}' processed ({extracted.page_count} pages extracted).",
+                severity="info",
+                metadata_json={
+                    "evidence_id": str(evidence.id),
+                    "page_count": extracted.page_count,
+                },
+            )
+            session.add(notif)
             session.commit()
 
     def _complete_failure(

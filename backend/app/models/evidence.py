@@ -58,7 +58,8 @@ class EvidenceItem(Base):
         CheckConstraint(
             "category IN ("
             "'pdf_document', 'docx_document', 'issue', 'pull_request', "
-            "'commit', 'discussion_thread', 'design_document', 'other'"
+            "'commit', 'discussion_thread', 'design_document', "
+            "'team_roster', 'meeting_notes', 'project_document', 'source_code', 'other'"
             ")",
             name="evidence_category",
         ),
@@ -164,6 +165,8 @@ class EvidenceItem(Base):
         default="local_upload",
     )
     category: Mapped[str] = mapped_column(String(32), nullable=False)
+    document_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    document_subtype: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     source_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     source_author_identity: Mapped[str | None] = mapped_column(String(255), nullable=True)

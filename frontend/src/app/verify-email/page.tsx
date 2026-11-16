@@ -29,6 +29,10 @@ function VerifyEmailContent() {
   const [resendEmail, setResendEmail] = useState(user?.email || "");
   const [isResending, setIsResending] = useState(false);
   const [resendFeedback, setResendFeedback] = useState<string | null>(null);
+  const [resendDelivery, setResendDelivery] = useState<
+    "submitted" | "not_configured" | "failed" | null
+  >(null);
+  const [devToken, setDevToken] = useState<string | null>(null);
 
   useEffect(() => {
     if (user?.email && !resendEmail) {
@@ -76,10 +80,17 @@ function VerifyEmailContent() {
     if (!cleaned) return;
     setIsResending(true);
     setResendFeedback(null);
+    setResendDelivery(null);
+    setDevToken(null);
     try {
       const res = await api.auth.resendVerification(cleaned);
       setResendFeedback(res.message);
+      setResendDelivery(res.email_verification_delivery);
+      if (res.development_verification_token) {
+        setDevToken(res.development_verification_token);
+      }
     } catch (err: unknown) {
+      setResendDelivery("failed");
       setResendFeedback(
         err instanceof Error
           ? err.message
@@ -176,8 +187,32 @@ function VerifyEmailContent() {
             </div>
 
             {resendFeedback && (
-              <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900">
-                {resendFeedback}
+              <div
+                className={`rounded-xl border p-3 text-xs ${
+                  resendDelivery === "submitted"
+                    ? "border-teal-200 bg-teal-50/80 text-teal-900"
+                    : resendDelivery === "not_configured"
+                    ? "border-amber-200 bg-amber-50/80 text-amber-900"
+                    : "border-red-200 bg-red-50/80 text-red-900"
+                }`}
+              >
+                <p className="font-medium">{resendFeedback}</p>
+                {resendDelivery === "submitted" && (
+                  <p className="mt-0.5 text-[11px] text-teal-800">
+                    Please check your inbox and spam folder.
+                  </p>
+                )}
+                {devToken && (
+                  <div className="mt-2.5 pt-2 border-t border-amber-200/60 flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-amber-800">Local dev shortcut:</span>
+                    <Link
+                      href={`/verify-email?token=${encodeURIComponent(devToken)}`}
+                      className="inline-block rounded-lg bg-[#315FBA] px-2.5 py-1 text-xs font-semibold text-white hover:bg-[#264C98]"
+                    >
+                      Quick-Verify
+                    </Link>
+                  </div>
+                )}
               </div>
             )}
 

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 
 from app.schemas.common import BaseSchema
 from app.schemas.evidence import BackgroundJobResponse
@@ -105,6 +105,15 @@ class GitHubRepositoryCandidate(BaseSchema):
     html_url: str | None = None
     updated_at: datetime | None = None
     permissions: dict[str, bool] = Field(default_factory=dict)
+    language: str | None = None
+    topics: list[str] = Field(default_factory=list)
+    created_at: datetime | None = None
+    pushed_at: datetime | None = None
+    is_fork: bool = False
+    is_archived: bool = False
+    is_disabled: bool = False
+    open_issues_count: int = 0
+    already_mapped: bool = False
 
 
 class GitHubRepositoryListResponse(BaseSchema):
@@ -193,6 +202,15 @@ class CreateGitHubMappingRequest(BaseSchema):
     include_commits: bool = True
     include_docs: bool = True
     include_discussions: bool = True
+    branch_scope: str = "default"
+    selected_branches: list[str] = Field(default_factory=list)
+    commit_scope: str = "all"
+    commit_since: datetime | None = None
+    pr_scope: str = "all"
+    issue_scope: str = "all"
+    include_reviews: bool = True
+    include_comments: bool = True
+    include_code: bool = False
     restrict_to_verified_users: bool | None = None
 
 
@@ -207,6 +225,71 @@ class CreateJiraMappingRequest(BaseSchema):
     include_links: bool = True
     include_changelog: bool = True
     jql_filter: str | None = Field(default=None, max_length=500)
+
+
+class SlackChannelCandidate(BaseSchema):
+    """Accessible Slack channel discovered through the caller's delegated authorisation."""
+
+    id: str
+    name: str
+    is_private: bool
+    is_archived: bool
+    num_members: int = 0
+    topic: str = ""
+    purpose: str = ""
+
+
+class SlackChannelListResponse(BaseSchema):
+    """List of accessible Slack channels in the connected workspace."""
+
+    connection_id: uuid.UUID
+    items: list[SlackChannelCandidate]
+    total: int
+
+
+class CreateSlackMappingRequest(BaseSchema):
+    """Request to map one explicitly selected Slack channel into a project workspace."""
+
+    source_connection_id: uuid.UUID
+    channel_id: str = Field(
+        min_length=1,
+        max_length=64,
+        validation_alias=AliasChoices("channel_id", "external_resource_key", "resource_id"),
+    )
+    channel_name: str = Field(
+        min_length=1,
+        max_length=128,
+        validation_alias=AliasChoices("channel_name", "external_resource_name", "name"),
+    )
+    include_threads: bool = True
+    include_files: bool = False
+
+
+class BatchCreateMappingsRequest(BaseSchema):
+    """Request to batch map multiple selected repositories, projects, or channels."""
+
+    provider: str | None = None
+    source_connection_id: uuid.UUID
+    items: list[dict[str, Any]] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("items", "mappings"),
+    )
+
+
+class BatchCreateMappingsResponse(BaseSchema):
+    """Result of batch mapping creation."""
+
+    created_mappings: list[ProjectSourceMappingResponse] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("created_mappings", "mappings"),
+    )
+    created_count: int = 0
+    failed_count: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+    @property
+    def mappings(self) -> list[ProjectSourceMappingResponse]:
+        return self.created_mappings
 
 
 class ProjectSourceMappingResponse(BaseSchema):

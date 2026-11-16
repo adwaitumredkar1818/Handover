@@ -174,6 +174,19 @@ def _repo_candidate_from_json(raw: dict[str, Any]) -> GitHubRepositoryCandidate:
             str(raw["updated_at"]) if raw.get("updated_at") else None
         ),
         permissions={str(k): bool(v) for k, v in perms_obj.items()},
+        language=str(raw.get("language") or "") or None,
+        topics=[str(t) for t in raw.get("topics") or [] if isinstance(t, str)],
+        created_at=parse_provider_datetime(
+            str(raw["created_at"]) if raw.get("created_at") else None
+        ),
+        pushed_at=parse_provider_datetime(
+            str(raw["pushed_at"]) if raw.get("pushed_at") else None
+        ),
+        is_fork=bool(raw.get("fork", False)),
+        is_archived=bool(raw.get("archived", False)),
+        is_disabled=bool(raw.get("disabled", False)),
+        open_issues_count=int(raw.get("open_issues_count") or 0),
+        already_mapped=False,
     )
 
 
@@ -222,6 +235,146 @@ class GitHubClient:
 
     def _base(self) -> str:
         return self._gh.api_base_url.rstrip("/")
+
+    def fetch_user_profile(
+        self,
+        *,
+        access_token: str,
+    ) -> dict[str, Any]:
+        """Validate PAT and retrieve authenticated user profile and rate-limit metadata."""
+        with create_integration_http_client(
+            timeout_seconds=self._timeout,
+            transport=self._transport,
+        ) as client:
+            resp = client.get(
+                f"{self._base()}/user",
+                headers=self._headers(access_token),
+            )
+            raise_for_provider_error(resp, provider="github", endpoint_label="get_user")
+            data = resp.json()
+            if not isinstance(data, dict) or not data.get("login"):
+                raise IntegrationProviderError(
+                    provider="github",
+                    code="GITHUB_INVALID_USER_PROFILE",
+                    message="GitHub authenticated user endpoint returned unexpected payload.",
+                    status_code=502,
+                )
+            rate_limit = {
+                "limit": resp.headers.get("x-ratelimit-limit"),
+                "remaining": resp.headers.get("x-ratelimit-remaining"),
+                "reset": resp.headers.get("x-ratelimit-reset"),
+                "used": resp.headers.get("x-ratelimit-used"),
+                "resource": resp.headers.get("x-ratelimit-resource"),
+            }
+            data["_rate_limit"] = rate_limit
+            return data
+
+    def fetch_branches(
+        self,
+        *,
+        access_token: str,
+        owner: str,
+        repo: str,
+        max_branches: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Fetch accessible branches for repository."""
+        with create_integration_http_client(
+            timeout_seconds=self._timeout,
+            transport=self._transport,
+        ) as client:
+            resp = client.get(
+                f"{self._base()}/repos/{owner}/{repo}/branches",
+                headers=self._headers(access_token),
+                params={"per_page": min(100, max_branches), "page": 1},
+            )
+            if resp.status_code in {403, 404} and not is_rate_limit_response(resp):
+                return []
+            raise_for_provider_error(resp, provider="github", endpoint_label="list_branches")
+            data = resp.json()
+            if isinstance(data, list):
+                return [b for b in data if isinstance(b, dict)][:max_branches]
+            return []
+
+    def fetch_commit_detail(
+        self,
+        *,
+        access_token: str,
+        owner: str,
+        repo: str,
+        sha: str,
+    ) -> dict[str, Any] | None:
+        """Fetch individual commit detail including stats and changed files."""
+        with create_integration_http_client(
+            timeout_seconds=self._timeout,
+            transport=self._transport,
+        ) as client:
+            resp = client.get(
+                f"{self._base()}/repos/{owner}/{repo}/commits/{sha}",
+                headers=self._headers(access_token),
+            )
+            if resp.status_code == 200 and isinstance(resp.json(), dict):
+                return resp.json()
+            if resp.status_code in {403, 404} and not is_rate_limit_response(resp):
+                return None
+            raise_for_provider_error(resp, provider="github", endpoint_label="commit_detail")
+            return None
+
+    def fetch_contributors(
+        self,
+        *,
+        access_token: str,
+        owner: str,
+        repo: str,
+        max_items: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Fetch supplementary contributor list and statistics."""
+        with create_integration_http_client(
+            timeout_seconds=self._timeout,
+            transport=self._transport,
+        ) as client:
+            resp = client.get(
+                f"{self._base()}/repos/{owner}/{repo}/contributors",
+                headers=self._headers(access_token),
+                params={"per_page": min(100, max_items), "page": 1},
+            )
+            if resp.status_code in {204, 403, 404} and not is_rate_limit_response(resp):
+                return []
+            raise_for_provider_error(resp, provider="github", endpoint_label="list_contributors")
+            data = resp.json()
+            if isinstance(data, list):
+                return [c for c in data if isinstance(c, dict)][:max_items]
+            return []
+
+    def fetch_pull_request_commits(
+        self,
+        *,
+        access_token: str,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        max_commits: int = 100,
+    ) -> list[str]:
+        """Fetch commit SHAs associated with a pull request."""
+        with create_integration_http_client(
+            timeout_seconds=self._timeout,
+            transport=self._transport,
+        ) as client:
+            resp = client.get(
+                f"{self._base()}/repos/{owner}/{repo}/pulls/{pr_number}/commits",
+                headers=self._headers(access_token),
+                params={"per_page": min(100, max_commits), "page": 1},
+            )
+            if resp.status_code in {403, 404} and not is_rate_limit_response(resp):
+                return []
+            raise_for_provider_error(resp, provider="github", endpoint_label="pr_commits")
+            data = resp.json()
+            if isinstance(data, list):
+                return [
+                    str(c.get("sha"))
+                    for c in data
+                    if isinstance(c, dict) and c.get("sha")
+                ][:max_commits]
+            return []
 
     def list_repositories(
         self,

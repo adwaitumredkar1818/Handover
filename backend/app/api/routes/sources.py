@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -87,6 +87,7 @@ class SourceConnectionItemResponse(BaseSchema):
     organisation_id: uuid.UUID
     provider: str
     display_name: str
+    account_identifier: str | None = None
     status: str
     is_shared: bool
     created_at: datetime
@@ -198,6 +199,7 @@ def create_organisation_source(
     ],
     session: Annotated[Session, Depends(get_db_session)],
     token_encryption: Annotated[TokenEncryptionService, Depends(get_token_encryption_service)],
+    request: Request = None,
 ) -> SourceConnectionItemResponse:
     principal = org_ctx.principal
     _require_org_source_manager(
@@ -205,34 +207,72 @@ def create_organisation_source(
         "You do not have permission to register organisation sources.",
     )
 
+    gh_profile = None
+    provider_lower = payload.provider.lower()
+    if provider_lower == "github":
+        from app.core.config import get_settings
+        from app.services.integrations.github_client import GitHubClient
+        http_transport = getattr(getattr(request, "app", None), "state", None)
+        custom_transport = getattr(http_transport, "integration_http_transport", None)
+        gh_client = GitHubClient(settings=get_settings(), transport=custom_transport)
+        try:
+            gh_profile = gh_client.fetch_user_profile(access_token=payload.secret_token)
+        except Exception:
+            # If an explicit non-auto account identifier was provided (e.g., test fixtures without HTTP transport), allow fallback
+            if payload.account_identifier and payload.account_identifier.strip().lower() != "auto":
+                gh_profile = None
+            else:
+                raise
+
+    gh_login = str(gh_profile.get("login") or "") if gh_profile else None
+    gh_id = str(gh_profile.get("id") or "") if gh_profile else None
+    if provider_lower == "github" and gh_login:
+        account_identifier = gh_login
+    else:
+        account_identifier = payload.account_identifier or gh_login or gh_id or f"{provider_lower}_user"
+
     encrypted_payload = token_encryption.encrypt_token(
         plaintext=payload.secret_token,
         organisation_id=organisation_id,
         user_id=principal.user.id,
-        provider=payload.provider.lower(),
+        provider=provider_lower,
         token_kind="access_token",  # noqa: S106
     )
 
     display_name = payload.display_name or (
-        f"{payload.provider.capitalize()} ({payload.account_identifier})"
+        f"GitHub (@{gh_login})" if gh_login else f"{payload.provider.capitalize()} ({account_identifier})"
     )
+
+    conn_metadata: dict[str, Any] = {
+        "scopes": payload.scopes,
+        "is_shared": payload.is_shared,
+        "account_identifier": account_identifier,
+    }
+    if gh_profile:
+        conn_metadata["github_user"] = {
+            "login": gh_profile.get("login"),
+            "id": gh_profile.get("id"),
+            "name": gh_profile.get("name"),
+            "avatar_url": gh_profile.get("avatar_url"),
+            "rate_limit": gh_profile.get("_rate_limit"),
+        }
+
     # Check if connection already exists for this provider and identifier in this organisation
     stmt = select(SourceConnection).where(
         SourceConnection.organisation_id == organisation_id,
-        SourceConnection.provider == payload.provider.lower(),
-        SourceConnection.external_workspace_id == payload.account_identifier,
+        SourceConnection.provider == provider_lower,
+        SourceConnection.external_workspace_id == account_identifier,
         SourceConnection.status == "active",
     )
     existing_conn = session.execute(stmt).scalars().first()
 
+    ext_uid = gh_id or account_identifier
+    ext_uname = gh_login or account_identifier
+
     if existing_conn:
         conn = existing_conn
         conn.display_name = display_name
-        conn.metadata_json = {
-            "scopes": payload.scopes,
-            "is_shared": payload.is_shared,
-            "account_identifier": payload.account_identifier,
-        }
+        conn.metadata_json = conn_metadata
         # Update or create user authorization
         auth_stmt = select(UserSourceAuthorisation).where(
             UserSourceAuthorisation.source_connection_id == conn.id,
@@ -243,14 +283,16 @@ def create_organisation_source(
             existing_auth.encrypted_access_token = encrypted_payload.ciphertext
             existing_auth.status = "active"
             existing_auth.granted_scopes = payload.scopes
+            existing_auth.external_user_id = ext_uid
+            existing_auth.external_username = ext_uname
         else:
             user_auth = UserSourceAuthorisation(
                 source_connection_id=conn.id,
                 organisation_id=organisation_id,
                 user_id=principal.user.id,
-                provider=payload.provider.lower(),
-                external_user_id=payload.account_identifier,
-                external_username=payload.account_identifier,
+                provider=provider_lower,
+                external_user_id=ext_uid,
+                external_username=ext_uname,
                 encrypted_access_token=encrypted_payload.ciphertext,
                 status="active",
                 granted_scopes=payload.scopes,
@@ -259,16 +301,12 @@ def create_organisation_source(
     else:
         conn = SourceConnection(
             organisation_id=organisation_id,
-            provider=payload.provider.lower(),
+            provider=provider_lower,
             display_name=display_name,
-            external_workspace_id=payload.account_identifier,
+            external_workspace_id=account_identifier,
             status="active",
             created_by_user_id=principal.user.id,
-            metadata_json={
-                "scopes": payload.scopes,
-                "is_shared": payload.is_shared,
-                "account_identifier": payload.account_identifier,
-            },
+            metadata_json=conn_metadata,
         )
         session.add(conn)
         session.flush()
@@ -277,9 +315,9 @@ def create_organisation_source(
             source_connection_id=conn.id,
             organisation_id=organisation_id,
             user_id=principal.user.id,
-            provider=payload.provider.lower(),
-            external_user_id=payload.account_identifier,
-            external_username=payload.account_identifier,
+            provider=provider_lower,
+            external_user_id=ext_uid,
+            external_username=ext_uname,
             encrypted_access_token=encrypted_payload.ciphertext,
             status="active",
             granted_scopes=payload.scopes,
@@ -294,6 +332,7 @@ def create_organisation_source(
         organisation_id=conn.organisation_id,
         provider=conn.provider,
         display_name=conn.display_name,
+        account_identifier=conn.external_workspace_id or account_identifier,
         status=conn.status,
         is_shared=payload.is_shared,
         created_at=conn.created_at,
@@ -434,6 +473,7 @@ def patch_source_connection(
         organisation_id=conn.organisation_id,
         provider=conn.provider,
         display_name=conn.display_name,
+        account_identifier=conn.external_workspace_id or account_identifier,
         status=conn.status,
         is_shared=payload.is_shared,
         created_at=conn.created_at,

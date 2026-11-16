@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile, status
 
 from app.api.deps import (
     get_app_settings,
@@ -75,6 +75,9 @@ async def upload_project_document(
     ],
     settings: Annotated[Settings, Depends(get_app_settings)],
     evidence_service: Annotated[EvidenceService, Depends(get_evidence_service)],
+    document_category: Annotated[str | None, Form()] = None,
+    document_subtype: Annotated[str | None, Form()] = None,
+    custom_title: Annotated[str | None, Form()] = None,
 ) -> DocumentUploadResponse:
     """Validate, encrypt, deduplicate (within project), persist provenance, and queue extraction."""
     raw_bytes = await _read_bounded_upload(
@@ -86,6 +89,9 @@ async def upload_project_document(
         filename=file.filename,
         declared_mime_type=file.content_type,
         raw_bytes=raw_bytes,
+        document_category=document_category,
+        document_subtype=document_subtype,
+        custom_title=custom_title,
     )
     response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
     return result.payload

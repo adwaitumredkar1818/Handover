@@ -340,3 +340,147 @@ def test_invitation_preview_endpoint_states(monkeypatch: pytest.MonkeyPatch) -> 
         # 4. Unknown token returns 404
         missing = client.get("/api/v1/invitations/nonexistent-token-value")
         assert missing.status_code == 404
+
+
+def test_resend_provider_parses_testing_domain_and_unverified_domain_errors() -> None:
+    msg = EmailMessage(
+        to_email="colleague@example.com",
+        subject="Verify your email",
+        html_body="<p>Link</p>",
+        text_body="Link",
+    )
+
+    # 1. Resend sandbox testing domain limitation (422)
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={
+                "statusCode": 422,
+                "name": "validation_error",
+                "message": "You can only send testing emails to your own email address (owner@domain.com) while using onboarding@resend.dev.",
+            },
+        )
+
+    provider_sandbox = ResendEmailProvider(
+        api_key="re_test_key",
+        from_address="onboarding@resend.dev",
+        from_name="The Handover",
+        http_client=httpx.Client(transport=httpx.MockTransport(sandbox_handler)),
+    )
+    res_sandbox = provider_sandbox.send(msg)
+    assert res_sandbox.status == "failed"
+    assert "Resend sandbox limitation" in res_sandbox.error_message
+    assert "resend.com/domains" in res_sandbox.error_message
+
+    # 2. Resend unverified custom domain error (403)
+    def domain_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "statusCode": 403,
+                "name": "validation_error",
+                "message": "The domain mycustomdomain.com is not verified. Please verify your domain in the dashboard.",
+            },
+        )
+
+    provider_domain = ResendEmailProvider(
+        api_key="re_test_key",
+        from_address="noreply@mycustomdomain.com",
+        from_name="The Handover",
+        http_client=httpx.Client(transport=httpx.MockTransport(domain_handler)),
+    )
+    res_domain = provider_domain.send(msg)
+    assert res_domain.status == "failed"
+    assert "Resend sender domain error" in res_domain.error_message
+    assert "onboarding@resend.dev" in res_domain.error_message
+
+
+def test_authenticated_resend_verification_uses_persisted_user_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMAIL_DELIVERY_ENABLED", "true")
+    monkeypatch.setenv("EMAIL_PROVIDER", "mock")
+    monkeypatch.setenv("FRONTEND_BASE_URL", "http://localhost:3000")
+
+    mock_provider = MockEmailProvider()
+
+    with isolated_auth_app(monkeypatch) as ctx, TestClient(ctx.app) as client:
+        ctx.app.state.email_provider = mock_provider
+
+        # 1. Register unverified user
+        reg = client.post(
+            "/api/v1/auth/register",
+            json={
+                "full_name": "Charlie Unverified",
+                "email": "charlie@trusted.org",
+                "password": _PASSWORD,
+            },
+        )
+        assert reg.status_code == 201
+
+        # 2. Login to get authenticated session while unverified
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"email": "charlie@trusted.org", "password": _PASSWORD},
+        )
+        assert login.status_code == 200
+        auth_token = login.json()["access_token"]
+        headers = {"Authorization": f"Bearer {auth_token}", "Origin": _TRUSTED_ORIGIN}
+
+        # Clear registration email from mock sent list
+        mock_provider.sent_messages.clear()
+
+        # 3. Authenticated resend with spoofed email in body — must ignore body and use charlie@trusted.org
+        resend_spoofed = client.post(
+            "/api/v1/auth/resend-verification",
+            headers=headers,
+            json={"email": "attacker@victim.com"},
+        )
+        assert resend_spoofed.status_code == 200
+        assert resend_spoofed.json()["email_verification_delivery"] == "submitted"
+        assert len(mock_provider.sent_messages) == 1
+        assert mock_provider.sent_messages[0].to_email == "charlie@trusted.org"
+
+        # 4. Authenticated resend with empty body — succeeds and targets charlie@trusted.org
+        resend_empty = client.post(
+            "/api/v1/auth/resend-verification",
+            headers=headers,
+            json={},
+        )
+        assert resend_empty.status_code == 200
+        assert resend_empty.json()["email_verification_delivery"] == "submitted"
+        assert len(mock_provider.sent_messages) == 2
+        assert mock_provider.sent_messages[1].to_email == "charlie@trusted.org"
+
+
+def test_unauthenticated_resend_verification_requires_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with isolated_auth_app(monkeypatch) as ctx, TestClient(ctx.app) as client:
+        # Unauthenticated with empty body returns 400
+        res = client.post("/api/v1/auth/resend-verification", json={})
+        assert res.status_code == 400
+        assert res.json()["error"]["code"] == "EMAIL_REQUIRED"
+
+
+def test_resend_defaults_sender_to_onboarding_domain_when_local() -> None:
+    # 1. When local/default from_address is used, fallback to onboarding@resend.dev
+    settings_default = Settings(
+        database_url="postgresql+psycopg://postgres:postgres@localhost:5432/handover",
+        jwt_secret_key="x" * 64,
+        token_encryption_key="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        email_provider="resend",
+        email_from_address="noreply@handover.local",
+    )
+    assert settings_default.email.from_address == "onboarding@resend.dev"
+
+    # 2. When a custom domain is explicitly configured, preserve it
+    settings_custom = Settings(
+        database_url="postgresql+psycopg://postgres:postgres@localhost:5432/handover",
+        jwt_secret_key="x" * 64,
+        token_encryption_key="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        email_provider="resend",
+        email_from_address="notifications@mycompany.com",
+    )
+    assert settings_custom.email.from_address == "notifications@mycompany.com"
+

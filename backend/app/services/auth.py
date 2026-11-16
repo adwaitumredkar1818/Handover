@@ -198,7 +198,7 @@ class AuthService:
         if result.status == "submitted":
             return (
                 "submitted",
-                "Verification email sent. Please check your inbox to verify your email address.",
+                "Verification email sent. Please check your inbox and spam folder to verify your email address.",
             )
         if result.status == "failed":
             log_security_event(
@@ -207,9 +207,10 @@ class AuthService:
                 actor_user_id=str(user.id),
                 message=f"Verification email delivery failed via provider '{result.provider}'.",
             )
+            err_detail = f": {result.error_message}" if result.error_message else "."
             return (
                 "failed",
-                "Account created, but verification email delivery failed. Please request a new verification email.",
+                f"Verification email delivery failed{err_detail} Please request a new verification email.",
             )
         return (
             "not_configured",
@@ -498,12 +499,22 @@ class AuthService:
             settings=self._settings,
             now=now,
         )
-        delivery_status, _ = self._dispatch_verification_email(
+        delivery_status, delivery_message = self._dispatch_verification_email(
             user=user,
             raw_token=token,
         )
         is_dev = self._settings.app_env.lower() in ("development", "test", "testing", "local")
         can_access = bool(user.is_email_verified)
+
+        if not can_access:
+            if delivery_status == "submitted":
+                reg_inv_msg = "Account registered and invitation accepted. Verification email sent. Please check your inbox and spam folder."
+            elif delivery_status == "failed":
+                reg_inv_msg = f"Account registered and invitation accepted, but verification email delivery failed ({delivery_message}). Please request a new verification email."
+            else:
+                reg_inv_msg = "Account registered and invitation accepted. Email verification delivery is not yet configured in this environment."
+        else:
+            reg_inv_msg = "Account registered and invitation accepted successfully."
 
         return RegisterWithInvitationResponse(
             user=build_user_summary(user, roles=[default_role.name]),
@@ -517,12 +528,7 @@ class AuthService:
             project_membership_status=accept_res.project_membership_status,
             can_access_project_immediately=can_access,
             development_verification_token=token if is_dev else None,
-            message=(
-                "Account registered and invitation accepted. "
-                "Email verification is required before accessing project resources."
-                if not can_access
-                else "Account registered and invitation accepted successfully."
-            ),
+            message=reg_inv_msg,
         )
 
     def login(
@@ -1273,7 +1279,7 @@ class AuthService:
             settings=self._settings,
             now=now,
         )
-        delivery_status, _ = self._dispatch_verification_email(
+        delivery_status, delivery_message = self._dispatch_verification_email(
             user=user,
             raw_token=token,
         )
@@ -1281,12 +1287,54 @@ class AuthService:
             event_type="auth.email_verification.token_issued",
             outcome="success",
             actor_user_id=str(user.id),
-            message=f"Issued email verification token for user '{user.id}'.",
+            message=f"Issued email verification token for user '{user.id}'. Delivery status: {delivery_status}.",
         )
 
         is_dev = self._settings.app_env.lower() in ("development", "test", "testing", "local")
         return RequestEmailVerificationResponse(
-            message=generic_message,
+            message=delivery_message,
+            email_verification_delivery=delivery_status,
+            development_verification_token=token if is_dev else None,
+        )
+
+    def request_email_verification_for_user(
+        self,
+        *,
+        user: User,
+    ) -> RequestEmailVerificationResponse:
+        """Generate and dispatch verification email for a known authenticated user using their persisted email."""
+        fresh_user = self._user_repo.get_by_id(user.id)
+        if fresh_user is None or fresh_user.status != UserStatus.ACTIVE.value:
+            raise UnauthorizedError("User account is inactive or not found.", code="USER_INACTIVE")
+
+        if fresh_user.is_email_verified:
+            return RequestEmailVerificationResponse(
+                message="This email address is already verified.",
+                email_verification_delivery="not_configured",
+                development_verification_token=None,
+            )
+
+        now = utc_now()
+        token = generate_email_verification_token(
+            user_id=fresh_user.id,
+            email=fresh_user.email,
+            settings=self._settings,
+            now=now,
+        )
+        delivery_status, delivery_message = self._dispatch_verification_email(
+            user=fresh_user,
+            raw_token=token,
+        )
+        log_security_event(
+            event_type="auth.email_verification.resend_authenticated",
+            outcome="success",
+            actor_user_id=str(fresh_user.id),
+            message=f"Resent email verification token for authenticated user '{fresh_user.id}'. Delivery status: {delivery_status}.",
+        )
+
+        is_dev = self._settings.app_env.lower() in ("development", "test", "testing", "local")
+        return RequestEmailVerificationResponse(
+            message=delivery_message,
             email_verification_delivery=delivery_status,
             development_verification_token=token if is_dev else None,
         )

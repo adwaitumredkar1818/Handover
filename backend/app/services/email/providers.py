@@ -128,18 +128,58 @@ class ResendEmailProvider:
                         headers=headers,
                     )
 
+            recipient_domain = message.to_email.split("@")[-1] if "@" in message.to_email else "unknown"
+
             if 200 <= resp.status_code < 300:
                 data = resp.json() if resp.content else {}
                 msg_id = str(data.get("id")) if isinstance(data, dict) and data.get("id") else None
+                logger.info(
+                    "Resend email submitted successfully (message_id=%s, recipient_domain=@%s).",
+                    msg_id,
+                    recipient_domain,
+                )
                 return EmailDeliveryResult(
                     status="submitted",
                     provider=self.provider_name,
                     provider_message_id=msg_id,
                 )
 
-            # Never log payload/tokens; log only HTTP status and sanitized error summary.
-            err_summary = f"Resend API rejected request with HTTP {resp.status_code}."
-            logger.warning(err_summary)
+            # Never log raw secrets/tokens; parse error json and extract sanitized reason
+            err_data: dict[str, Any] = {}
+            if resp.content:
+                try:
+                    parsed = resp.json()
+                    if isinstance(parsed, dict):
+                        err_data = parsed
+                except Exception:
+                    pass
+
+            raw_msg = str(err_data.get("message") or "").strip()
+            raw_name = str(err_data.get("name") or "").strip()
+
+            # Provide actionable guidance for the known Resend sandbox restriction:
+            # Resend free testing domain `onboarding@resend.dev` only allows sending to the Resend account owner's email address.
+            lower_msg = raw_msg.lower()
+            if "testing domain" in lower_msg or "only send to your own" in lower_msg or ("validation_error" in raw_name.lower() and "own email" in lower_msg):
+                err_summary = (
+                    f"Resend sandbox limitation (HTTP {resp.status_code}): {raw_msg} "
+                    "To send verification emails to any recipient, verify a custom sending domain at resend.com/domains."
+                )
+            elif resp.status_code == 403 and "domain" in lower_msg:
+                err_summary = (
+                    f"Resend sender domain error (HTTP {resp.status_code}): {raw_msg} "
+                    "Please verify your domain in the Resend dashboard or use onboarding@resend.dev."
+                )
+            elif raw_msg:
+                err_summary = f"Resend API rejected request with HTTP {resp.status_code}: {raw_msg}."
+            else:
+                err_summary = f"Resend API rejected request with HTTP {resp.status_code}."
+
+            logger.warning(
+                "Resend delivery failed for recipient domain '@%s': %s",
+                recipient_domain,
+                err_summary,
+            )
             return EmailDeliveryResult(
                 status="failed",
                 provider=self.provider_name,

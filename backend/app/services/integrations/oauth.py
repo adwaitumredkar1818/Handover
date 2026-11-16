@@ -141,14 +141,18 @@ class SourceOAuthService:
 
     def ensure_provider_enabled(self, provider: str) -> str:
         normalized = provider.strip().lower()
-        if normalized == "slack":
+        if (
+            normalized == IntegrationProvider.SLACK.value
+            and not self._settings.integrations.slack_enabled
+        ):
             raise ConflictError(
-                "Slack integration is disabled pending governance approval.",
+                "Slack integration is disabled.",
                 code="SLACK_INTEGRATION_DISABLED",
             )
         if normalized not in {
             IntegrationProvider.GITHUB.value,
             IntegrationProvider.JIRA.value,
+            IntegrationProvider.SLACK.value,
         }:
             raise BadRequestError(
                 f"Unsupported integration provider '{provider}'.",

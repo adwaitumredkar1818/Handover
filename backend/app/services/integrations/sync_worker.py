@@ -462,6 +462,25 @@ class SourceSyncWorkerService:
                         sync_mode=sync_mode,
                     )
 
+                if active_mapping.provider in (IntegrationProvider.SLACK.value, "slack"):
+                    from app.services.integrations.slack_client import SlackClient
+                    from app.services.integrations.slack_sync import SlackSyncOrchestrator
+
+                    slack = SlackSyncOrchestrator(
+                        settings=self._settings,
+                        client=SlackClient(settings=self._settings),
+                        repo=int_repo,
+                        policy_service=policy_svc,
+                        ingestor=ingestor,
+                    )
+                    return slack.sync_mapping(
+                        mapping=active_mapping,
+                        policy=policy,
+                        access_token=access_token,
+                        actor_user_id=loaded_auth.user_id,
+                        sync_mode=sync_mode,
+                    )
+
                 site_url = (
                     str(active_mapping.sync_config_json.get("site_url"))
                     if isinstance(active_mapping.sync_config_json, dict)
@@ -607,6 +626,26 @@ class SourceSyncWorkerService:
                     f"Completed {mapping.provider} source sync run with status '{final_status}'."
                 ),
             )
+
+            from app.models.notification import NotificationItem
+            notif = NotificationItem(
+                organisation_id=sync_run.organisation_id,
+                project_id=sync_run.project_id,
+                user_id=sync_run.triggered_by_user_id,
+                notification_type=(
+                    "source_sync_completed"
+                    if final_status == SourceSyncRunStatus.SUCCEEDED.value
+                    else "source_sync_partial"
+                ),
+                title=f"{mapping.provider.capitalize()} Sync {final_status.capitalize()}",
+                body=(
+                    f"Synchronised {mapping.external_resource_name or mapping.external_resource_key}. "
+                    f"{report.items_created} created, {report.items_updated} updated, {report.items_unchanged} unchanged."
+                ),
+                severity="success" if final_status == SourceSyncRunStatus.SUCCEEDED.value else "warning",
+                metadata_json=job.result_json or {},
+            )
+            session.add(notif)
             session.commit()
 
     def _complete_failure(
@@ -721,4 +760,21 @@ class SourceSyncWorkerService:
                         message="Source sync run failed permanently.",
                         level=logging.ERROR,
                     )
+
+                    from app.models.notification import NotificationItem
+                    notif = NotificationItem(
+                        organisation_id=sync_run.organisation_id,
+                        project_id=sync_run.project_id,
+                        user_id=sync_run.triggered_by_user_id,
+                        notification_type="source_sync_failed",
+                        title=f"{mapping.provider.capitalize() if mapping else 'Source'} Sync Failed",
+                        body=f"Sync failed for {mapping.external_resource_name if mapping else 'source'}: {safe_message}",
+                        severity="error",
+                        metadata_json={
+                            "error_code": error_code[:64],
+                            "job_id": str(job.id),
+                            "mapping_id": str(mapping_id),
+                        },
+                    )
+                    session.add(notif)
             session.commit()

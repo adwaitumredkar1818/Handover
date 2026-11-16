@@ -68,6 +68,47 @@ class SourceAccessPolicyService:
             visibility_policy=SourceVisibilityPolicy.RESTRICTED_FAIL_CLOSED.value,
         )
 
+    def classify_slack_channel(
+        self,
+        *,
+        is_private: bool = False,
+    ) -> PolicyClassification:
+        """Classify a Slack channel: private channels require verified source ACL."""
+        if is_private:
+            return PolicyClassification(
+                acl_scope="source_restricted",
+                visibility_policy=SourceVisibilityPolicy.VERIFIED_SOURCE_ACL.value,
+            )
+        return PolicyClassification(
+            acl_scope="project_members",
+            visibility_policy=SourceVisibilityPolicy.PROJECT_MEMBERS_VERIFIED.value,
+        )
+
+    def classify_resource(
+        self,
+        *,
+        provider: str,
+        resource_visibility: str = "private",
+        policy: Any = None,
+        is_private: bool | None = None,
+    ) -> PolicyClassification:
+        """Generic classification dispatcher for connected resources."""
+        norm = provider.strip().lower()
+        if norm == "slack":
+            private_flag = is_private if is_private is not None else (resource_visibility == "private")
+            return self.classify_slack_channel(is_private=private_flag)
+        elif norm == "github":
+            return self.classify_github_repository(
+                visibility=resource_visibility,
+                is_private=(resource_visibility in ("private", "internal")),
+            )
+        elif norm == "jira":
+            return self.classify_jira_project()
+        return PolicyClassification(
+            acl_scope="source_restricted",
+            visibility_policy=SourceVisibilityPolicy.VERIFIED_SOURCE_ACL.value,
+        )
+
     def can_user_access_evidence(
         self,
         *,

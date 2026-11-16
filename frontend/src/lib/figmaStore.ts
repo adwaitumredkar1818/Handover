@@ -14,7 +14,7 @@ export type MemberRole = ProjectRole | 'contributor' | 'viewer'
 export type Verification = 'verified' | 'needs_review' | 'rejected' | 'conflicting' | 'insufficient'
 export type SourceType = 'github' | 'jira' | 'slack' | 'docs' | 'confluence' | 'gdrive'
 export type HandoverStatus = 'draft' | 'in_progress' | 'pending_review' | 'approved' | 'published' | 'completed'
-export type EvidenceType = 'commit' | 'pr' | 'issue' | 'message' | 'pdf' | 'docx'
+export type EvidenceType = 'commit' | 'pr' | 'issue' | 'message' | 'pdf' | 'docx' | 'team_roster' | 'meeting_notes' | 'project_document' | 'source_code'
 
 export const ROLE_LABEL: Record<MemberRole, string> = {
   manager: 'Project Manager',

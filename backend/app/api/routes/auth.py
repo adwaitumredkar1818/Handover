@@ -10,11 +10,13 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from app.api.deps import (
     get_app_settings,
     get_auth_service,
+    get_optional_principal,
     get_organisation_service,
     require_auth_rate_limit,
     require_permission,
 )
 from app.core.config import Settings
+from app.core.exceptions import BadRequestError
 from app.core.security import (
     clear_refresh_cookie,
     set_refresh_cookie,
@@ -193,10 +195,23 @@ def verify_email(
     dependencies=[Depends(require_auth_rate_limit("resend_verification"))],
 )
 def request_email_verification(
-    payload: RequestEmailVerificationRequest,
+    payload: RequestEmailVerificationRequest | None = None,
+    principal: Annotated[AuthenticatedPrincipal | None, Depends(get_optional_principal)] = None,
     auth_service: AuthService = Depends(get_auth_service),  # noqa: B008
 ) -> RequestEmailVerificationResponse:
-    """Generate email verification link for an unverified account."""
+    """Generate email verification link for an unverified account.
+
+    If caller is authenticated via JWT/session, the verified email from the database is used.
+    If unauthenticated, payload.email is required.
+    """
+    if principal is not None:
+        return auth_service.request_email_verification_for_user(user=principal.user)
+
+    if payload is None or not payload.email:
+        raise BadRequestError(
+            "Email address is required to request a verification link.",
+            code="EMAIL_REQUIRED",
+        )
     return auth_service.request_email_verification(payload=payload)
 
 
@@ -208,10 +223,23 @@ def request_email_verification(
     dependencies=[Depends(require_auth_rate_limit("resend_verification"))],
 )
 def resend_email_verification(
-    payload: RequestEmailVerificationRequest,
+    payload: RequestEmailVerificationRequest | None = None,
+    principal: Annotated[AuthenticatedPrincipal | None, Depends(get_optional_principal)] = None,
     auth_service: AuthService = Depends(get_auth_service),  # noqa: B008
 ) -> RequestEmailVerificationResponse:
-    """Resend email verification link for an unverified account."""
+    """Resend email verification link for an unverified account.
+
+    If caller is authenticated via JWT/session, the verified email from the database is used.
+    If unauthenticated, payload.email is required.
+    """
+    if principal is not None:
+        return auth_service.request_email_verification_for_user(user=principal.user)
+
+    if payload is None or not payload.email:
+        raise BadRequestError(
+            "Email address is required to resend a verification link.",
+            code="EMAIL_REQUIRED",
+        )
     return auth_service.request_email_verification(payload=payload)
 
 

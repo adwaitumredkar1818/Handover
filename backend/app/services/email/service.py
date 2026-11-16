@@ -114,11 +114,15 @@ class TransactionalEmailService:
                 tags={"category": "email_verification"},
             )
         )
+        recipient_domain = to_email.split("@")[-1] if "@" in to_email else "unknown"
         logger.info(
-            "Verification email dispatch completed: provider=%s status=%s",
+            "Verification email dispatch completed: provider=%s status=%s recipient_domain=@%s",
             result.provider,
             result.status,
+            recipient_domain,
         )
+        if result.status == "failed":
+            logger.warning("Verification email delivery failed: %s", result.error_message)
         return result
 
     def send_project_invitation_email(

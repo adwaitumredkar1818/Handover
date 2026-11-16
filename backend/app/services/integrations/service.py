@@ -42,9 +42,12 @@ from app.models.integration import (
 from app.repositories.integration import IntegrationRepository
 from app.repositories.job import BackgroundJobRepository
 from app.schemas.integrations import (
+    BatchCreateMappingsRequest,
+    BatchCreateMappingsResponse,
     CancelSyncResponse,
     CreateGitHubMappingRequest,
     CreateJiraMappingRequest,
+    CreateSlackMappingRequest,
     GitHubRepositoryListResponse,
     JiraDiscoveryResponse,
     JiraProjectCandidate,
@@ -54,6 +57,8 @@ from app.schemas.integrations import (
     OAuthStartResponse,
     ProjectSourceMappingListResponse,
     ProjectSourceMappingResponse,
+    SlackChannelCandidate as SlackChannelCandidateSchema,
+    SlackChannelListResponse,
     SourceAccessPolicyResponse,
     SourceConnectionListResponse,
     SourceConnectionResponse,
@@ -68,6 +73,7 @@ from app.services.integrations.access_policy import SourceAccessPolicyService
 from app.services.integrations.errors import IntegrationAuthError, IntegrationProviderError
 from app.services.integrations.github_client import GitHubClient
 from app.services.integrations.jira_client import JiraClient
+from app.services.integrations.slack_client import SlackClient
 from app.services.integrations.oauth import SourceOAuthService, to_source_connection_response
 from app.services.rbac import (
     AuthenticatedPrincipal,
@@ -199,6 +205,7 @@ class SourceIntegrationService:
         )
         self._github = GitHubClient(settings=settings, transport=http_transport)
         self._jira = JiraClient(settings=settings, transport=http_transport)
+        self._slack = SlackClient(settings=settings)
 
     def _require_org_active(self, organisation_status: str) -> None:
         if organisation_status != OrganisationStatus.ACTIVE.value:
@@ -279,9 +286,12 @@ class SourceIntegrationService:
                 "Source connection has been disconnected.",
                 code="CONNECTION_DISCONNECTED",
             )
-        if connection.provider.strip().lower() == "slack":
+        if (
+            connection.provider.strip().lower() == "slack"
+            and not self._settings.integrations.slack_enabled
+        ):
             raise ConflictError(
-                "Slack integration is disabled pending governance approval.",
+                "Slack integration is disabled.",
                 code="SLACK_INTEGRATION_DISABLED",
             )
 
@@ -541,6 +551,7 @@ class SourceIntegrationService:
         *,
         connection_id: uuid.UUID,
         principal: AuthenticatedPrincipal,
+        project_id: uuid.UUID | None = None,
         page: int = 1,
         per_page: int = 30,
     ) -> GitHubRepositoryListResponse:
@@ -560,6 +571,20 @@ class SourceIntegrationService:
             )
         except IntegrationProviderError as exc:
             raise ServiceUnavailableError(exc.message, code=exc.code) from exc
+
+        if project_id:
+            existing_mappings = self._repo.list_mappings_for_project(project_id=project_id)
+            mapped_keys: set[str] = set()
+            for m in existing_mappings:
+                if m.provider == "github" and m.status == "active":
+                    mapped_keys.add(m.external_resource_key.lower())
+                    mapped_keys.add(m.external_resource_id.lower())
+            for item in items:
+                if (
+                    item.full_name.lower() in mapped_keys
+                    or item.external_resource_id.lower() in mapped_keys
+                ):
+                    object.__setattr__(item, "already_mapped", True)
 
         self._audit.record_event(
             event_type="integration.discovery_executed",
@@ -698,6 +723,52 @@ class SourceIntegrationService:
             is_last=result.is_last,
         )
 
+    def discover_slack_channels(
+        self,
+        *,
+        connection_id: uuid.UUID,
+        principal: AuthenticatedPrincipal,
+    ) -> SlackChannelListResponse:
+        connection, _, auth = self._resolve_caller_connection_and_auth(
+            connection_id=connection_id,
+            principal=principal,
+            expected_provider="slack",
+        )
+        try:
+            channels = self._execute_with_caller_token(
+                auth=auth,
+                fn=lambda token, _a: self._slack.list_channels(access_token=token),
+            )
+        except IntegrationProviderError as exc:
+            raise ServiceUnavailableError(exc.message, code=exc.code) from exc
+
+        self._audit.record_event(
+            event_type="integration.discovery_executed",
+            resource_type="source_connection",
+            actor_user_id=principal.user.id,
+            organisation_id=connection.organisation_id,
+            resource_id=str(connection.id),
+            metadata={"provider": "slack", "returned_count": len(channels)},
+            message="Executed delegated Slack channel discovery.",
+        )
+        self._session.commit()
+        return SlackChannelListResponse(
+            connection_id=connection.id,
+            items=[
+                SlackChannelCandidateSchema(
+                    id=ch.id,
+                    name=ch.name,
+                    is_private=ch.is_private,
+                    is_archived=ch.is_archived,
+                    num_members=ch.num_members,
+                    topic=ch.topic,
+                    purpose=ch.purpose,
+                )
+                for ch in channels
+            ],
+            total=len(channels),
+        )
+
     def list_project_mappings(
         self,
         *,
@@ -823,6 +894,15 @@ class SourceIntegrationService:
                 "include_commits": request.include_commits,
                 "include_docs": request.include_docs,
                 "include_discussions": request.include_discussions,
+                "branch_scope": request.branch_scope,
+                "selected_branches": request.selected_branches,
+                "commit_scope": request.commit_scope,
+                "commit_since": request.commit_since.isoformat() if request.commit_since else None,
+                "pr_scope": request.pr_scope,
+                "issue_scope": request.issue_scope,
+                "include_reviews": request.include_reviews,
+                "include_comments": request.include_comments,
+                "include_code": request.include_code,
                 "restrict_to_verified_users": bool(request.restrict_to_verified_users),
             },
         )
@@ -1000,6 +1080,169 @@ class SourceIntegrationService:
         self._session.commit()
         refreshed = self._repo.get_mapping_by_id(mapping.id) or mapping
         return to_mapping_response(refreshed)
+
+    def create_slack_mapping(
+        self,
+        *,
+        project_ctx: ProjectContext,
+        request: CreateSlackMappingRequest,
+    ) -> ProjectSourceMappingResponse:
+        self._require_project_mutable(project_ctx)
+        connection, _, auth = self._resolve_caller_connection_and_auth(
+            connection_id=request.source_connection_id,
+            principal=project_ctx.principal,
+            expected_provider="slack",
+        )
+        if connection.organisation_id != project_ctx.organisation.id:
+            raise NotFoundError(
+                "Source connection was not found.",
+                code="SOURCE_CONNECTION_NOT_FOUND",
+            )
+
+        channel_id = request.channel_id.strip()
+        channel_name = request.channel_name.strip().replace("#", "")
+
+        existing = self._repo.find_active_mapping(
+            project_id=project_ctx.project.id,
+            provider="slack",
+            external_site_id=connection.external_workspace_id or "slack",
+            external_resource_id=channel_id,
+        )
+        if existing is not None:
+            raise ConflictError(
+                f"Slack channel #{channel_name} is already mapped to this project.",
+                code="SOURCE_MAPPING_ALREADY_EXISTS",
+            )
+
+        now = utc_now()
+        policy = self._repo.upsert_access_policy(
+            organisation_id=project_ctx.organisation.id,
+            project_id=project_ctx.project.id,
+            source_connection_id=connection.id,
+            provider="slack",
+            scope_identifier=f"slack:{connection.external_workspace_id or 'workspace'}:{channel_id}",
+            visibility_policy="verified_source_acl",
+            sync_permission_status=SourcePermissionVerificationStatus.VERIFIED.value,
+            authorised_by_user_id=project_ctx.principal.user.id,
+            verified_user_id=project_ctx.principal.user.id,
+            external_identity={
+                "provider": "slack",
+                "external_user_id": auth.external_user_id,
+                "external_username": auth.external_username,
+            },
+            provider_visibility="private",
+            verified_at=now,
+        )
+
+        mapping = self._repo.create_mapping(
+            organisation_id=project_ctx.organisation.id,
+            project_id=project_ctx.project.id,
+            source_connection_id=connection.id,
+            source_access_policy_id=policy.id,
+            created_by_user_id=project_ctx.principal.user.id,
+            provider="slack",
+            resource_type="slack_channel",
+            external_site_id=connection.external_workspace_id or "slack",
+            external_resource_id=channel_id,
+            external_resource_key=f"#{channel_name}",
+            external_resource_name=channel_name,
+            external_resource_url=f"https://app.slack.com/client/{connection.external_workspace_id or 'workspace'}/{channel_id}",
+            default_branch=None,
+            provider_visibility="private",
+            sync_config_json={
+                "include_threads": request.include_threads,
+                "include_files": request.include_files,
+            },
+        )
+        self._audit.record_event(
+            event_type="integration.mapping_created",
+            resource_type="project_source_mapping",
+            actor_user_id=project_ctx.principal.user.id,
+            organisation_id=project_ctx.organisation.id,
+            project_id=project_ctx.project.id,
+            resource_id=str(mapping.id),
+            metadata={"provider": "slack", "channel_id": channel_id, "channel_name": channel_name},
+            message=f"Mapped Slack channel #{channel_name} into project.",
+        )
+        self._session.commit()
+        refreshed = self._repo.get_mapping_by_id(mapping.id) or mapping
+        return to_mapping_response(refreshed)
+
+    def batch_create_mappings(
+        self,
+        *,
+        project_ctx: ProjectContext,
+        request: BatchCreateMappingsRequest,
+    ) -> BatchCreateMappingsResponse:
+        self._require_project_mutable(project_ctx)
+        created: list[ProjectSourceMappingResponse] = []
+        errors: list[str] = []
+        failed = 0
+
+        provider = request.provider
+        if not provider:
+            conn = self._repo.get_connection_by_id(request.source_connection_id)
+            if conn:
+                provider = conn.provider
+
+        for item in request.items:
+            try:
+                item_provider = provider or (item.get("resource_type") or "").split("_")[0]
+                if item_provider == "github":
+                    gh_req = CreateGitHubMappingRequest(
+                        source_connection_id=request.source_connection_id,
+                        owner=item.get("owner") or item.get("full_name", "").split("/")[0],
+                        repo=item.get("repo") or item.get("name") or item.get("full_name", "").split("/")[-1],
+                        include_issues=item.get("include_issues", True),
+                        include_pull_requests=item.get("include_pull_requests", True),
+                        include_commits=item.get("include_commits", True),
+                        include_docs=item.get("include_docs", True),
+                        include_discussions=item.get("include_discussions", True),
+                        branch_scope=item.get("branch_scope", "default"),
+                        selected_branches=item.get("selected_branches", []),
+                        commit_scope=item.get("commit_scope", "all"),
+                        commit_since=item.get("commit_since"),
+                        pr_scope=item.get("pr_scope", "all"),
+                        issue_scope=item.get("issue_scope", "all"),
+                        include_reviews=item.get("include_reviews", True),
+                        include_comments=item.get("include_comments", True),
+                        include_code=item.get("include_code", False),
+                    )
+                    res = self.create_github_mapping(project_ctx=project_ctx, request=gh_req)
+                    created.append(res)
+                elif item_provider == "jira":
+                    jira_req = CreateJiraMappingRequest(
+                        source_connection_id=request.source_connection_id,
+                        cloud_id=item.get("cloud_id", ""),
+                        project_key=item.get("project_key") or item.get("key", ""),
+                        include_comments=item.get("include_comments", True),
+                        include_worklogs=item.get("include_worklogs", True),
+                        include_links=item.get("include_links", True),
+                        include_changelog=item.get("include_changelog", True),
+                    )
+                    res = self.create_jira_mapping(project_ctx=project_ctx, request=jira_req)
+                    created.append(res)
+                elif item_provider == "slack":
+                    slack_req = CreateSlackMappingRequest(
+                        source_connection_id=request.source_connection_id,
+                        channel_id=item.get("channel_id") or item.get("external_resource_key") or item.get("id", ""),
+                        channel_name=item.get("channel_name") or item.get("external_resource_name") or item.get("name", ""),
+                        include_threads=item.get("include_threads", True),
+                        include_files=item.get("include_files", False),
+                    )
+                    res = self.create_slack_mapping(project_ctx=project_ctx, request=slack_req)
+                    created.append(res)
+            except Exception as exc:
+                failed += 1
+                identifier = item.get("full_name") or item.get("key") or item.get("name") or "item"
+                errors.append(f"{identifier}: {exc}")
+
+        return BatchCreateMappingsResponse(
+            created_mappings=created,
+            created_count=len(created),
+            failed_count=failed,
+            errors=errors,
+        )
 
     def disable_mapping(
         self,

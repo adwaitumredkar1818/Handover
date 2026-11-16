@@ -66,6 +66,8 @@ class EvidenceSummaryResponse(BaseSchema):
     source_provider: str
     provider: str | None = None
     category: str
+    document_category: str | None = None
+    document_subtype: str | None = None
     source_external_id: str
     source_url: str | None
     source_author_identity: str | None

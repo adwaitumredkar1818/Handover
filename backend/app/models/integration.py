@@ -48,7 +48,7 @@ class SourceConnection(Base):
 
     __tablename__ = "source_connections"
     __table_args__ = (
-        CheckConstraint("provider IN ('github', 'jira')", name="source_connection_provider"),
+        CheckConstraint("provider IN ('github', 'jira', 'slack')", name="source_connection_provider"),
         CheckConstraint(
             "authorisation_mode IN ('delegated_per_user')",
             name="source_connection_authorisation_mode",
@@ -153,7 +153,7 @@ class UserSourceAuthorisation(Base):
 
     __tablename__ = "user_source_authorisations"
     __table_args__ = (
-        CheckConstraint("provider IN ('github', 'jira')", name="user_source_auth_provider"),
+        CheckConstraint("provider IN ('github', 'jira', 'slack')", name="user_source_auth_provider"),
         CheckConstraint(
             "status IN ('active', 'expired', 'revoked', 'error')",
             name="user_source_auth_status",
@@ -273,7 +273,7 @@ class OAuthState(Base):
 
     __tablename__ = "oauth_states"
     __table_args__ = (
-        CheckConstraint("provider IN ('github', 'jira')", name="oauth_state_provider"),
+        CheckConstraint("provider IN ('github', 'jira', 'slack')", name="oauth_state_provider"),
         CheckConstraint("length(state_hash) = 64", name="oauth_state_hash_sha256_len"),
         Index("ix_oauth_states_user_expires", "user_id", "expires_at"),
     )
@@ -329,7 +329,7 @@ class SourceAccessPolicy(Base):
 
     __tablename__ = "source_access_policies"
     __table_args__ = (
-        CheckConstraint("provider IN ('github', 'jira')", name="source_access_policy_provider"),
+        CheckConstraint("provider IN ('github', 'jira', 'slack')", name="source_access_policy_provider"),
         CheckConstraint(
             "visibility_policy IN ("
             "'restricted_fail_closed', 'explicit_user_grants', "
@@ -434,9 +434,9 @@ class ProjectSourceMapping(Base):
 
     __tablename__ = "project_source_mappings"
     __table_args__ = (
-        CheckConstraint("provider IN ('github', 'jira')", name="project_source_mapping_provider"),
+        CheckConstraint("provider IN ('github', 'jira', 'slack')", name="project_source_mapping_provider"),
         CheckConstraint(
-            "resource_type IN ('github_repository', 'jira_project')",
+            "resource_type IN ('github_repository', 'jira_project', 'slack_channel')",
             name="project_source_mapping_resource_type",
         ),
         CheckConstraint(
@@ -555,7 +555,7 @@ class SourceSyncRun(Base):
 
     __tablename__ = "source_sync_runs"
     __table_args__ = (
-        CheckConstraint("provider IN ('github', 'jira')", name="source_sync_run_provider"),
+        CheckConstraint("provider IN ('github', 'jira', 'slack')", name="source_sync_run_provider"),
         CheckConstraint(
             "sync_mode IN ('initial', 'incremental', 'manual')",
             name="source_sync_run_mode",

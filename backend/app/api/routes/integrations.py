@@ -16,9 +16,12 @@ from app.api.deps import (
 )
 from app.core.exceptions import ForbiddenError
 from app.schemas.integrations import (
+    BatchCreateMappingsRequest,
+    BatchCreateMappingsResponse,
     CancelSyncResponse,
     CreateGitHubMappingRequest,
     CreateJiraMappingRequest,
+    CreateSlackMappingRequest,
     GitHubRepositoryListResponse,
     JiraDiscoveryResponse,
     JiraSiteListResponse,
@@ -27,6 +30,7 @@ from app.schemas.integrations import (
     OAuthStartResponse,
     ProjectSourceMappingListResponse,
     ProjectSourceMappingResponse,
+    SlackChannelListResponse,
     SourceConnectionListResponse,
     SourceConnectionResponse,
     SourceSyncHistoryResponse,
@@ -174,6 +178,7 @@ def discover_github_repositories(
     connection_id: uuid.UUID,
     principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
     service: Annotated[SourceIntegrationService, Depends(get_source_integration_service)],
+    project_id: Annotated[uuid.UUID | None, Query()] = None,
     page: Annotated[int, Query(ge=1, le=200)] = 1,
     per_page: Annotated[int, Query(ge=1, le=100)] = 30,
 ) -> GitHubRepositoryListResponse:
@@ -181,6 +186,7 @@ def discover_github_repositories(
     return service.discover_github_repositories(
         connection_id=connection_id,
         principal=principal,
+        project_id=project_id,
         page=page,
         per_page=per_page,
     )
@@ -227,6 +233,24 @@ def discover_jira_projects(
         start_at=start_at,
         max_results=max_results,
         query=query,
+    )
+
+
+@router.get(
+    "/integrations/connections/{connection_id}/slack/channels",
+    response_model=SlackChannelListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Discover Slack channels accessible in the connected workspace",
+)
+def discover_slack_channels(
+    connection_id: uuid.UUID,
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
+    service: Annotated[SourceIntegrationService, Depends(get_source_integration_service)],
+) -> SlackChannelListResponse:
+    """List accessible Slack channels in the workspace."""
+    return service.discover_slack_channels(
+        connection_id=connection_id,
+        principal=principal,
     )
 
 
@@ -281,6 +305,38 @@ def create_jira_mapping(
     """Verify caller site & project access and bind one Jira project cleanly."""
     _require_project_contributor_or_manager(project_ctx)
     return service.create_jira_mapping(project_ctx=project_ctx, request=request)
+
+
+@router.post(
+    "/projects/{project_id}/integrations/slack/mappings",
+    response_model=ProjectSourceMappingResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Map an explicitly selected Slack channel into a project workspace",
+)
+def create_slack_mapping(
+    request: CreateSlackMappingRequest,
+    project_ctx: Annotated[ProjectContext, Depends(resolve_project_context)],
+    service: Annotated[SourceIntegrationService, Depends(get_source_integration_service)],
+) -> ProjectSourceMappingResponse:
+    """Verify caller access and bind one Slack channel cleanly."""
+    _require_project_contributor_or_manager(project_ctx)
+    return service.create_slack_mapping(project_ctx=project_ctx, request=request)
+
+
+@router.post(
+    "/projects/{project_id}/integrations/batch-mappings",
+    response_model=BatchCreateMappingsResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Batch map multiple repositories, projects, or channels into a project workspace",
+)
+def batch_create_mappings(
+    request: BatchCreateMappingsRequest,
+    project_ctx: Annotated[ProjectContext, Depends(resolve_project_context)],
+    service: Annotated[SourceIntegrationService, Depends(get_source_integration_service)],
+) -> BatchCreateMappingsResponse:
+    """Batch map selected source items."""
+    _require_project_contributor_or_manager(project_ctx)
+    return service.batch_create_mappings(project_ctx=project_ctx, request=request)
 
 
 @router.delete(

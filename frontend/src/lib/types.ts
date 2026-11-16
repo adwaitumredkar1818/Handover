@@ -152,6 +152,7 @@ export interface SourceConnection {
   organisation_id: UUID;
   provider: "github" | "jira" | "slack";
   display_name: string;
+  account_identifier?: string;
   status: string;
   last_synced_at: string | null;
 }
@@ -663,4 +664,71 @@ export interface RequestEmailVerificationResponse {
   message: string;
   email_verification_delivery: "not_configured" | "submitted" | "failed";
   development_verification_token?: string | null;
+}
+
+export interface NotificationItem {
+  id: string;
+  organisation_id: string;
+  project_id?: string | null;
+  user_id?: string | null;
+  notification_type: string;
+  title: string;
+  body: string;
+  severity: "info" | "success" | "warning" | "error";
+  is_read: boolean;
+  read_at?: string | null;
+  metadata_json: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ActiveSyncJob {
+  id: string;
+  project_id: string;
+  job_type: string;
+  status: string;
+  stage?: string;
+  progress_percent: number;
+  attempt_count: number;
+  message?: string;
+  created_at: string;
+  started_at?: string;
+}
+
+export interface TeamRosterMemberItem {
+  id: string;
+  project_id: string;
+  evidence_item_id: string;
+  member_id_in_roster?: string;
+  full_name: string;
+  email?: string;
+  role_name?: string;
+  primary_responsibilities: string[];
+  component_ownership: string[];
+  github_username?: string;
+  git_commit_email?: string;
+  jira_account_id?: string;
+  slack_user_id?: string;
+  reconciliation_status: "MATCHED" | "POSSIBLE_MATCH" | "NEW_CANDIDATE" | "AMBIGUOUS" | "CONFLICT" | "REJECTED" | string;
+  matched_project_membership_id?: string;
+  matched_member_name?: string;
+  reconciliation_confidence?: number;
+  reconciliation_notes?: string;
+  created_at: string;
+}
+
+export interface ContributionAttributionItem {
+  id: string;
+  project_id: string;
+  evidence_item_id: string;
+  contributor_identifier: string;
+  identifier_type: string;
+  matched_roster_member_id?: string;
+  matched_roster_name?: string;
+  matched_project_membership_id?: string;
+  match_method?: string;
+  match_confidence?: number;
+  contribution_category?: string;
+  responsibility_alignment?: "ALIGNED" | "PARTIALLY_ALIGNED" | "OUTSIDE_DECLARED_RESPONSIBILITY" | "UNCERTAIN" | "NOT_APPLICABLE" | string;
+  alignment_explanation?: string;
+  created_at: string;
 }

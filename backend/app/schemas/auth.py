@@ -111,7 +111,7 @@ class VerifyEmailResponse(BaseSchema):
 class RequestEmailVerificationRequest(BaseSchema):
     """Payload to request or re-send email verification instructions."""
 
-    email: NormalisedEmail = Field(description="Account email address")
+    email: NormalisedEmail | None = Field(default=None, description="Account email address")
 
 
 class RequestEmailVerificationResponse(BaseSchema):

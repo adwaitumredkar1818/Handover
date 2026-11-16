@@ -30,7 +30,21 @@ import type {
 export function getApiBaseUrl(): string {
   const configured = process.env.NEXT_PUBLIC_API_BASE_URL;
   if (configured) {
-    return configured.replace(/\/$/, "");
+    const trimmed = configured.replace(/\/$/, "");
+    if (typeof window !== "undefined") {
+      try {
+        const parsed = new URL(trimmed);
+        if (
+          (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") &&
+          window.location.hostname !== "localhost" &&
+          window.location.hostname !== "127.0.0.1"
+        ) {
+          parsed.hostname = window.location.hostname;
+          return parsed.toString().replace(/\/$/, "");
+        }
+      } catch {}
+    }
+    return trimmed;
   }
   if (typeof window !== "undefined") {
     // In browser without configured base url, fall back to same-origin relative URL
@@ -333,10 +347,10 @@ export const api = {
         body: JSON.stringify({ token }),
       });
     },
-    async resendVerification(email: string): Promise<RequestEmailVerificationResponse> {
+    async resendVerification(email?: string): Promise<RequestEmailVerificationResponse> {
       return request<RequestEmailVerificationResponse>("/auth/resend-verification", {
         method: "POST",
-        body: JSON.stringify({ email }),
+        body: JSON.stringify(email ? { email } : {}),
       });
     },
     async login(data: { email: string; password: string }): Promise<AuthSessionResponse> {
@@ -706,6 +720,44 @@ export const api = {
       const res = await request<unknown>(`/projects/${projectId}/sources/mappings/${mappingId}/jobs`);
       return unwrapList<Record<string, unknown>>(res);
     },
+    async discoverGitHubRepositories(connectionId: string, page = 1, perPage = 50, projectId?: string): Promise<{ connection_id: string; items: Array<{ external_resource_id: string; full_name: string; name: string; owner_login: string; description?: string; default_branch?: string; visibility: string; is_private: boolean; html_url?: string; updated_at?: string; language?: string; topics?: string[]; created_at?: string; pushed_at?: string; is_fork?: boolean; is_archived?: boolean; is_disabled?: boolean; open_issues_count?: number; already_mapped?: boolean }>; page: number; per_page: number; has_next_page: boolean }> {
+      const pIdQuery = projectId ? `&project_id=${encodeURIComponent(projectId)}` : "";
+      return request(`/integrations/connections/${connectionId}/github/repositories?page=${page}&per_page=${perPage}${pIdQuery}`);
+    },
+    async discoverJiraSites(connectionId: string): Promise<{ connection_id: string; items: Array<{ cloud_id: string; name: string; url?: string; scopes: string[] }>; total: number }> {
+      return request(`/integrations/connections/${connectionId}/jira/sites`);
+    },
+    async discoverJiraProjects(connectionId: string, cloudId?: string): Promise<{ connection_id: string; sites: Array<{ cloud_id: string; name: string }>; selected_cloud_id?: string; projects: Array<{ cloud_id: string; external_resource_id: string; key: string; name: string; project_type_key?: string; url?: string; is_private?: boolean }>; total: number }> {
+      const qs = cloudId ? `?cloud_id=${encodeURIComponent(cloudId)}` : "";
+      return request(`/integrations/connections/${connectionId}/jira/projects${qs}`);
+    },
+    async discoverSlackChannels(connectionId: string): Promise<{ connection_id: string; items: Array<{ id: string; name: string; is_private: boolean; is_archived: boolean; num_members: number; topic: string; purpose: string }>; total: number }> {
+      return request(`/integrations/connections/${connectionId}/slack/channels`);
+    },
+    async createGitHubMapping(projectId: string, data: { source_connection_id: string; owner: string; repo: string; include_issues?: boolean; include_pull_requests?: boolean; include_commits?: boolean; include_docs?: boolean }): Promise<ProjectSourceMapping> {
+      return request(`/projects/${projectId}/integrations/github/mappings`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async createJiraMapping(projectId: string, data: { source_connection_id: string; cloud_id: string; project_key: string; include_comments?: boolean; include_worklogs?: boolean; include_links?: boolean; include_changelog?: boolean }): Promise<ProjectSourceMapping> {
+      return request(`/projects/${projectId}/integrations/jira/mappings`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async createSlackMapping(projectId: string, data: { source_connection_id: string; channel_id: string; channel_name: string; include_threads?: boolean; include_files?: boolean }): Promise<ProjectSourceMapping> {
+      return request(`/projects/${projectId}/integrations/slack/mappings`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async batchCreateMappings(projectId: string, data: { provider: string; source_connection_id: string; items: Array<Record<string, unknown>> }): Promise<{ created_mappings: ProjectSourceMapping[]; failed_count: number; errors: string[] }> {
+      return request(`/projects/${projectId}/integrations/batch-mappings`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
   },
 
   // Evidence Workspace
@@ -729,10 +781,17 @@ export const api = {
     async getDetail(evidenceId: string): Promise<EvidenceDetail> {
       return request<EvidenceDetail>(`/evidence/${evidenceId}`);
     },
-    async upload(projectId: string, file: File, title?: string): Promise<{ document_id: string; evidence_item_id?: string; title: string; processing_status: string }> {
+    async upload(projectId: string, file: File, options?: { title?: string; document_category?: string; document_subtype?: string; custom_title?: string } | string): Promise<{ document_id: string; evidence_item_id?: string; title: string; processing_status: string }> {
       const formData = new FormData();
       formData.append("file", file);
-      if (title) formData.append("title", title);
+      if (typeof options === "string") {
+        if (options) formData.append("custom_title", options);
+      } else if (options) {
+        const titleVal = options.custom_title || options.title;
+        if (titleVal) formData.append("custom_title", titleVal);
+        if (options.document_category) formData.append("document_category", options.document_category);
+        if (options.document_subtype) formData.append("document_subtype", options.document_subtype);
+      }
       return request<{ document_id: string; evidence_item_id?: string; title: string; processing_status: string }>(
         `/projects/${projectId}/evidence/upload`,
         {
@@ -756,6 +815,53 @@ export const api = {
       return request<unknown>(`/projects/${projectId}/evidence/${evidenceId}/reprocess`, {
         method: "POST",
       });
+    },
+  },
+
+  // Persistent Notifications & Active Tasks
+  notifications: {
+    async list(projectId?: string, unreadOnly = false): Promise<{ items: Array<{ id: string; organisation_id: string; project_id?: string; user_id?: string; notification_type: string; title: string; body: string; severity: "info" | "success" | "warning" | "error"; is_read: boolean; read_at?: string; metadata_json: Record<string, unknown>; created_at: string }>; unread_count: number; total: number }> {
+      const query = new URLSearchParams();
+      if (projectId) query.append("project_id", projectId);
+      if (unreadOnly) query.append("unread_only", "true");
+      const qs = query.toString() ? `?${query.toString()}` : "";
+      return request(`/notifications${qs}`);
+    },
+    async markRead(notificationId: string): Promise<unknown> {
+      return request(`/notifications/${notificationId}/read`, { method: "PATCH" });
+    },
+    async markAllRead(): Promise<{ marked_read: number }> {
+      return request(`/notifications/mark-all-read`, { method: "POST" });
+    },
+    async listActiveJobs(projectId: string): Promise<Array<{ id: string; project_id: string; job_type: string; status: string; stage?: string; progress_percent: number; attempt_count: number; message?: string; created_at: string; started_at?: string }>> {
+      const res = await request<unknown>(`/projects/${projectId}/jobs/active`);
+      return unwrapList(res);
+    },
+  },
+
+  // Team Roster & Contribution Attribution
+  roster: {
+    async listMembers(projectId: string, evidenceId?: string, status?: string): Promise<Array<{ id: string; project_id: string; evidence_item_id: string; member_id_in_roster?: string; full_name: string; email?: string; role_name?: string; primary_responsibilities: string[]; component_ownership: string[]; github_username?: string; git_commit_email?: string; reconciliation_status: string; matched_project_membership_id?: string; matched_member_name?: string; reconciliation_confidence?: number; reconciliation_notes?: string; created_at: string }>> {
+      const query = new URLSearchParams();
+      if (evidenceId) query.append("evidence_id", evidenceId);
+      if (status) query.append("status", status);
+      const qs = query.toString() ? `?${query.toString()}` : "";
+      const res = await request<unknown>(`/projects/${projectId}/roster/members${qs}`);
+      return unwrapList(res);
+    },
+    async reconcile(projectId: string, memberId: string, data: { reconciliation_status: string; matched_project_membership_id?: string; reconciliation_notes?: string }): Promise<unknown> {
+      return request(`/projects/${projectId}/roster/members/${memberId}/reconcile`, {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      });
+    },
+    async listAttributions(projectId: string, evidenceId?: string, category?: string): Promise<Array<{ id: string; project_id: string; evidence_item_id: string; contributor_identifier: string; identifier_type: string; matched_roster_member_id?: string; matched_roster_name?: string; matched_project_membership_id?: string; match_method?: string; match_confidence?: number; contribution_category?: string; responsibility_alignment?: string; alignment_explanation?: string; created_at: string }>> {
+      const query = new URLSearchParams();
+      if (evidenceId) query.append("evidence_id", evidenceId);
+      if (category) query.append("category", category);
+      const qs = query.toString() ? `?${query.toString()}` : "";
+      const res = await request<unknown>(`/projects/${projectId}/roster/attributions${qs}`);
+      return unwrapList(res);
     },
   },
   relationships: {

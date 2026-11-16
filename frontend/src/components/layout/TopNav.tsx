@@ -25,6 +25,8 @@ import {
   Sparkles,
   Palette,
   HelpCircle,
+  RefreshCw,
+  Info,
 } from "lucide-react";
 import { Logo } from "../figma-ui/brand";
 import {
@@ -114,77 +116,213 @@ function ContextChip() {
   );
 }
 
+function ActiveJobsIndicator() {
+  const { activeJobs } = useLiveApp();
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted || !activeJobs || activeJobs.length === 0) return null;
+
+  return (
+    <Dropdown
+      width="w-80"
+      trigger={() => (
+        <button
+          type="button"
+          className="flex items-center gap-1.5 rounded-full border border-sky-300 bg-sky-50 px-2.5 py-1 text-xs font-semibold text-sky-800 shadow-2xs hover:bg-sky-100 transition animate-pulse cursor-pointer mr-1"
+        >
+          <RefreshCw className="size-3.5 animate-spin text-sky-600" />
+          <span>Syncing ({activeJobs.length})</span>
+        </button>
+      )}
+    >
+      {() => (
+        <div className="p-3">
+          <div className="flex items-center justify-between border-b border-line pb-2 mb-2">
+            <span className="text-xs font-bold text-navy">Background Sync Tasks</span>
+            <span className="text-[10.5px] font-medium text-sky-600">
+              {activeJobs.length} in progress
+            </span>
+          </div>
+          <div className="space-y-2.5 max-h-64 overflow-y-auto scrollbar-thin">
+            {activeJobs.map((job) => (
+              <div
+                key={job.id}
+                className="rounded-lg border border-line bg-slate-50/70 p-2.5 text-xs space-y-1.5"
+              >
+                <div className="flex items-center justify-between font-semibold text-navy">
+                  <span className="capitalize text-[12px]">
+                    {job.job_type.replace(/_/g, " ")}
+                  </span>
+                  <span className="text-[11px] font-mono font-bold text-sky-600">
+                    {job.progress_percent}%
+                  </span>
+                </div>
+                <div className="h-1.5 w-full rounded-full bg-slate-200 overflow-hidden">
+                  <div
+                    className="h-full bg-sky-500 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.max(8, job.progress_percent)}%` }}
+                  />
+                </div>
+                {job.message && (
+                  <p className="text-[11px] text-[#475569] leading-snug break-words">
+                    {job.message}
+                  </p>
+                )}
+                <div className="flex items-center justify-between text-[10px] text-muted pt-0.5">
+                  <span className="capitalize">{job.status}</span>
+                  {job.stage && <span className="font-mono">{job.stage}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Dropdown>
+  );
+}
+
 function NotificationsMenu() {
   const router = useRouter();
-  const { overview } = useLiveApp();
+  const {
+    overview,
+    notifications,
+    unreadNotificationsCount,
+    markNotificationRead,
+    markAllNotificationsRead,
+  } = useLiveApp();
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => {
     setMounted(true);
   }, []);
 
   const attentionItems = overview?.attention_items || [];
+  const totalCount = unreadNotificationsCount + attentionItems.length;
 
   return (
     <Dropdown
-      width="w-[340px] max-w-[calc(100vw-24px)]"
+      width="w-[380px] max-w-[calc(100vw-24px)]"
       trigger={() => (
         <IconButton
           icon={Bell}
           label="Notifications"
-          badge={attentionItems.length > 0 ? attentionItems.length : undefined}
+          badge={totalCount > 0 ? totalCount : undefined}
         />
       )}
     >
       {(close) => (
         <div>
-          <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-line">
-            <p className="text-sm font-semibold text-navy">Notifications & Attention</p>
-            {attentionItems.length > 0 && (
-              <span className="text-[11px] font-medium text-brand">
-                {attentionItems.length} active
-              </span>
+          <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-line bg-slate-50/40">
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-semibold text-navy">Notifications</p>
+              {unreadNotificationsCount > 0 && (
+                <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10.5px] font-bold text-sky-700">
+                  {unreadNotificationsCount} unread
+                </span>
+              )}
+            </div>
+            {unreadNotificationsCount > 0 && (
+              <button
+                type="button"
+                onClick={() => markAllNotificationsRead()}
+                className="text-[11px] font-medium text-brand hover:underline cursor-pointer"
+              >
+                Mark all read
+              </button>
             )}
           </div>
-          <div className="max-h-72 overflow-y-auto divide-y divide-line/60 scrollbar-thin">
-            {attentionItems.length === 0 ? (
-              <div className="p-4 text-center text-xs text-muted">
+          <div className="max-h-80 overflow-y-auto divide-y divide-line/60 scrollbar-thin">
+            {notifications.length === 0 && attentionItems.length === 0 ? (
+              <div className="p-6 text-center text-xs text-muted">
                 <CheckCircle2 className="size-6 text-ok mx-auto mb-1.5" />
-                <p className="font-semibold text-navy">All clear</p>
+                <p className="font-semibold text-navy">All caught up</p>
                 <p className="mt-0.5 text-[11px]">
-                  All source connections and evidence repositories are operational.
+                  No active sync alerts or unread notifications.
                 </p>
               </div>
             ) : (
-              attentionItems.map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => {
-                    close();
-                    router.push("/dashboard");
-                  }}
-                  className="flex w-full gap-2.5 px-3 py-2 text-left hover:bg-tint transition-colors cursor-pointer"
-                >
-                  <AlertTriangle className="size-4 text-amber-500 shrink-0 mt-0.5" />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[13px] font-medium text-navy leading-snug">
-                      {item.message}
-                    </p>
-                    <p className="text-[10.5px] text-muted mt-0.5">
-                      Type: {item.type}
-                    </p>
-                  </div>
-                </button>
-              ))
+              <>
+                {notifications.map((n) => {
+                  const isUnread = !n.is_read;
+                  return (
+                    <div
+                      key={n.id}
+                      onClick={() => {
+                        if (isUnread) markNotificationRead(n.id);
+                        if (n.notification_type?.includes("sync") || n.notification_type?.includes("evidence")) {
+                          close();
+                          router.push("/evidence");
+                        }
+                      }}
+                      className={cn(
+                        "flex gap-3 px-3.5 py-3 text-left transition-colors cursor-pointer hover:bg-slate-50/80",
+                        isUnread ? "bg-sky-50/30" : "bg-white"
+                      )}
+                    >
+                      <div className="mt-0.5 shrink-0">
+                        {n.severity === "success" ? (
+                          <CheckCircle2 className="size-4 text-emerald-600" />
+                        ) : n.severity === "error" ? (
+                          <AlertTriangle className="size-4 text-rose-600" />
+                        ) : n.severity === "warning" ? (
+                          <AlertTriangle className="size-4 text-amber-500" />
+                        ) : (
+                          <Info className="size-4 text-sky-600" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className={cn("text-[12.5px] font-semibold text-navy leading-snug", isUnread && "font-bold")}>
+                            {n.title}
+                          </p>
+                          {isUnread && (
+                            <span className="size-2 rounded-full bg-sky-500 shrink-0" />
+                          )}
+                        </div>
+                        <p className="text-[11px] text-[#4B5563] mt-0.5 leading-relaxed line-clamp-2">
+                          {n.body}
+                        </p>
+                        <p className="text-[10px] text-muted mt-1">
+                          {new Date(n.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {attentionItems.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => {
+                      close();
+                      router.push("/dashboard");
+                    }}
+                    className="flex w-full gap-2.5 px-3 py-2 text-left hover:bg-tint transition-colors cursor-pointer"
+                  >
+                    <AlertTriangle className="size-4 text-amber-500 shrink-0 mt-0.5" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] font-medium text-navy leading-snug">
+                        {item.message}
+                      </p>
+                      <p className="text-[10.5px] text-muted mt-0.5">
+                        Type: {item.type}
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </>
             )}
           </div>
           <button
             onClick={() => {
               close();
-              router.push("/dashboard");
+              router.push("/evidence");
             }}
             className="flex w-full items-center justify-center gap-1 border-t border-line py-2 text-[12px] font-medium text-brand hover:underline cursor-pointer bg-slate-50/50"
           >
-            View project overview <ArrowRight className="size-3.5" />
+            Open Evidence Center <ArrowRight className="size-3.5" />
           </button>
         </div>
       )}
@@ -275,6 +413,9 @@ export function TopNav({
             Production mode
           </span>
         </Tooltip>
+
+        {/* Background Active Jobs Indicator */}
+        <ActiveJobsIndicator />
 
         {/* Notifications Menu */}
         <NotificationsMenu />

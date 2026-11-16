@@ -124,7 +124,105 @@ class EvidenceCategory(StrEnum):
     COMMIT = "commit"
     DISCUSSION_THREAD = "discussion_thread"
     DESIGN_DOCUMENT = "design_document"
+    TEAM_ROSTER = "team_roster"
+    MEETING_NOTES = "meeting_notes"
+    PROJECT_DOCUMENT = "project_document"
+    SOURCE_CODE = "source_code"
     OTHER = "other"
+
+
+class DocumentCategory(StrEnum):
+    """Primary document upload categories for specialized extraction profiles."""
+
+    TEAM_ROSTER = "team_roster"
+    MEETING_NOTES = "meeting_notes"
+    PROJECT_DOCUMENT = "project_document"
+
+
+class DocumentSubtype(StrEnum):
+    """Fine-grained specification subcategories for project documentation."""
+
+    PRD = "prd"
+    SRS = "srs"
+    TRD = "trd"
+    DD = "dd"
+    ADD = "add"
+    API_SPEC = "api_spec"
+    DATABASE_DESIGN = "database_design"
+    UI_UX_SPEC = "ui_ux_spec"
+    TEST_PLAN = "test_plan"
+    DEPLOYMENT_GUIDE = "deployment_guide"
+    RUNBOOK = "runbook"
+    TECHNICAL_DOC = "technical_doc"
+    CONTRACTS = "contracts"
+    OTHER = "other"
+
+
+class NotificationType(StrEnum):
+    """Persistent notification categories for async task and sync events."""
+
+    SOURCE_SYNC_COMPLETED = "source_sync_completed"
+    SOURCE_SYNC_PARTIAL = "source_sync_partial"
+    SOURCE_SYNC_FAILED = "source_sync_failed"
+    DOCUMENT_PROCESSED = "document_processed"
+    ROSTER_EXTRACTED = "roster_extracted"
+    REVIEW_REQUIRED = "review_required"
+
+
+class ReconciliationStatus(StrEnum):
+    """Lifecycle status for matching extracted roster members to project members."""
+
+    PENDING = "pending"
+    MATCHED = "matched"
+    POSSIBLE_MATCH = "possible_match"
+    NEW_CANDIDATE = "new_candidate"
+    AMBIGUOUS = "ambiguous"
+    CONFLICT = "conflict"
+    REJECTED = "rejected"
+
+
+class ContributionCategory(StrEnum):
+    """Canonical classification categories for code, PR, and task contributions."""
+
+    FRONTEND_DEVELOPMENT = "Frontend Development"
+    BACKEND_DEVELOPMENT = "Backend Development"
+    DATABASE_ENGINEERING = "Database Engineering"
+    API_DEVELOPMENT = "API Development"
+    AUTHENTICATION = "Authentication"
+    AI_ML = "AI/ML"
+    RAG_AND_RETRIEVAL = "RAG and Retrieval"
+    OCR_AND_DOCUMENT_PROCESSING = "OCR and Document Processing"
+    INFRASTRUCTURE = "Infrastructure"
+    DEVOPS = "DevOps"
+    TESTING = "Testing"
+    DOCUMENTATION = "Documentation"
+    BUG_FIXING = "Bug Fixing"
+    SECURITY = "Security"
+    UI_UX = "UI/UX"
+    INTEGRATION = "Integration"
+    OTHER = "Other"
+
+
+class ResponsibilityAlignment(StrEnum):
+    """Analytical alignment classification between contribution and declared responsibility."""
+
+    ALIGNED = "ALIGNED"
+    PARTIALLY_ALIGNED = "PARTIALLY_ALIGNED"
+    OUTSIDE_DECLARED_RESPONSIBILITY = "OUTSIDE_DECLARED_RESPONSIBILITY"
+    UNCERTAIN = "UNCERTAIN"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class IdentityMatchMethod(StrEnum):
+    """Conservative priority matching mechanism for source contributor attribution."""
+
+    EXACT_GITHUB_ID = "exact_github_id"
+    EXACT_GITHUB_USERNAME = "exact_github_username"
+    EXACT_COMMIT_EMAIL = "exact_commit_email"
+    VERIFIED_NOREPLY_EMAIL = "verified_noreply_email"
+    CROSS_PROVIDER_ALIAS = "cross_provider_alias"
+    UNVERIFIED_CANDIDATE = "unverified_candidate"
+    UNMATCHED = "unmatched"
 
 
 class EvidenceProcessingStatus(StrEnum):
@@ -251,6 +349,7 @@ class ConnectorExtractionMethod(StrEnum):
 
     GITHUB_API = "github_api"
     JIRA_API = "jira_api"
+    SLACK_API = "slack_api"
 
 
 class IntegrationProvider(StrEnum):
@@ -258,6 +357,7 @@ class IntegrationProvider(StrEnum):
 
     GITHUB = "github"
     JIRA = "jira"
+    SLACK = "slack"
 
 
 class SourceConnectionStatus(StrEnum):

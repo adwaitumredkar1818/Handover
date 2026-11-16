@@ -15,16 +15,30 @@ import { AddMemberModal } from "../modals/AddMemberModal";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { api } from "../../lib/api";
 import Link from "next/link";
-import { Mail, ShieldAlert } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Clock,
+  Loader2,
+  Mail,
+  RefreshCw,
+  ShieldAlert,
+} from "lucide-react";
 
 export { RoleBadge };
 
 export function AppLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isLoadingAuth, setUser } = useLiveApp();
+  const { user, isLoadingAuth, setUser, addToast } = useLiveApp();
+  const [resendStatus, setResendStatus] = useState<
+    "idle" | "submitted" | "not_configured" | "failed" | "rate_limited"
+  >("idle");
   const [resendMessage, setResendMessage] = useState<string | null>(null);
+  const [devToken, setDevToken] = useState<string | null>(null);
   const [isResendingVerification, setIsResendingVerification] = useState(false);
+  const [isRefreshingVerification, setIsRefreshingVerification] = useState(false);
+  const [refreshFeedback, setRefreshFeedback] = useState<string | null>(null);
 
   const [collapsed, setCollapsed] = useState(() => {
     if (typeof window !== "undefined") {
@@ -136,60 +150,185 @@ export function AppLayout({ children }: { children: ReactNode }) {
                   <div className="rounded-xl bg-amber-50 p-2.5 text-amber-700">
                     <ShieldAlert className="size-5" />
                   </div>
-                  <div className="space-y-2">
-                    <h2 className="text-base font-semibold text-[#203653]">
-                      Verify your email to access project workspaces
-                    </h2>
-                    <p className="text-xs leading-relaxed text-[#718096]">
-                      Your account (<strong>{user.email}</strong>) is signed in,
-                      but project evidence, knowledge, and handovers remain
-                      locked until your email address is verified.
-                    </p>
-                    {resendMessage && (
-                      <p className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
-                        {resendMessage}
+                  <div className="space-y-3 flex-1 min-w-0">
+                    <div>
+                      <h2 className="text-base font-semibold text-[#203653]">
+                        Verify your email to access project workspaces
+                      </h2>
+                      <p className="mt-1 text-xs leading-relaxed text-[#718096]">
+                        Your account (<strong>{user.email}</strong>) is signed in,
+                        but project evidence, knowledge, and handovers remain
+                        locked until your email address is verified.
                       </p>
+                    </div>
+
+                    {resendStatus === "submitted" && (
+                      <div className="rounded-xl border border-teal-200 bg-teal-50/80 p-3 text-xs text-teal-900 flex items-start gap-2">
+                        <CheckCircle2 className="size-4 shrink-0 mt-0.5 text-[#299B80]" />
+                        <div>
+                          <p className="font-medium">Verification email dispatched</p>
+                          <p className="mt-0.5 text-[11px] text-teal-800 leading-relaxed">
+                            {resendMessage || `A verification link has been sent to ${user.email}. Please check your inbox and spam folder.`}
+                          </p>
+                        </div>
+                      </div>
                     )}
-                    <div className="flex flex-wrap items-center gap-2 pt-2">
+
+                    {resendStatus === "not_configured" && (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-900 flex items-start gap-2">
+                        <AlertCircle className="size-4 shrink-0 mt-0.5 text-amber-600" />
+                        <div>
+                          <p className="font-medium">Outbound email delivery not active</p>
+                          <p className="mt-0.5 text-[11px] text-amber-800 leading-relaxed">
+                            {resendMessage || "Email delivery is disabled or not configured in this environment. In development mode, use the quick-verify option below."}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {resendStatus === "failed" && (
+                      <div className="rounded-xl border border-red-200 bg-red-50/80 p-3 text-xs text-red-900 flex items-start gap-2">
+                        <AlertCircle className="size-4 shrink-0 mt-0.5 text-red-600" />
+                        <div>
+                          <p className="font-medium">Email delivery failed</p>
+                          <p className="mt-0.5 text-[11px] text-red-800 leading-relaxed">
+                            {resendMessage}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {resendStatus === "rate_limited" && (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-900 flex items-start gap-2">
+                        <Clock className="size-4 shrink-0 mt-0.5 text-amber-600" />
+                        <div>
+                          <p className="font-medium">Rate limit reached</p>
+                          <p className="mt-0.5 text-[11px] text-amber-800 leading-relaxed">
+                            {resendMessage}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {devToken && (
+                      <div className="rounded-xl border border-blue-200 bg-blue-50/80 p-3 text-xs text-blue-900 flex items-center justify-between gap-2">
+                        <div>
+                          <p className="font-medium text-blue-950">Development Bypass Available</p>
+                          <p className="text-[11px] text-blue-800">
+                            Development token issued for immediate local testing:
+                          </p>
+                        </div>
+                        <Link
+                          href={`/verify-email?token=${encodeURIComponent(devToken)}`}
+                          className="shrink-0 rounded-lg bg-[#315FBA] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#264C98]"
+                        >
+                          Quick-Verify
+                        </Link>
+                      </div>
+                    )}
+
+                    {refreshFeedback && (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-900 flex items-start gap-2">
+                        <AlertCircle className="size-4 shrink-0 mt-0.5 text-amber-600" />
+                        <p className="text-[11px] text-amber-800 leading-relaxed">{refreshFeedback}</p>
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
                       <button
                         type="button"
                         disabled={isResendingVerification}
                         onClick={async () => {
                           setIsResendingVerification(true);
                           setResendMessage(null);
+                          setDevToken(null);
+                          setRefreshFeedback(null);
                           try {
                             const res = await api.auth.resendVerification(user.email);
+                            setResendStatus(res.email_verification_delivery);
                             setResendMessage(res.message);
+                            if (res.development_verification_token) {
+                              setDevToken(res.development_verification_token);
+                            }
                           } catch (err: unknown) {
-                            setResendMessage(
+                            const errMsg =
                               err instanceof Error
                                 ? err.message
-                                : "Unable to resend verification email."
-                            );
+                                : "Unable to resend verification email.";
+                            if (
+                              errMsg.includes("429") ||
+                              errMsg.toLowerCase().includes("too many requests") ||
+                              errMsg.toLowerCase().includes("rate limit")
+                            ) {
+                              setResendStatus("rate_limited");
+                              setResendMessage(
+                                "Too many verification requests. Please wait a minute before requesting another email."
+                              );
+                            } else {
+                              setResendStatus("failed");
+                              setResendMessage(errMsg);
+                            }
                           } finally {
                             setIsResendingVerification(false);
                           }
                         }}
                         className="inline-flex items-center gap-1.5 rounded-xl bg-[#315FBA] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#264C98] disabled:opacity-60"
                       >
-                        <Mail className="size-3.5" />
-                        {isResendingVerification
-                          ? "Sending..."
-                          : "Resend verification email"}
+                        {isResendingVerification ? (
+                          <>
+                            <Loader2 className="size-3.5 animate-spin" />
+                            Sending...
+                          </>
+                        ) : (
+                          <>
+                            <Mail className="size-3.5" />
+                            Resend verification email
+                          </>
+                        )}
                       </button>
                       <button
                         type="button"
+                        disabled={isRefreshingVerification}
                         onClick={async () => {
+                          setIsRefreshingVerification(true);
+                          setRefreshFeedback(null);
                           try {
                             const fresh = await api.auth.me();
                             setUser(fresh);
-                          } catch {
-                            // ignore
+                            if (fresh.is_email_verified) {
+                              addToast({
+                                type: "success",
+                                title: "Email Verified",
+                                message: "Your email address has been verified. Project workspaces unlocked!",
+                              });
+                            } else {
+                              setRefreshFeedback(
+                                "Your account is not verified yet. Please check your inbox and click the verification link, or click Resend."
+                              );
+                            }
+                          } catch (err: unknown) {
+                            setRefreshFeedback(
+                              err instanceof Error
+                                ? err.message
+                                : "Unable to refresh verification status right now."
+                            );
+                          } finally {
+                            setIsRefreshingVerification(false);
                           }
                         }}
-                        className="inline-flex items-center rounded-xl border border-[#D9E1F0] bg-white px-3.5 py-2 text-xs font-semibold text-[#203653] hover:bg-[#F6F8FC]"
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-[#D9E1F0] bg-white px-3.5 py-2 text-xs font-semibold text-[#203653] hover:bg-[#F6F8FC] disabled:opacity-60"
                       >
-                        I&apos;ve verified — refresh
+                        {isRefreshingVerification ? (
+                          <>
+                            <Loader2 className="size-3.5 animate-spin" />
+                            Checking...
+                          </>
+                        ) : (
+                          <>
+                            <RefreshCw className="size-3.5" />
+                            I&apos;ve verified — refresh
+                          </>
+                        )}
                       </button>
                       <Link
                         href="/verify-email"

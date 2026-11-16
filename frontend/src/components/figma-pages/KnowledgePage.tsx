@@ -8,7 +8,8 @@ import {
   Cpu, Database, ExternalLink, FileSearch, FileUp, Filter, GitMerge, HardDrive,
   Layers, Link2, List, Loader2, Lock, Network, Plug, Plus, RefreshCw, RotateCcw,
   Search, ShieldCheck, Sparkles, Unplug, Upload, User, XCircle, Activity, ScanText,
-  Workflow, BrainCircuit, History, Maximize2, Minimize2, Columns3, Check, FileText
+  Workflow, BrainCircuit, History, Maximize2, Minimize2, Columns3, Check, FileText,
+  Users, UserCheck, UserPlus, GitCommitHorizontal, GitPullRequest
 } from 'lucide-react'
 
 import { useFigmaStore as useStore, FigmaStoreProvider, FigmaCtx } from '../../lib/figmaStore'
@@ -298,6 +299,7 @@ export function DataSources({ projectId }: { projectId: string }) {
   const srcs = p ? s.sources.filter((x) => x.projectId === p.id) : []
 
   const githubMapping = sourceMappings.find((m) => m.provider === 'github')
+  const allGithubMappings = useMemo(() => sourceMappings.filter((m) => m.provider === 'github'), [sourceMappings])
   const jiraMapping = sourceMappings.find((m) => m.provider === 'jira')
   const slackMapping = sourceMappings.find((m) => m.provider === 'slack')
 
@@ -315,18 +317,26 @@ export function DataSources({ projectId }: { projectId: string }) {
     types.forEach((t) => {
       const mockSrc = srcs.find((x) => x.type === t)
       if (t === 'github') {
-        const isConn = !!githubMapping || githubEvidence.length > 0
-        const count = githubEvidence.length || (githubMapping ? 72 : 0)
+        const isConn = allGithubMappings.length > 0 || githubEvidence.length > 0
+        const count = githubEvidence.length
+        const repoNames = allGithubMappings
+          .map((m) => m.external_resource_key || m.external_resource_name)
+          .filter(Boolean) as string[]
+        const accountLabel = isConn
+          ? (repoNames.length > 1
+              ? `${repoNames.length} repositories mapped`
+              : (repoNames[0] || 'Connected repository'))
+          : 'Not connected'
         map.set(t, {
           id: githubMapping?.id || 'src-github',
           projectId: activeP.id,
           type: 'github',
           name: 'GitHub',
-          account: isConn ? 'Connected repository' : 'Not connected',
+          account: accountLabel,
           status: isConn ? 'connected' : 'disconnected',
           lastSync: isConn ? 'Recent' : '—',
           records: count,
-          scope: githubMapping?.external_resource_name ? [githubMapping.external_resource_name] : (githubEvidence.length ? ['shubham392007-sketch/HackMatrix-5.0-MISC02'] : []),
+          scope: repoNames.length > 0 ? repoNames : (githubMapping?.external_resource_name ? [githubMapping.external_resource_name] : []),
           frequency: 'Continuous / Webhook',
           volume: `${count} items`,
         })
@@ -392,7 +402,7 @@ export function DataSources({ projectId }: { projectId: string }) {
       }
     })
     return map
-  }, [p, srcs, githubMapping, jiraMapping, slackMapping, githubEvidence.length, docEvidence, jiraEvidence.length, slackEvidence.length])
+  }, [p, srcs, allGithubMappings, githubMapping, jiraMapping, slackMapping, githubEvidence.length, docEvidence, jiraEvidence.length, slackEvidence.length])
 
   if (!p) return <ProjectNotFound />
   const canManage = p.role === 'manager'
@@ -427,18 +437,29 @@ export function DataSources({ projectId }: { projectId: string }) {
       )}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {types.map((t) => {
+          const isPlanned = t === 'confluence' || t === 'gdrive'
           const src = liveSourcesMap.get(t)
-          const connected = src && src.status === 'connected'
+          const connected = !isPlanned && src && src.status === 'connected'
           const meta = SOURCE_META[t] || { label: t, description: '' }
           return (
-            <Card key={t} interactive className="flex flex-col p-5">
+            <Card key={t} interactive={!isPlanned} className="flex flex-col p-5">
               <div className="flex items-start justify-between">
                 <SourceIcon type={t} size={44} />
-                <StatusBadge status={src?.status ?? 'disconnected'} />
+                {isPlanned ? (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+                    Planned Integration
+                  </span>
+                ) : (
+                  <StatusBadge status={src?.status ?? 'disconnected'} />
+                )}
               </div>
               <h3 className="mt-4 text-[15px] font-semibold text-navy">{meta.label}</h3>
               <p className="mt-1 flex-1 text-[13px] text-muted">{meta.description}</p>
-              {connected ? (
+              {isPlanned ? (
+                <p className="mt-4 rounded-xl border border-dashed border-amber-200 bg-amber-50/40 p-3 text-xs text-amber-800/80">
+                  Scheduled in platform roadmap. Automated discovery and sync currently in development.
+                </p>
+              ) : connected ? (
                 <dl className="mt-4 grid grid-cols-2 gap-2 rounded-xl bg-slate-50 p-3 text-xs">
                   <div>
                     <dt className="text-muted">Last sync</dt>
@@ -459,7 +480,15 @@ export function DataSources({ projectId }: { projectId: string }) {
                 </p>
               )}
               <div className="mt-4 flex gap-2">
-                {connected ? (
+                {isPlanned ? (
+                  <Button
+                    className="flex-1 opacity-60 cursor-not-allowed"
+                    icon={Plug}
+                    disabled={true}
+                  >
+                    Planned Integration
+                  </Button>
+                ) : connected ? (
                   <Button
                     variant="secondary"
                     className="flex-1"
@@ -490,9 +519,14 @@ export function DataSources({ projectId }: { projectId: string }) {
                     {t === 'docs' ? 'Upload files' : 'Connect'}
                   </Button>
                 )}
-                {connected && t === 'docs' && canManage && (
+                {!isPlanned && connected && t === 'docs' && canManage && (
                   <Button variant="subtle" icon={Upload} onClick={() => setIsUploadModalOpen(true)}>
                     Upload
+                  </Button>
+                )}
+                {!isPlanned && connected && t === 'github' && canManage && (
+                  <Button variant="subtle" icon={Plus} onClick={() => openConnectSourceModal('github')}>
+                    Add repo
                   </Button>
                 )}
               </div>
@@ -740,7 +774,8 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     setSelectedEvidenceId,
     refreshEvidence,
     findings: liveFindings,
-    setIsUploadModalOpen
+    setIsUploadModalOpen,
+    sourceMappings,
   } = useLiveApp()
   const loading = useFakeLoading(450, [projectId])
   const [layoutMode, setLayoutMode] = useState<'threepanel' | 'table'>('threepanel')
@@ -753,8 +788,14 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
   const [page, setPage] = useState(1)
   const [open, setOpen] = useState<Evidence | null>(null)
   const [upload, setUpload] = useState(false)
-  const [activeDetailTab, setActiveDetailTab] = useState<'content' | 'facts' | 'findings'>('content')
+  type DetailTab = 'content' | 'facts' | 'findings' | 'roster' | 'attribution'
+  const [activeDetailTab, setActiveDetailTab] = useState<DetailTab>('content')
   const [isReprocessing, setIsReprocessing] = useState(false)
+  const [rosterMembers, setRosterMembers] = useState<any[]>([])
+  const [isLoadingRoster, setIsLoadingRoster] = useState(false)
+  const [attributions, setAttributions] = useState<any[]>([])
+  const [isLoadingAttributions, setIsLoadingAttributions] = useState(false)
+  const [reconcilingId, setReconcilingId] = useState<string | null>(null)
 
   const handleReprocess = async (evId: string) => {
     if (!p) return
@@ -781,11 +822,19 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
       const mime = (e.mime_type || '').toLowerCase()
       const titleLower = (e.title || '').toLowerCase()
       const origLower = (e.original_filename || '').toLowerCase()
-      if (e.provider === 'github') type = 'commit'
+      const cat = (e.category || '').toLowerCase()
+      const docCat = ((e as any).document_category || '').toLowerCase()
+
+      if (cat === 'team_roster' || docCat === 'team_roster') type = 'team_roster'
+      else if (cat === 'meeting_notes' || docCat === 'meeting_notes') type = 'meeting_notes'
+      else if (cat === 'project_document' || docCat === 'project_document') type = 'project_document'
+      else if (cat === 'source_code') type = 'source_code'
+      else if (cat === 'pull_request' || cat === 'pr') type = 'pr'
+      else if (cat === 'commit' || e.provider === 'github') type = 'commit'
       else if (e.provider === 'jira') type = 'issue'
       else if (e.provider === 'slack') type = 'message'
-      else if (mime.includes('word') || origLower.endsWith('.docx') || titleLower.endsWith('.docx') || e.category === 'docx_document') type = 'docx'
-      else if (mime.includes('pdf') || origLower.endsWith('.pdf') || titleLower.endsWith('.pdf') || e.category === 'pdf_document') type = 'pdf'
+      else if (mime.includes('word') || origLower.endsWith('.docx') || titleLower.endsWith('.docx') || cat === 'docx_document') type = 'docx'
+      else if (mime.includes('pdf') || origLower.endsWith('.pdf') || titleLower.endsWith('.pdf') || cat === 'pdf_document') type = 'pdf'
 
       let verification: Verification = 'needs_review'
       if (e.indexing_status === 'indexed' || e.processing_status === 'extracted') verification = 'verified'
@@ -816,27 +865,29 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     })
   }, [evidenceList, p?.id])
 
-  const storeItems = p ? evidence.filter((e) => e.projectId === p.id) : []
-  const all = liveItems.length > 0 ? liveItems : storeItems
+  const all = liveItems
   const sources = useMemo(() => {
     if (!p) return []
     const sList: Source[] = []
     const gitEvidence = evidenceList.filter((e) => e.provider === 'github')
-    const docEvidence = evidenceList.filter((e) => e.provider === 'upload' || e.category?.includes('doc') || e.category?.includes('pdf'))
+    const docEvidence = evidenceList.filter((e) => e.provider === 'upload' || e.category?.includes('doc') || e.category?.includes('pdf') || e.category === 'team_roster' || e.category === 'meeting_notes' || e.category === 'project_document')
     const jiraEvidence = evidenceList.filter((e) => e.provider === 'jira')
     const slackEvidence = evidenceList.filter((e) => e.provider === 'slack')
+    const githubMap = sourceMappings.find((m) => m.provider === 'github')
+    const jiraMap = sourceMappings.find((m) => m.provider === 'jira')
+    const slackMap = sourceMappings.find((m) => m.provider === 'slack')
 
-    if (gitEvidence.length > 0) {
+    if (gitEvidence.length > 0 || githubMap) {
       sList.push({
-        id: 'src-github',
+        id: githubMap?.id || 'src-github',
         projectId: p?.id || '',
         type: 'github',
         name: 'GitHub Repository',
-        account: 'Connected',
+        account: githubMap?.external_resource_name || 'Connected',
         status: 'connected',
         lastSync: 'Recent',
         records: gitEvidence.length,
-        scope: ['shubham392007-sketch/HackMatrix-5.0-MISC02'],
+        scope: githubMap?.external_resource_name ? [githubMap.external_resource_name] : [],
         frequency: 'Continuous',
         volume: `${gitEvidence.length} items`,
       })
@@ -851,48 +902,50 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
         status: 'connected',
         lastSync: 'OCR processed',
         records: docEvidence.length,
-        scope: docEvidence.map((d) => d.title).slice(0, 2),
+        scope: docEvidence.map((d) => d.title).slice(0, 3),
         frequency: 'Manual upload',
         volume: `${docEvidence.length} docs`,
       })
     }
-    if (jiraEvidence.length > 0) {
+    if (jiraEvidence.length > 0 || jiraMap) {
       sList.push({
-        id: 'src-jira',
+        id: jiraMap?.id || 'src-jira',
         projectId: p?.id || '',
         type: 'jira',
         name: 'Jira Workspace',
-        account: 'Connected',
+        account: jiraMap?.external_resource_name || 'Connected',
         status: 'connected',
         lastSync: 'Recent',
         records: jiraEvidence.length,
-        scope: ['Issues & Epics'],
+        scope: jiraMap?.external_resource_name ? [jiraMap.external_resource_name] : ['Issues & Epics'],
         frequency: 'Hourly',
         volume: `${jiraEvidence.length} issues`,
       })
     }
-    if (slackEvidence.length > 0) {
+    if (slackEvidence.length > 0 || slackMap) {
       sList.push({
-        id: 'src-slack',
+        id: slackMap?.id || 'src-slack',
         projectId: p?.id || '',
         type: 'slack',
         name: 'Slack Discussions',
-        account: 'Connected',
+        account: slackMap?.external_resource_name || 'Connected',
         status: 'connected',
         lastSync: 'Recent',
         records: slackEvidence.length,
-        scope: ['Public channels'],
+        scope: slackMap?.external_resource_name ? [slackMap.external_resource_name] : ['Public channels'],
         frequency: 'Real-time',
         volume: `${slackEvidence.length} messages`,
       })
     }
-    if (sList.length === 0) {
-      return s.sources.filter((x) => (p?.id ? x.projectId === p.id : false))
-    }
     return sList
-  }, [evidenceList, p?.id, s.sources])
+  }, [evidenceList, p?.id, sourceMappings])
 
-  const cutoff = range === '30' ? '2025-05-19' : range === '90' ? '2025-03-20' : '0'
+  const now = new Date()
+  const cutoff = range === '30'
+    ? new Date(now.getTime() - 30 * 86400000).toISOString().split('T')[0]!
+    : range === '90'
+    ? new Date(now.getTime() - 90 * 86400000).toISOString().split('T')[0]!
+    : '0'
   const list = all.filter(
     (e) =>
       (e.title + e.ref).toLowerCase().includes(q.toLowerCase()) &&
@@ -982,6 +1035,90 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
         verification: s.verif[f.id] ?? f.verification,
       }))
   }, [liveFindings, activeEvidenceId, p, s.verif])
+
+  const isRoster = selectedEvidence?.type === 'team_roster' || (liveSelectedEvidence as any)?.category === 'team_roster' || (liveSelectedEvidence as any)?.document_category === 'team_roster'
+  const isCommitOrPr = selectedEvidence?.type === 'commit' || selectedEvidence?.type === 'pr' || selectedEvidence?.type === 'source_code'
+
+  useEffect(() => {
+    if (!p?.id || !activeEvidenceId) {
+      setRosterMembers([])
+      setAttributions([])
+      return
+    }
+    let active = true
+    const loadData = async () => {
+      try {
+        if (isRoster) {
+          setIsLoadingRoster(true)
+          const members = await api.roster.listMembers(p.id, activeEvidenceId)
+          if (active) setRosterMembers(members)
+        } else {
+          if (active) setRosterMembers([])
+        }
+        if (isCommitOrPr) {
+          setIsLoadingAttributions(true)
+          const attrs = await api.roster.listAttributions(p.id, activeEvidenceId)
+          if (active) setAttributions(attrs)
+        } else {
+          if (active) setAttributions([])
+        }
+      } catch (err) {
+        console.error('Error fetching roster/attributions:', err)
+      } finally {
+        if (active) {
+          setIsLoadingRoster(false)
+          setIsLoadingAttributions(false)
+        }
+      }
+    }
+    loadData()
+    return () => { active = false }
+  }, [p?.id, activeEvidenceId, isRoster, isCommitOrPr])
+
+  const handleReconcile = async (memberId: string, status: string, notes?: string) => {
+    if (!p?.id) return
+    setReconcilingId(memberId)
+    try {
+      await api.roster.reconcile(p.id, memberId, {
+        reconciliation_status: status,
+        reconciliation_notes: notes || 'Updated via Evidence Center',
+      })
+      s.toast('Roster Updated', `Member marked as ${status}`, 'success')
+      if (activeEvidenceId) {
+        const updated = await api.roster.listMembers(p.id, activeEvidenceId)
+        setRosterMembers(updated)
+      }
+    } catch (err: unknown) {
+      s.toast('Update Failed', err instanceof Error ? err.message : 'Failed to update roster member', 'error')
+    } finally {
+      setReconcilingId(null)
+    }
+  }
+
+  useEffect(() => {
+    if (activeDetailTab === 'roster' && !isRoster) {
+      setActiveDetailTab('content')
+    } else if (activeDetailTab === 'attribution' && !isCommitOrPr) {
+      setActiveDetailTab('content')
+    }
+  }, [activeDetailTab, isRoster, isCommitOrPr])
+
+  const detailTabOptions = useMemo(() => {
+    const opts: { id: DetailTab; label: string }[] = [
+      { id: 'content', label: 'Source Record' },
+    ]
+    if (isRoster) {
+      opts.push({ id: 'roster', label: `Team Roster (${rosterMembers.length})` })
+    }
+    if (isCommitOrPr) {
+      opts.push({ id: 'attribution', label: `Attribution (${attributions.length})` })
+    }
+    opts.push(
+      { id: 'facts', label: `Facts (${activeExtractedFacts.length})` },
+      { id: 'findings', label: `Findings (${relatedFindings.length})` }
+    )
+    return opts
+  }, [isRoster, isCommitOrPr, rosterMembers.length, attributions.length, activeExtractedFacts.length, relatedFindings.length])
 
   const reset = () => {
     setQ('')
@@ -1202,12 +1339,8 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
                 <div className="flex gap-2">
                   <Segmented
                     value={activeDetailTab}
-                    onChange={setActiveDetailTab}
-                    options={[
-                      { id: 'content', label: 'Source Record' },
-                      { id: 'facts', label: `Facts (${activeExtractedFacts.length})` },
-                      { id: 'findings', label: `Findings (${relatedFindings.length})` },
-                    ]}
+                    onChange={(v) => setActiveDetailTab(v as DetailTab)}
+                    options={detailTabOptions}
                   />
                 </div>
 
@@ -1227,6 +1360,253 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
                     ) : (
                       <div className="rounded-xl border-l-2 border-sky bg-slate-50 p-3 text-xs leading-relaxed text-slate-700 whitespace-pre-wrap font-mono max-h-64 overflow-y-auto">
                         {activeContentText}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {activeDetailTab === 'roster' && (
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Extracted Team Roster</p>
+                        <p className="text-[11px] text-muted">Members and declared responsibilities from roster document</p>
+                      </div>
+                      <span className="text-[11px] text-teal-700 font-semibold bg-teal-50 px-2 py-0.5 rounded-full border border-teal-200">
+                        {rosterMembers.length} members
+                      </span>
+                    </div>
+
+                    {isLoadingRoster ? (
+                      <div className="space-y-2">
+                        <Skeleton className="h-16 w-full" />
+                        <Skeleton className="h-16 w-full" />
+                      </div>
+                    ) : rosterMembers.length > 0 ? (
+                      <div className="space-y-3 max-h-72 overflow-y-auto pr-1 scrollbar-thin">
+                        {rosterMembers.map((m) => {
+                          const status = m.reconciliation_status || 'NEW_CANDIDATE';
+                          const statusBadge =
+                            status === 'MATCHED' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                                <Check className="size-3" /> MATCHED
+                              </span>
+                            ) : status === 'POSSIBLE_MATCH' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
+                                <AlertTriangle className="size-3" /> POSSIBLE MATCH
+                              </span>
+                            ) : status === 'NEW_CANDIDATE' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-sky-800">
+                                <UserPlus className="size-3" /> CANDIDATE
+                              </span>
+                            ) : status === 'CONFLICT' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800">
+                                <AlertTriangle className="size-3" /> CONFLICT
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700">
+                                {status}
+                              </span>
+                            );
+
+                          return (
+                            <div key={m.id} className="rounded-xl border border-line bg-white p-3 shadow-2xs space-y-2">
+                              <div className="flex items-start justify-between gap-2">
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-semibold text-xs text-navy">{m.full_name}</span>
+                                    {m.role_name && (
+                                      <span className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] font-medium text-slate-700">
+                                        {m.role_name}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-2 text-[10.5px] text-muted mt-0.5">
+                                    {m.email && <span>{m.email}</span>}
+                                    {m.github_username && (
+                                      <span className="text-[#315FBA] font-mono">@{m.github_username}</span>
+                                    )}
+                                    {m.git_commit_email && m.git_commit_email !== m.email && (
+                                      <span className="font-mono text-[9.5px]">Git: {m.git_commit_email}</span>
+                                    )}
+                                  </div>
+                                </div>
+                                {statusBadge}
+                              </div>
+
+                              {m.matched_member_name && (
+                                <div className="text-[11px] bg-slate-50 border border-slate-200/60 rounded px-2 py-1 text-slate-700 flex items-center justify-between">
+                                  <span>Linked Project Member: <strong>{m.matched_member_name}</strong></span>
+                                  {m.reconciliation_confidence && (
+                                    <span className="text-[10px] text-muted">
+                                      {Math.round(m.reconciliation_confidence * 100)}% confidence
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+
+                              {m.primary_responsibilities && m.primary_responsibilities.length > 0 && (
+                                <div className="space-y-1">
+                                  <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Responsibilities</span>
+                                  <div className="flex flex-wrap gap-1">
+                                    {m.primary_responsibilities.map((r: string, idx: number) => (
+                                      <span key={idx} className="rounded bg-sky-50 text-sky-800 border border-sky-200/60 px-1.5 py-0.5 text-[10px]">
+                                        {r}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {m.component_ownership && m.component_ownership.length > 0 && (
+                                <div className="space-y-1">
+                                  <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Component Ownership</span>
+                                  <div className="flex flex-wrap gap-1">
+                                    {m.component_ownership.map((c: string, idx: number) => (
+                                      <span key={idx} className="rounded bg-slate-100 text-slate-800 px-1.5 py-0.5 text-[10px] font-mono">
+                                        {c}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {p.role === 'manager' && (
+                                <div className="pt-1.5 border-t border-slate-100 flex items-center justify-end gap-1.5">
+                                  {status !== 'MATCHED' && (
+                                    <button
+                                      type="button"
+                                      disabled={reconcilingId === m.id}
+                                      onClick={() => handleReconcile(m.id, 'MATCHED', 'Confirmed by manager')}
+                                      className="px-2 py-1 text-[10.5px] font-medium rounded border border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 disabled:opacity-50 cursor-pointer"
+                                    >
+                                      {reconcilingId === m.id ? 'Saving...' : 'Confirm Match'}
+                                    </button>
+                                  )}
+                                  {status !== 'REJECTED' && (
+                                    <button
+                                      type="button"
+                                      disabled={reconcilingId === m.id}
+                                      onClick={() => handleReconcile(m.id, 'REJECTED', 'Marked not applicable')}
+                                      className="px-2 py-1 text-[10.5px] font-medium rounded border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-50 cursor-pointer"
+                                    >
+                                      Dismiss
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-dashed border-slate-200 p-4 text-center">
+                        <p className="text-xs text-muted">No team members parsed from this document.</p>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="mt-2"
+                          onClick={() => { if (activeEvidenceId) handleReprocess(activeEvidenceId) }}
+                          disabled={isReprocessing || !activeEvidenceId}
+                        >
+                          {isReprocessing ? 'Re-extracting...' : 'Re-extract Roster'}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {activeDetailTab === 'attribution' && (
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Contributor Attribution</p>
+                        <p className="text-[11px] text-muted">Identity resolution & technical domain alignment</p>
+                      </div>
+                      <span className="text-[11px] text-indigo-700 font-semibold bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200">
+                        {attributions.length} attributions
+                      </span>
+                    </div>
+
+                    {isLoadingAttributions ? (
+                      <div className="space-y-2">
+                        <Skeleton className="h-20 w-full" />
+                        <Skeleton className="h-20 w-full" />
+                      </div>
+                    ) : attributions.length > 0 ? (
+                      <div className="space-y-3 max-h-72 overflow-y-auto pr-1 scrollbar-thin">
+                        {attributions.map((attr) => {
+                          const alignment = attr.responsibility_alignment || 'UNCERTAIN';
+                          const alignmentBadge =
+                            alignment === 'ALIGNED' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                                <Check className="size-3" /> ALIGNED
+                              </span>
+                            ) : alignment === 'PARTIALLY_ALIGNED' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">
+                                <AlertTriangle className="size-3" /> PARTIALLY ALIGNED
+                              </span>
+                            ) : alignment === 'OUTSIDE_DECLARED_RESPONSIBILITY' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-800">
+                                <AlertTriangle className="size-3" /> OUTSIDE DECLARED ROLE
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700">
+                                {alignment}
+                              </span>
+                            );
+
+                          return (
+                            <div key={attr.id} className="rounded-xl border border-line bg-white p-3.5 shadow-2xs space-y-2.5">
+                              <div className="flex items-start justify-between gap-2">
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-semibold text-xs text-navy">
+                                      {attr.matched_roster_name || attr.contributor_identifier}
+                                    </span>
+                                    {attr.contribution_category && (
+                                      <span className="px-2 py-0.5 rounded-md bg-indigo-50 border border-indigo-100 text-[10px] font-semibold text-indigo-700 capitalize">
+                                        {attr.contribution_category.replace(/_/g, ' ')}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-[10.5px] text-muted mt-0.5">
+                                    Identifier: <code className="font-mono text-slate-700">{attr.contributor_identifier}</code> ({attr.identifier_type})
+                                  </div>
+                                </div>
+                                {alignmentBadge}
+                              </div>
+
+                              {attr.matched_roster_name ? (
+                                <div className="text-[11px] bg-slate-50 border border-slate-200/60 rounded-lg p-2 text-slate-700 space-y-1">
+                                  <div className="flex items-center justify-between font-medium">
+                                    <span>Resolved Team Member: <strong>{attr.matched_roster_name}</strong></span>
+                                    {attr.match_confidence && (
+                                      <span className="text-[10px] text-muted">
+                                        Method: {attr.match_method} ({Math.round(attr.match_confidence * 100)}%)
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="text-[11px] bg-amber-50/50 border border-amber-200/60 rounded-lg p-2 text-amber-900">
+                                  No matching team roster record found for identifier &ldquo;{attr.contributor_identifier}&rdquo;.
+                                </div>
+                              )}
+
+                              {attr.alignment_explanation && (
+                                <div className="text-[11px] bg-sky-50/60 border border-sky-100 rounded-lg p-2.5 text-slate-700 leading-relaxed">
+                                  <span className="font-semibold text-sky-900 block mb-0.5">Responsibility Alignment Rationale:</span>
+                                  {attr.alignment_explanation}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-dashed border-slate-200 p-4 text-center">
+                        <p className="text-xs text-muted">Attribution and responsibility alignment will be evaluated upon commit extraction.</p>
                       </div>
                     )}
                   </div>

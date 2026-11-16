@@ -8,6 +8,8 @@ export function UploadDocumentModal() {
   const { isUploadModalOpen, setIsUploadModalOpen, uploadDocument } = useLiveApp();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [customTitle, setCustomTitle] = useState("");
+  const [docCategory, setDocCategory] = useState<"team_roster" | "meeting_notes" | "project_document">("project_document");
+  const [docSubtype, setDocSubtype] = useState("prd");
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -44,9 +46,13 @@ export function UploadDocumentModal() {
     setError(null);
     setIsUploading(true);
     try {
-      await uploadDocument(selectedFile, customTitle.trim() || undefined);
+      await uploadDocument(selectedFile, customTitle.trim() || undefined, {
+        documentCategory: docCategory,
+        documentSubtype: docCategory === "project_document" ? docSubtype : undefined,
+      });
       setSelectedFile(null);
       setCustomTitle("");
+      setDocCategory("project_document");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to upload document");
     } finally {
@@ -130,6 +136,80 @@ export function UploadDocumentModal() {
               </div>
             )}
           </div>
+
+          {/* Document Intelligence Category */}
+          <div className="space-y-2">
+            <label className="block text-xs font-semibold text-[#25334B]">
+              Document Category <span className="text-rose-500">*</span>
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                onClick={() => setDocCategory("team_roster")}
+                className={`p-2.5 rounded-lg border text-left transition-all ${
+                  docCategory === "team_roster"
+                    ? "border-[#249E91] bg-teal-50/50 ring-1 ring-[#249E91]"
+                    : "border-[#DCE3EB] hover:bg-slate-50"
+                }`}
+              >
+                <div className="font-semibold text-[11.5px] text-slate-900">Team Roster</div>
+                <div className="text-[10px] text-slate-500 mt-0.5 leading-snug">Extract roles & ownership</div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDocCategory("meeting_notes")}
+                className={`p-2.5 rounded-lg border text-left transition-all ${
+                  docCategory === "meeting_notes"
+                    ? "border-[#249E91] bg-teal-50/50 ring-1 ring-[#249E91]"
+                    : "border-[#DCE3EB] hover:bg-slate-50"
+                }`}
+              >
+                <div className="font-semibold text-[11.5px] text-slate-900">Meeting Notes</div>
+                <div className="text-[10px] text-slate-500 mt-0.5 leading-snug">Decisions & discussions</div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDocCategory("project_document")}
+                className={`p-2.5 rounded-lg border text-left transition-all ${
+                  docCategory === "project_document"
+                    ? "border-[#249E91] bg-teal-50/50 ring-1 ring-[#249E91]"
+                    : "border-[#DCE3EB] hover:bg-slate-50"
+                }`}
+              >
+                <div className="font-semibold text-[11.5px] text-slate-900">Project Spec</div>
+                <div className="text-[10px] text-slate-500 mt-0.5 leading-snug">Specs & architecture</div>
+              </button>
+            </div>
+          </div>
+
+          {/* Subtype for Project Document */}
+          {docCategory === "project_document" && (
+            <div>
+              <label className="block text-xs font-semibold text-[#25334B] mb-1">
+                Specification Subtype
+              </label>
+              <select
+                value={docSubtype}
+                onChange={(e) => setDocSubtype(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg border border-[#DCE3EB] text-xs focus:outline-none focus:ring-2 focus:ring-[#249E91] text-[#25334B] bg-white"
+              >
+                <option value="prd">Product Requirement Document (PRD)</option>
+                <option value="srs">Software Requirements Specification (SRS)</option>
+                <option value="trd">Technical Requirements Document (TRD)</option>
+                <option value="dd">Design Document (DD)</option>
+                <option value="add">Architectural Design Document (ADD)</option>
+                <option value="architecture">Architecture Blueprint</option>
+                <option value="api_spec">API Specification</option>
+                <option value="database_design">Database Design / Schema</option>
+                <option value="security_spec">Security Specification</option>
+                <option value="test_plan">Test Plan / QA Strategy</option>
+                <option value="runbook">Operations Runbook / SOP</option>
+                <option value="onboarding_guide">Onboarding Guide</option>
+                <option value="handover_notes">Handover Notes / Wrap-up</option>
+                <option value="other_spec">Other Technical Specification</option>
+              </select>
+            </div>
+          )}
 
           <div>
             <label className="block text-xs font-semibold text-[#25334B] mb-1">

@@ -2,7 +2,7 @@
 
 import { cn } from './index'
 import type { SourceType, EvidenceType } from '../../lib/figmaStore'
-import { FileText, GitCommitHorizontal, GitPullRequest, MessageSquare, SquareKanban, File } from 'lucide-react'
+import { FileText, GitCommitHorizontal, GitPullRequest, MessageSquare, SquareKanban, File, Users, FileSpreadsheet, Code2 } from 'lucide-react'
 
 /** Official Handover mark supplied by the product owner. */
 export function LogoMark({ size = 32, className, mono }: { size?: number; className?: string; mono?: boolean }) {
@@ -55,9 +55,43 @@ export function SourceIcon({ type, size = 36, className }: { type: SourceType; s
 }
 
 export function EvidenceTypeIcon({ type, className }: { type: EvidenceType; className?: string }) {
-  const map = { commit: GitCommitHorizontal, pr: GitPullRequest, issue: SquareKanban, message: MessageSquare, pdf: FileText, docx: File }
-  const color = { commit: 'text-slate-600 bg-slate-100', pr: 'text-violet-600 bg-violet-50', issue: 'text-blue-600 bg-blue-50', message: 'text-pink-600 bg-pink-50', pdf: 'text-red-600 bg-red-50', docx: 'text-sky-700 bg-sky-50' }[type]
-  const I = map[type]
-  return <span className={cn('inline-flex size-8 shrink-0 items-center justify-center rounded-lg', color, className)}><I className="size-4" /></span>
+  const map: Record<EvidenceType, React.ComponentType<{ className?: string }>> = {
+    commit: GitCommitHorizontal,
+    pr: GitPullRequest,
+    issue: SquareKanban,
+    message: MessageSquare,
+    pdf: FileText,
+    docx: File,
+    team_roster: Users,
+    meeting_notes: FileSpreadsheet,
+    project_document: FileText,
+    source_code: Code2,
+  }
+  const color: Record<EvidenceType, string> = {
+    commit: 'text-slate-600 bg-slate-100',
+    pr: 'text-violet-600 bg-violet-50',
+    issue: 'text-blue-600 bg-blue-50',
+    message: 'text-pink-600 bg-pink-50',
+    pdf: 'text-red-600 bg-red-50',
+    docx: 'text-sky-700 bg-sky-50',
+    team_roster: 'text-teal-700 bg-teal-50',
+    meeting_notes: 'text-amber-700 bg-amber-50',
+    project_document: 'text-indigo-700 bg-indigo-50',
+    source_code: 'text-cyan-700 bg-cyan-50',
+  }
+  const I = map[type] || FileText
+  const c = color[type] || 'text-slate-600 bg-slate-100'
+  return <span className={cn('inline-flex size-8 shrink-0 items-center justify-center rounded-lg', c, className)}><I className="size-4" /></span>
 }
-export const EVIDENCE_TYPE_LABEL: Record<EvidenceType, string> = { commit: 'Commit', pr: 'Pull request', issue: 'Jira issue', message: 'Slack thread', pdf: 'PDF', docx: 'DOCX' }
+export const EVIDENCE_TYPE_LABEL: Record<EvidenceType, string> = {
+  commit: 'Commit',
+  pr: 'Pull request',
+  issue: 'Jira issue',
+  message: 'Slack thread',
+  pdf: 'PDF',
+  docx: 'DOCX',
+  team_roster: 'Team Roster',
+  meeting_notes: 'Meeting Notes',
+  project_document: 'Project Document',
+  source_code: 'Source Code',
+}

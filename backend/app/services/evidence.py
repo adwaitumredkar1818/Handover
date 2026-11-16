@@ -135,6 +135,8 @@ def to_evidence_summary_response(item: EvidenceItem) -> EvidenceSummaryResponse:
         source_provider=item.source_provider,
         provider=canonical_provider,
         category=item.category,
+        document_category=item.document_category,
+        document_subtype=item.document_subtype,
         source_external_id=item.source_external_id,
         source_url=item.source_url,
         source_author_identity=item.source_author_identity,
@@ -371,6 +373,9 @@ class EvidenceService:
         filename: str | None,
         declared_mime_type: str | None,
         raw_bytes: bytes,
+        document_category: str | None = None,
+        document_subtype: str | None = None,
+        custom_title: str | None = None,
     ) -> UploadDocumentResult:
         """Validate, deduplicate within project scope, encrypt at rest, and queue extraction."""
         self._require_project_mutable(project_ctx)
@@ -424,6 +429,23 @@ class EvidenceService:
             data=validated.raw_bytes,
         )
 
+        effective_category = (
+            document_category
+            if document_category in ("team_roster", "meeting_notes", "project_document")
+            else validated.category
+        )
+        effective_title = (
+            custom_title.strip()
+            if custom_title and custom_title.strip()
+            else (validated.initial_metadata.get("embedded_title") or validated.original_filename)
+        )
+
+        meta = dict(validated.initial_metadata)
+        if document_category:
+            meta["document_category"] = document_category
+        if document_subtype:
+            meta["document_subtype"] = document_subtype
+
         try:
             item = self._evidence_repo.create_evidence_item(
                 evidence_id=evidence_id,
@@ -432,16 +454,15 @@ class EvidenceService:
                 uploaded_by_user_id=project_ctx.principal.user.id,
                 source_type=EvidenceSourceType.DOCUMENT_UPLOAD.value,
                 source_provider="local_upload",
-                category=validated.category,
+                category=effective_category,
+                document_category=document_category,
+                document_subtype=document_subtype,
                 source_external_id=f"upload:{evidence_id}",
                 source_url=None,
                 source_author_identity=(
                     validated.source_author_identity or project_ctx.principal.user.email
                 ),
-                title=(
-                    validated.initial_metadata.get("embedded_title")
-                    or validated.original_filename
-                ),
+                title=effective_title,
                 original_filename=validated.original_filename,
                 mime_type=validated.mime_type,
                 file_size_bytes=validated.file_size_bytes,
@@ -454,7 +475,7 @@ class EvidenceService:
                 source_updated_at=validated.source_updated_at,
                 processing_status=EvidenceProcessingStatus.QUEUED.value,
                 page_count=validated.page_count,
-                metadata_json=validated.initial_metadata,
+                metadata_json=meta,
             )
             job = self._job_repo.create_job(
                 organisation_id=project_ctx.organisation.id,

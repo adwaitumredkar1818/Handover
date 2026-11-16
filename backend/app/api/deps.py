@@ -613,6 +613,42 @@ def get_current_principal(
     )
 
 
+def get_optional_principal(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),  # noqa: B008
+    settings: Settings = Depends(get_app_settings),  # noqa: B008
+    db_session: Session = Depends(get_db_session),  # noqa: B008
+    rbac_service: RbacService = Depends(get_rbac_service),  # noqa: B008
+) -> AuthenticatedPrincipal | None:
+    """Resolve AuthenticatedPrincipal if valid Bearer credentials are provided, else return None."""
+    if (
+        credentials is None
+        or credentials.scheme.lower() != "bearer"
+        or not credentials.credentials
+    ):
+        return None
+
+    try:
+        claims = decode_access_token(credentials.credentials, settings)
+        user = UserRepository(db_session).get_by_id(claims.subject)
+        if user is None or user.status != UserStatus.ACTIVE.value:
+            return None
+
+        is_active_family = RefreshSessionRepository(db_session).is_family_active(
+            token_family_id=claims.session_family_id,
+            user_id=user.id,
+            now=utc_now(),
+        )
+        if not is_active_family:
+            return None
+
+        return rbac_service.resolve_principal(
+            user=user,
+            session_family_id=claims.session_family_id,
+        )
+    except Exception:
+        return None
+
+
 def require_permissions(
     *permission_codes: str,
 ) -> Callable[[AuthenticatedPrincipal, RbacService], AuthenticatedPrincipal]:
