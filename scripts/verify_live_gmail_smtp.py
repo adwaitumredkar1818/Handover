@@ -116,7 +116,7 @@ def run_direct_verification(email: str, settings: Settings) -> bool:
     if ver_res.error_message:
         print(f"  Error Detail  : {ver_res.error_message}")
         _check_app_password_warning(ver_res)
-    if ver_res.status == "sent":
+    if ver_res.status in ("sent", "submitted"):
         success_count += 1
         print("  [OK] Email verification dispatched successfully.")
 
@@ -125,12 +125,12 @@ def run_direct_verification(email: str, settings: Settings) -> bool:
     test_inv_token = f"direct_inv_{uuid.uuid4().hex[:16]}"
     inv_res = email_service.send_project_invitation_email(
         to_email=email,
-        recipient_name="Direct Invitation Tester",
-        inviter_name="Platform Lead",
-        project_name="Core Knowledge Reconstruction",
-        role_name="Senior Engineer",
         raw_token=test_inv_token,
-        expires_at="in 7 days",
+        organisation_name="Handover Development",
+        project_name="Core Knowledge Reconstruction",
+        project_role_name="Senior Engineer",
+        inviter_name="Platform Lead",
+        expires_in_hours=168,
     )
     print(f"  Status        : {inv_res.status}")
     print(f"  Provider      : {inv_res.provider}")
@@ -138,7 +138,7 @@ def run_direct_verification(email: str, settings: Settings) -> bool:
     if inv_res.error_message:
         print(f"  Error Detail  : {inv_res.error_message}")
         _check_app_password_warning(inv_res)
-    if inv_res.status == "sent":
+    if inv_res.status in ("sent", "submitted"):
         success_count += 1
         print("  [OK] Project invitation email dispatched successfully.")
 
@@ -156,7 +156,7 @@ def run_direct_verification(email: str, settings: Settings) -> bool:
     if pwd_res.error_message:
         print(f"  Error Detail  : {pwd_res.error_message}")
         _check_app_password_warning(pwd_res)
-    if pwd_res.status == "sent":
+    if pwd_res.status in ("sent", "submitted"):
         success_count += 1
         print("  [OK] Password reset email dispatched successfully.")
 
