@@ -1104,6 +1104,98 @@ export const api = {
       return request(`/projects/${projectId}/knowledge-intelligence/findings?${qs.toString()}`);
     },
   },
+  knowledge: {
+    async triggerEvidenceExtraction(
+      projectId: string,
+      evidenceId: string,
+      payload?: { categories?: string[]; force_rerun?: boolean }
+    ): Promise<{
+      run: Record<string, unknown>;
+      job?: Record<string, unknown>;
+      already_active: boolean;
+    }> {
+      return request(`/projects/${projectId}/evidence/${evidenceId}/extractions`, {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      });
+    },
+    async listEvidenceExtractions(
+      projectId: string,
+      evidenceId: string,
+      status?: string
+    ): Promise<{
+      items: Record<string, unknown>[];
+      total: number;
+    }> {
+      const qs = new URLSearchParams();
+      if (status) qs.append("status", status);
+      const qStr = qs.toString() ? `?${qs.toString()}` : "";
+      return request(`/projects/${projectId}/evidence/${evidenceId}/extractions${qStr}`);
+    },
+    async getEvidenceExtraction(
+      projectId: string,
+      evidenceId: string,
+      runId: string
+    ): Promise<Record<string, unknown>> {
+      return request(`/projects/${projectId}/evidence/${evidenceId}/extractions/${runId}`);
+    },
+    async getEvidenceFacts(
+      projectId: string,
+      evidenceId: string
+    ): Promise<{
+      evidence_id: string;
+      project_id: string;
+      total_facts: number;
+      ai_extracted_count: number;
+      raw_chunk_count: number;
+      latest_run_id?: string | null;
+      latest_run_status?: string | null;
+      facts: Array<{
+        id: string;
+        evidence_id: string;
+        knowledge_item_id?: string | null;
+        chunk_id?: string | null;
+        title: string;
+        description: string;
+        category: string;
+        primary_domain?: string | null;
+        confidence_level: string;
+        grounding_score: number;
+        confidence_explanation?: string | null;
+        original_excerpt: string;
+        page_or_section?: string | null;
+        validation_state: string;
+        is_ai_extracted: boolean;
+        created_at: string;
+      }>;
+      raw_chunks: Array<{
+        id: string;
+        chunk_index: number;
+        page_number?: number | null;
+        chunk_type: string;
+        char_count: number;
+        token_estimate: number;
+        chunk_text: string;
+        text_content?: string;
+        indexing_status: string;
+      }>;
+    }> {
+      return request(`/projects/${projectId}/evidence/${evidenceId}/facts`);
+    },
+    async getEvidenceFindings(
+      projectId: string,
+      evidenceId: string,
+      category?: string
+    ): Promise<{
+      items: Record<string, unknown>[];
+      total: number;
+    }> {
+      const qs = new URLSearchParams();
+      if (category) qs.append("category", category);
+      const qStr = qs.toString() ? `?${qs.toString()}` : "";
+      return request(`/projects/${projectId}/evidence/${evidenceId}/findings${qStr}`);
+    },
+  },
   verification: {
     async getSummary(projectId: string): Promise<{
       total_cases: number;

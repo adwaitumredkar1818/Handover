@@ -667,17 +667,17 @@ class ReconstructionWorkerService:
             }
 
             if run is not None:
-                run.processed_evidence_items += acc.processed_items
+                run.processed_evidence_items = acc.processed_items
                 run.failed_evidence_items = acc.failed_items
                 run.skipped_evidence_items = acc.skipped_items
-                run.total_chunks_evaluated += acc.chunks_evaluated
-                run.batches_executed += acc.batches_executed
-                run.candidates_generated += acc.candidates_generated
-                run.claims_persisted += acc.claims_persisted
-                run.claims_rejected_ungrounded += acc.claims_rejected_ungrounded
-                run.duplicates_merged += acc.duplicates_merged
-                run.prompt_tokens += acc.prompt_tokens
-                run.completion_tokens += acc.completion_tokens
+                run.total_chunks_evaluated = acc.chunks_evaluated
+                run.batches_executed = acc.batches_executed
+                run.candidates_generated = acc.candidates_generated
+                run.claims_persisted = acc.claims_persisted
+                run.claims_rejected_ungrounded = acc.claims_rejected_ungrounded
+                run.duplicates_merged = acc.duplicates_merged
+                run.prompt_tokens = acc.prompt_tokens
+                run.completion_tokens = acc.completion_tokens
                 merged_warnings = list(dict.fromkeys([*(run.warnings_json or []), *acc.warnings]))
                 run.warnings_json = merged_warnings[:30]
 

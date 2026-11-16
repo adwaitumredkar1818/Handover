@@ -774,6 +774,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     setSelectedEvidenceId,
     refreshEvidence,
     findings: liveFindings,
+    refreshFindings,
     setIsUploadModalOpen,
     sourceMappings,
   } = useLiveApp()
@@ -796,6 +797,20 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
   const [attributions, setAttributions] = useState<any[]>([])
   const [isLoadingAttributions, setIsLoadingAttributions] = useState(false)
   const [reconcilingId, setReconcilingId] = useState<string | null>(null)
+
+  // Ollama Extraction Engine State
+  const [extractionRuns, setExtractionRuns] = useState<any[]>([])
+  const [isExtractModalOpen, setIsExtractModalOpen] = useState(false)
+  const [isExtracting, setIsExtracting] = useState(false)
+  const [factsData, setFactsData] = useState<{
+    facts: any[]
+    raw_chunks: any[]
+    ai_extracted_count: number
+    raw_chunk_count: number
+  } | null>(null)
+  const [findingsData, setFindingsData] = useState<any[]>([])
+  const [isLoadingFacts, setIsLoadingFacts] = useState(false)
+  const [isLoadingFindings, setIsLoadingFindings] = useState(false)
 
   const handleReprocess = async (evId: string) => {
     if (!p) return
@@ -1103,6 +1118,108 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     }
   }, [activeDetailTab, isRoster, isCommitOrPr])
 
+  const latestExtractionRun = useMemo(() => {
+    if (!extractionRuns || extractionRuns.length === 0) return null
+    return extractionRuns[0]
+  }, [extractionRuns])
+
+  const loadEvidenceExtractions = useCallback(async () => {
+    if (!p?.id || !activeEvidenceId) {
+      setExtractionRuns([])
+      return
+    }
+    try {
+      const res = await api.knowledge.listEvidenceExtractions(p.id, activeEvidenceId)
+      setExtractionRuns(res.items || [])
+    } catch (err) {
+      console.error('Error loading extraction runs:', err)
+    }
+  }, [p?.id, activeEvidenceId])
+
+  const loadEvidenceFacts = useCallback(async () => {
+    if (!p?.id || !activeEvidenceId) {
+      setFactsData(null)
+      return
+    }
+    setIsLoadingFacts(true)
+    try {
+      const data = await api.knowledge.getEvidenceFacts(p.id, activeEvidenceId)
+      setFactsData(data)
+    } catch (err) {
+      console.error('Error loading facts:', err)
+    } finally {
+      setIsLoadingFacts(false)
+    }
+  }, [p?.id, activeEvidenceId])
+
+  const loadEvidenceFindings = useCallback(async () => {
+    if (!p?.id || !activeEvidenceId) {
+      setFindingsData([])
+      return
+    }
+    setIsLoadingFindings(true)
+    try {
+      const data = await api.knowledge.getEvidenceFindings(p.id, activeEvidenceId)
+      setFindingsData(data.items || [])
+    } catch (err) {
+      console.error('Error loading findings:', err)
+    } finally {
+      setIsLoadingFindings(false)
+    }
+  }, [p?.id, activeEvidenceId])
+
+  useEffect(() => {
+    loadEvidenceExtractions()
+    loadEvidenceFacts()
+    loadEvidenceFindings()
+  }, [loadEvidenceExtractions, loadEvidenceFacts, loadEvidenceFindings])
+
+  // Polling when active extraction run is running or queued
+  useEffect(() => {
+    if (!p?.id || !activeEvidenceId) return
+    const status = latestExtractionRun?.status
+    if (status !== 'queued' && status !== 'running') return
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await api.knowledge.listEvidenceExtractions(p.id, activeEvidenceId)
+        const updatedRuns = res.items || []
+        setExtractionRuns(updatedRuns)
+        const current = updatedRuns[0]
+        if (current && current.status !== 'queued' && current.status !== 'running') {
+          loadEvidenceFacts()
+          loadEvidenceFindings()
+          refreshFindings()
+          if (current.status === 'completed') {
+            s.toast('Extraction Completed', 'Structured knowledge successfully extracted with Ollama Qwen3 8B!', 'success')
+          }
+        }
+      } catch (err) {
+        console.error('Error polling extraction run:', err)
+      }
+    }, 2500)
+
+    return () => clearInterval(interval)
+  }, [p?.id, activeEvidenceId, latestExtractionRun?.status, loadEvidenceFacts, loadEvidenceFindings, refreshFindings, s])
+
+  const handleStartExtraction = async () => {
+    if (!p?.id || !activeEvidenceId) return
+    setIsExtracting(true)
+    setIsExtractModalOpen(false)
+    try {
+      await api.knowledge.triggerEvidenceExtraction(p.id, activeEvidenceId, {
+        force_rerun: Boolean(latestExtractionRun),
+      })
+      s.toast('Extraction Queued', 'Ollama Qwen3 8B knowledge extraction started.', 'success')
+      await loadEvidenceExtractions()
+    } catch (err: unknown) {
+      console.error('Failed to start extraction:', err)
+      s.toast('Extraction Failed', err instanceof Error ? err.message : 'Could not queue extraction', 'error')
+    } finally {
+      setIsExtracting(false)
+    }
+  }
+
   const detailTabOptions = useMemo(() => {
     const opts: { id: DetailTab; label: string }[] = [
       { id: 'content', label: 'Source Record' },
@@ -1113,12 +1230,14 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     if (isCommitOrPr) {
       opts.push({ id: 'attribution', label: `Attribution (${attributions.length})` })
     }
+    const factCount = factsData ? factsData.ai_extracted_count : activeExtractedFacts.length
+    const findingCount = findingsData.length > 0 ? findingsData.length : relatedFindings.length
     opts.push(
-      { id: 'facts', label: `Facts (${activeExtractedFacts.length})` },
-      { id: 'findings', label: `Findings (${relatedFindings.length})` }
+      { id: 'facts', label: `Facts (${factCount})` },
+      { id: 'findings', label: `Findings (${findingCount})` }
     )
     return opts
-  }, [isRoster, isCommitOrPr, rosterMembers.length, attributions.length, activeExtractedFacts.length, relatedFindings.length])
+  }, [isRoster, isCommitOrPr, rosterMembers.length, attributions.length, factsData, activeExtractedFacts.length, findingsData.length, relatedFindings.length])
 
   const reset = () => {
     setQ('')
@@ -1334,6 +1453,122 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
                       />
                     </div>
                   )}
+                </div>
+
+                {/* ✨ OLLAMA EXTRACTION ACTION BAR (PANEL C) */}
+                <div className="rounded-xl border border-indigo-100 bg-gradient-to-r from-indigo-50/70 via-sky-50/40 to-white p-3 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <div className="flex size-7 items-center justify-center rounded-lg bg-indigo-600 text-white shadow-xs">
+                        <Sparkles className="size-4" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-bold text-navy">Ollama Extraction Engine</span>
+                          <span className="rounded bg-indigo-100 px-1.5 py-0.2 text-[10px] font-semibold text-indigo-700">Qwen3 8B</span>
+                        </div>
+                        <p className="text-[10.5px] text-muted">Local evidence-grounded knowledge reconstruction</p>
+                      </div>
+                    </div>
+
+                    {latestExtractionRun && (
+                      <span className={cn(
+                        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-medium border",
+                        latestExtractionRun.status === 'completed' && "bg-emerald-50 text-emerald-700 border-emerald-200",
+                        latestExtractionRun.status === 'running' && "bg-sky-50 text-sky-700 border-sky-200 animate-pulse",
+                        latestExtractionRun.status === 'queued' && "bg-amber-50 text-amber-700 border-amber-200",
+                        latestExtractionRun.status === 'partially_completed' && "bg-amber-50 text-amber-700 border-amber-200",
+                        latestExtractionRun.status === 'failed' && "bg-rose-50 text-rose-700 border-rose-200"
+                      )}>
+                        {latestExtractionRun.status === 'running' && <Loader2 className="size-3 animate-spin" />}
+                        {latestExtractionRun.status === 'completed' && <Check className="size-3 text-emerald-600" />}
+                        {latestExtractionRun.status === 'failed' && <XCircle className="size-3 text-rose-600" />}
+                        {latestExtractionRun.status === 'queued' && <Clock className="size-3 text-amber-600" />}
+                        <span className="capitalize">{latestExtractionRun.status.replace(/_/g, ' ')}</span>
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Active running stage description */}
+                  {latestExtractionRun?.status === 'running' && (
+                    <div className="rounded-lg bg-white/80 border border-sky-200/60 p-2 text-[11px] text-sky-900 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="size-3.5 animate-spin text-sky-600 shrink-0" />
+                        <span>
+                          {latestExtractionRun.batches_executed === 0 && latestExtractionRun.candidates_generated === 0
+                            ? "Preparing content & loading source chunks..."
+                            : latestExtractionRun.batches_executed > 0 && latestExtractionRun.candidates_generated === 0
+                            ? `Extracting knowledge with Qwen3 8B (batch ${latestExtractionRun.batches_executed})...`
+                            : latestExtractionRun.candidates_generated > 0 && latestExtractionRun.claims_persisted === 0
+                            ? `Validating ${latestExtractionRun.candidates_generated} candidates against source evidence...`
+                            : `Saving ${latestExtractionRun.claims_persisted} verified claims to Knowledge Intelligence...`}
+                        </span>
+                      </div>
+                      <span className="font-mono text-[10px] text-slate-500">
+                        {latestExtractionRun.total_chunks_evaluated || liveSelectedEvidence?.chunks?.length || 0} chunks
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Completed summary banner */}
+                  {latestExtractionRun?.status === 'completed' && (
+                    <div className="rounded-lg bg-emerald-50/70 border border-emerald-200/60 p-2 text-[11px] text-emerald-900 flex items-center justify-between">
+                      <span>
+                        Extracted <strong>{factsData?.ai_extracted_count || latestExtractionRun.claims_persisted || 0} facts</strong> and <strong>{findingsData?.length || latestExtractionRun.candidates_generated || 0} findings</strong> with source grounding.
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setActiveDetailTab('facts')}
+                          className="text-[10px] font-semibold text-emerald-700 hover:underline cursor-pointer"
+                        >
+                          View Facts
+                        </button>
+                        <span className="text-emerald-300">·</span>
+                        <button
+                          type="button"
+                          onClick={() => setActiveDetailTab('findings')}
+                          className="text-[10px] font-semibold text-emerald-700 hover:underline cursor-pointer"
+                        >
+                          View Findings
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Failed error banner */}
+                  {latestExtractionRun?.status === 'failed' && (
+                    <div className="rounded-lg bg-rose-50/80 border border-rose-200 p-2 text-[11px] text-rose-800">
+                      <p className="font-semibold">Extraction encountered an issue:</p>
+                      <p className="text-[10.5px] mt-0.5 line-clamp-2">{latestExtractionRun.error_message || 'Inference error or model timeout.'}</p>
+                    </div>
+                  )}
+
+                  {/* Action button: Extract with Ollama / Re-run Extraction */}
+                  <div className="flex items-center gap-2 pt-0.5">
+                    {(!latestExtractionRun || latestExtractionRun.status === 'failed' || latestExtractionRun.status === 'completed' || latestExtractionRun.status === 'partially_completed') && (
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        className="w-full justify-center bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs shadow-xs"
+                        icon={Sparkles}
+                        onClick={() => setIsExtractModalOpen(true)}
+                        disabled={isExtracting || !activeEvidenceId}
+                      >
+                        {latestExtractionRun?.status === 'completed'
+                          ? '✨ Re-run Extraction with Ollama'
+                          : latestExtractionRun?.status === 'failed'
+                          ? '✨ Retry Extraction with Ollama'
+                          : '✨ Extract with Ollama'}
+                      </Button>
+                    )}
+                    {latestExtractionRun?.status === 'queued' && (
+                      <div className="w-full flex items-center justify-center gap-2 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 rounded-lg border border-amber-200">
+                        <Clock className="size-3.5 animate-spin" />
+                        <span>Extraction Queued in Background Worker...</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="flex gap-2">
@@ -1616,34 +1851,111 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
                       <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Extracted Facts & Chunks</p>
-                      <span className="text-[11px] text-muted">{activeExtractedFacts.length} items</span>
+                      <span className="text-[11px] text-muted">
+                        {factsData ? `${factsData.ai_extracted_count} facts · ${factsData.raw_chunk_count} chunks` : `${activeExtractedFacts.length} items`}
+                      </span>
                     </div>
-                    {isLoadingEvidenceDetail || !liveSelectedEvidence || liveSelectedEvidence.id !== activeEvidenceId ? (
+                    {isLoadingFacts ? (
                       <div className="space-y-2">
-                        <Skeleton className="h-10 w-full" />
-                        <Skeleton className="h-10 w-full" />
-                        <Skeleton className="h-10 w-full" />
+                        <Skeleton className="h-14 w-full" />
+                        <Skeleton className="h-14 w-full" />
                       </div>
-                    ) : activeExtractedFacts.length > 0 ? (
-                      <ul className="space-y-2 max-h-64 overflow-y-auto">
-                        {activeExtractedFacts.map((f, i) => (
-                          <li key={i} className="flex items-start gap-2.5 rounded-lg border border-dashed border-indigo-200 bg-indigo-50/30 p-2.5 text-xs text-navy">
-                            <Sparkles className="size-3.5 shrink-0 text-indigo-500 mt-0.5" />
-                            <span className="leading-relaxed">{f}</span>
-                          </li>
-                        ))}
-                      </ul>
+                    ) : (factsData?.facts && factsData.facts.length > 0) ? (
+                      <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+                        {/* Section 1: Structured AI Facts */}
+                        <div className="space-y-2">
+                          <p className="text-[10.5px] font-bold uppercase tracking-wider text-indigo-700 flex items-center gap-1">
+                            <Sparkles className="size-3 text-indigo-500" /> AI-Extracted Facts ({factsData.facts.length})
+                          </p>
+                          {factsData.facts.map((fact) => (
+                            <div key={fact.id} className="rounded-xl border border-indigo-200/80 bg-indigo-50/20 p-2.5 text-xs text-navy space-y-1.5 shadow-2xs">
+                              <div className="flex items-center justify-between gap-1.5">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="rounded bg-indigo-100 text-indigo-800 px-1.5 py-0.5 text-[9.5px] font-bold uppercase">
+                                    {fact.primary_domain || fact.category}
+                                  </span>
+                                  {fact.page_or_section && (
+                                    <span className="text-[10px] text-slate-500 font-mono">
+                                      {fact.page_or_section}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="rounded-full bg-emerald-100 text-emerald-800 px-2 py-0.5 text-[9.5px] font-bold">
+                                    {Math.round(fact.grounding_score * 100)}% grounded
+                                  </span>
+                                  <span className="rounded bg-amber-50 text-amber-700 border border-amber-200 px-1.5 py-0.5 text-[9px] font-semibold uppercase">
+                                    {fact.validation_state}
+                                  </span>
+                                </div>
+                              </div>
+                              <p className="font-semibold text-navy text-[11.5px] leading-snug">{fact.title}</p>
+                              <p className="text-[11px] text-slate-600 leading-relaxed">{fact.description}</p>
+                              {fact.original_excerpt && (
+                                <div className="rounded-lg bg-slate-50 border border-slate-200/60 p-2 text-[10.5px] font-mono text-slate-700 border-l-2 border-l-indigo-500">
+                                  <span className="text-slate-400 font-sans block text-[9.5px] mb-0.5">Supporting Source Excerpt:</span>
+                                  &ldquo;{fact.original_excerpt.slice(0, 260)}{fact.original_excerpt.length > 260 ? '...' : ''}&rdquo;
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Section 2: Raw Source Chunks */}
+                        {factsData.raw_chunks && factsData.raw_chunks.length > 0 && (
+                          <div className="pt-2 border-t border-slate-200/80 space-y-2">
+                            <p className="text-[10.5px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1">
+                              <Layers className="size-3 text-slate-400" /> Source Chunks ({factsData.raw_chunks.length})
+                            </p>
+                            {factsData.raw_chunks.map((chunk) => (
+                              <div key={chunk.id} className="rounded-lg border border-slate-200 bg-slate-50/60 p-2 text-xs space-y-1">
+                                <div className="flex items-center justify-between text-[10px] text-muted">
+                                  <span className="font-mono font-semibold text-navy">
+                                    Chunk #{chunk.chunk_index + 1} {chunk.page_number ? `· Page ${chunk.page_number}` : ''}
+                                  </span>
+                                  <span className="font-mono">{chunk.char_count} chars · {chunk.token_estimate} tokens</span>
+                                </div>
+                                <p className="text-[10.5px] text-slate-600 line-clamp-3 font-mono leading-relaxed">
+                                  {chunk.chunk_text || chunk.text_content}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     ) : (
-                      <div className="rounded-xl border border-dashed border-slate-200 p-4 text-center">
-                        <p className="text-xs text-muted mb-2">No extracted facts available yet.</p>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => { if (activeEvidenceId) handleReprocess(activeEvidenceId) }}
-                          disabled={isReprocessing || !activeEvidenceId}
-                        >
-                          {isReprocessing ? 'Queueing...' : 'Re-process Document'}
-                        </Button>
+                      /* Fallback when not yet extracted */
+                      <div className="space-y-3">
+                        <div className="rounded-xl border border-dashed border-indigo-200 bg-indigo-50/20 p-4 text-center space-y-2">
+                          <Sparkles className="size-6 text-indigo-500 mx-auto" />
+                          <p className="text-xs font-semibold text-navy">No AI-Extracted Facts Yet</p>
+                          <p className="text-[11px] text-muted">
+                            Click &ldquo;Extract with Ollama&rdquo; above to run Qwen3 8B on this document and generate structured, grounded facts.
+                          </p>
+                          <Button
+                            size="sm"
+                            variant="primary"
+                            icon={Sparkles}
+                            className="bg-indigo-600 hover:bg-indigo-700 text-white mx-auto cursor-pointer"
+                            onClick={() => setIsExtractModalOpen(true)}
+                          >
+                            Extract with Ollama
+                          </Button>
+                        </div>
+                        {liveSelectedEvidence?.chunks && liveSelectedEvidence.chunks.length > 0 && (
+                          <div className="space-y-2 pt-2 border-t border-slate-200">
+                            <p className="text-[10.5px] font-bold uppercase tracking-wider text-slate-500">
+                              Raw Source Chunks ({liveSelectedEvidence.chunks.length})
+                            </p>
+                            <ul className="space-y-1.5 max-h-48 overflow-y-auto">
+                              {activeExtractedFacts.map((f, i) => (
+                                <li key={i} className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-700 leading-relaxed font-mono">
+                                  {f}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1651,22 +1963,66 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
 
                 {activeDetailTab === 'findings' && (
                   <div>
-                    <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">Reconstructed Findings</p>
-                    <div className="space-y-2 max-h-64 overflow-y-auto">
-                      {relatedFindings.map((f) => (
-                        <div key={f.id} className="rounded-xl border border-line p-2.5 bg-white">
-                          <div className="flex items-center justify-between mb-1">
-                            <Badge tone="indigo">{f.kind}</Badge>
-                            <VerificationBadge status={f.verification as Verification} />
-                          </div>
-                          <p className="text-xs font-semibold text-navy">{f.title}</p>
-                          <p className="text-[11px] text-muted line-clamp-1 mt-0.5">{f.summary}</p>
-                        </div>
-                      ))}
-                      {!relatedFindings.length && (
-                        <p className="text-xs text-muted">No findings link to this evidence record yet.</p>
-                      )}
+                    <div className="flex items-center justify-between mb-1.5">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Reconstructed Findings</p>
+                      <span className="text-[11px] text-muted">
+                        {findingsData.length > 0 ? `${findingsData.length} findings` : `${relatedFindings.length} findings`}
+                      </span>
                     </div>
+                    {isLoadingFindings ? (
+                      <div className="space-y-2">
+                        <Skeleton className="h-16 w-full" />
+                        <Skeleton className="h-16 w-full" />
+                      </div>
+                    ) : findingsData.length > 0 ? (
+                      <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                        {findingsData.map((f: any) => (
+                          <div key={f.id} className="rounded-xl border border-line p-3 bg-white space-y-1.5 shadow-2xs">
+                            <div className="flex items-center justify-between">
+                              <span className="rounded bg-indigo-50 border border-indigo-200 text-indigo-700 font-bold px-1.5 py-0.5 text-[9.5px] uppercase">
+                                {f.primary_domain || f.category}
+                              </span>
+                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 text-amber-800 px-2 py-0.5 text-[9.5px] font-semibold">
+                                <Clock className="size-3 text-amber-600" /> Candidate
+                              </span>
+                            </div>
+                            <p className="text-xs font-bold text-navy">{f.title}</p>
+                            <p className="text-[11px] text-slate-600 leading-relaxed">{f.structured_summary || f.summary}</p>
+                            <div className="text-[10px] text-slate-400 flex items-center justify-between pt-1 border-t border-slate-100">
+                              <span>Model: {f.extraction_model || 'qwen3:8b'}</span>
+                              <span className="font-mono text-[9.5px]">{f.epistemic_status || 'inferred_from_evidence'}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : relatedFindings.length > 0 ? (
+                      <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                        {relatedFindings.map((f) => (
+                          <div key={f.id} className="rounded-xl border border-line p-2.5 bg-white space-y-1">
+                            <div className="flex items-center justify-between mb-1">
+                              <Badge tone="indigo">{f.kind}</Badge>
+                              <VerificationBadge status={f.verification as Verification} />
+                            </div>
+                            <p className="text-xs font-semibold text-navy">{f.title}</p>
+                            <p className="text-[11px] text-muted line-clamp-2 mt-0.5">{f.summary}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-dashed border-slate-200 p-4 text-center space-y-2">
+                        <FileSearch className="size-6 text-slate-300 mx-auto" />
+                        <p className="text-xs text-muted">No findings link to this evidence record yet.</p>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          icon={Sparkles}
+                          className="cursor-pointer"
+                          onClick={() => setIsExtractModalOpen(true)}
+                        >
+                          Extract Knowledge Findings
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1934,6 +2290,95 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
             ))}
           </Select>
         </Field>
+      </Modal>
+
+      {/* ✨ Extract with Ollama Confirmation Modal */}
+      <Modal
+        open={isExtractModalOpen}
+        onClose={() => setIsExtractModalOpen(false)}
+        size="md"
+        title={
+          <div className="flex items-center gap-2.5">
+            <div className="flex size-8 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-xs">
+              <Sparkles className="size-4" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-navy">Extract Knowledge with Qwen3 8B</h3>
+              <p className="text-xs text-muted">Local Ollama AI Extraction & Provenance Grounding</p>
+            </div>
+          </div>
+        }
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => setIsExtractModalOpen(false)}
+              disabled={isExtracting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              icon={Sparkles}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer"
+              onClick={handleStartExtraction}
+              disabled={isExtracting}
+            >
+              {isExtracting ? 'Starting...' : 'Start Extraction'}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4 text-xs">
+          <div className="rounded-xl border border-line bg-slate-50/70 p-3.5 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-slate-500 uppercase tracking-wider text-[10px]">Evidence Record</span>
+              <span className="font-mono text-[10px] text-slate-400">{selectedEvidence?.ref || activeEvidenceId?.slice(0, 8)}</span>
+            </div>
+            <p className="font-bold text-sm text-navy">{selectedEvidence?.title}</p>
+            <div className="grid grid-cols-2 gap-2 text-muted pt-1 border-t border-slate-200/50">
+              <div>Category: <strong className="text-navy">{selectedEvidence?.type || 'Document'}</strong></div>
+              <div>Source: <strong className="text-navy">{selectedSource?.name || 'Local Upload'}</strong></div>
+              <div>Pages: <strong className="text-navy">{liveSelectedEvidence?.page_count || 1}</strong></div>
+              <div>Chunks: <strong className="text-navy">{liveSelectedEvidence?.chunks?.length || 0}</strong></div>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <span className="font-semibold text-slate-500 uppercase tracking-wider text-[10px]">Model & Extraction Profile</span>
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50/40 p-3 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-indigo-950 flex items-center gap-1.5">
+                  <Cpu className="size-3.5 text-indigo-600" /> Model: Qwen3 8B
+                </span>
+                <span className="rounded bg-indigo-100 px-2 py-0.5 text-[10px] font-bold text-indigo-700 font-mono">qwen3:8b</span>
+              </div>
+              <p className="text-[11px] text-slate-600 leading-relaxed">
+                Decrypted source chunks will be supplied directly to the local Ollama instance on your RTX 4050 GPU without leaving the private boundary.
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <span className="font-semibold text-slate-500 uppercase tracking-wider text-[10px]">Extraction Scope</span>
+            <div className="rounded-xl border border-line p-3 bg-white space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-navy">Full Structured Project Knowledge Extraction</span>
+                <span className="rounded bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">8 Domains</span>
+              </div>
+              <p className="text-[11px] text-muted leading-relaxed">
+                Reconstructs Decisions & Rationale, Technical Architecture, Completed & Unfinished Work, Ownership, Dependencies, Risks & Blockers, Operational Runbooks, and Historical Context.
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3 text-[11px] text-amber-900 flex items-start gap-2">
+            <AlertTriangle className="size-4 text-amber-600 shrink-0 mt-0.5" />
+            <span className="leading-relaxed">
+              Extracted claims are attributed with exact text excerpts and grounding scores. All findings remain <strong>Candidates</strong> until reviewed by a designated human in the Verification Center.
+            </span>
+          </div>
+        </div>
       </Modal>
     </>
   )

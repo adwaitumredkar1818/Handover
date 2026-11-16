@@ -86,7 +86,7 @@ interface LiveAppContextType {
   isLoadingSources: boolean;
   connectSource: (provider: "github" | "jira" | "slack", token: string, accountId: string) => Promise<SourceConnection>;
   createMapping: (data: { source_connection_id: string; external_resource_key: string; external_resource_name: string; external_resource_url?: string }) => Promise<ProjectSourceMapping>;
-  triggerSync: (mappingId: string) => Promise<void>;
+  triggerSync: (mappingId: string, projectId?: string) => Promise<void>;
   refreshSources: () => Promise<void>;
 
   // Evidence
@@ -1250,10 +1250,11 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     return mapping;
   };
 
-  const triggerSync = async (mappingId: string) => {
-    if (!activeProject) return;
+  const triggerSync = async (mappingId: string, projectId?: string) => {
+    const targetProjectId = projectId || activeProject?.id;
+    if (!targetProjectId) return;
     try {
-      const res = await api.sources.triggerSync(activeProject.id, mappingId);
+      const res = await api.sources.triggerSync(targetProjectId, mappingId);
       addToast({
         type: "info",
         title: "Sync Started",

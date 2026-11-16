@@ -73,6 +73,7 @@ export function ConnectSourceModal() {
     triggerSync,
     refreshSources,
     refreshEvidence,
+    orgConnections,
     addToast,
   } = useLiveApp();
 
@@ -82,6 +83,12 @@ export function ConnectSourceModal() {
   type FlowStep = "credentials" | "select_resources" | "configure_scope" | "confirm";
   const [step, setStep] = useState<FlowStep>("credentials");
   const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null);
+
+  // Resolved active connection (explicit or from existing organisation connections)
+  const existingActiveConnection = orgConnections.find(
+    (c) => c.provider === activeTab && c.status === "active"
+  );
+  const resolvedConnectionId = activeConnectionId || existingActiveConnection?.id || null;
 
   // Target project workspace state & inline creator
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
@@ -190,6 +197,7 @@ export function ConnectSourceModal() {
         s: FlowStep,
         opts?: {
           account?: string;
+          connectionId?: string;
           repos?: Array<{
             external_resource_id: string;
             full_name: string;
@@ -212,6 +220,7 @@ export function ConnectSourceModal() {
       ) => {
         setStep(s);
         if (opts?.account) setGithubResolvedAccount(opts.account);
+        if (opts?.connectionId) setActiveConnectionId(opts.connectionId);
         if (opts?.repos) setDiscoveredRepos(opts.repos);
         if (opts?.selectedKeys) setSelectedRepoKeys(new Set(opts.selectedKeys));
         if (opts?.branchScope) setBranchScope(opts.branchScope);
@@ -378,6 +387,40 @@ export function ConnectSourceModal() {
     }
   };
 
+  // Step 1b: Use existing active organisation connection
+  const handleDiscoverExisting = async (connId: string) => {
+    setError(null);
+    setIsDiscovering(true);
+    try {
+      setActiveConnectionId(connId);
+      const conn = orgConnections.find((c) => c.id === connId);
+      if (conn?.account_identifier) {
+        setGithubResolvedAccount(conn.account_identifier);
+        setGithubAccount(conn.account_identifier);
+      }
+      if (activeTab === "github") {
+        const res = await api.sources.discoverGitHubRepositories(connId, 1, 100, effectiveProjectId || activeProject?.id);
+        setDiscoveredRepos(res.items || []);
+        if (!newProjectName && res.items?.[0]?.name) {
+          setNewProjectName(res.items[0].name);
+        }
+        setStep("select_resources");
+      } else if (activeTab === "jira") {
+        const res = await api.sources.discoverJiraProjects(connId);
+        setDiscoveredProjects(res.projects || []);
+        setStep("select_resources");
+      } else if (activeTab === "slack") {
+        const res = await api.sources.discoverSlackChannels(connId);
+        setDiscoveredChannels(res.items || []);
+        setStep("select_resources");
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to discover resources from existing connection.");
+    } finally {
+      setIsDiscovering(false);
+    }
+  };
+
   // Step 2: Batch map selected resources and trigger background sync
   const handleBatchIngest = async () => {
     const finalProjectId = effectiveProjectId;
@@ -385,7 +428,8 @@ export function ConnectSourceModal() {
       setError("Please select or create a target project workspace first before starting synchronisation.");
       return;
     }
-    if (!activeConnectionId) {
+    const finalConnectionId = resolvedConnectionId;
+    if (!finalConnectionId) {
       setError("Active source connection is missing. Please re-authenticate your credentials in Step 1.");
       return;
     }
@@ -423,14 +467,14 @@ export function ConnectSourceModal() {
         });
         const res = await api.sources.batchCreateMappings(finalProjectId, {
           provider: "github",
-          source_connection_id: activeConnectionId,
+          source_connection_id: finalConnectionId,
           items,
         });
         createdMappingsCount = res.created_mappings.length;
         // Trigger background sync for each created mapping
         for (const mapping of res.created_mappings) {
           try {
-            await triggerSync(mapping.id);
+            await triggerSync(mapping.id, finalProjectId);
           } catch {
             // Background sync queued
           }
@@ -447,13 +491,13 @@ export function ConnectSourceModal() {
         });
         const res = await api.sources.batchCreateMappings(finalProjectId, {
           provider: "jira",
-          source_connection_id: activeConnectionId,
+          source_connection_id: finalConnectionId,
           items,
         });
         createdMappingsCount = res.created_mappings.length;
         for (const mapping of res.created_mappings) {
           try {
-            await triggerSync(mapping.id);
+            await triggerSync(mapping.id, finalProjectId);
           } catch {
             // Background sync queued
           }
@@ -470,13 +514,13 @@ export function ConnectSourceModal() {
         });
         const res = await api.sources.batchCreateMappings(finalProjectId, {
           provider: "slack",
-          source_connection_id: activeConnectionId,
+          source_connection_id: finalConnectionId,
           items,
         });
         createdMappingsCount = res.created_mappings.length;
         for (const mapping of res.created_mappings) {
           try {
-            await triggerSync(mapping.id);
+            await triggerSync(mapping.id, finalProjectId);
           } catch {
             // Background sync queued
           }
@@ -597,6 +641,35 @@ export function ConnectSourceModal() {
             <div>
               {step === "credentials" && (
                 <div className="space-y-4">
+                  {existingActiveConnection && (
+                    <div className="p-3 rounded-lg bg-emerald-50/70 border border-emerald-200 flex items-center justify-between gap-3 text-xs">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <div>
+                          <span className="font-semibold text-emerald-950">
+                            Connected Account: @{existingActiveConnection.account_identifier}
+                          </span>
+                          <span className="text-[10px] text-emerald-700 ml-2 font-mono">
+                            (Active in organisation)
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleDiscoverExisting(existingActiveConnection.id)}
+                        disabled={isDiscovering}
+                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-semibold flex items-center gap-1.5 shadow-2xs transition-colors shrink-0"
+                      >
+                        {isDiscovering ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <ArrowRight className="w-3 h-3" />
+                        )}
+                        <span>Use This Account</span>
+                      </button>
+                    </div>
+                  )}
+
                   <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-start gap-3">
                     <SourceIcon type="github" size={28} />
                     <div className="text-xs">
