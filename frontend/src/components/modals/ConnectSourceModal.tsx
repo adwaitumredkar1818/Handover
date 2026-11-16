@@ -32,6 +32,7 @@ import {
   ShieldCheck,
   Tag,
   CircleAlert,
+  Plus,
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { SourceIcon } from "../brand/brand";
@@ -62,11 +63,17 @@ export function ConnectSourceModal() {
     setIsAddSourceModalOpen,
     initialSourceProvider,
     activeOrg,
+    organisations,
+    setActiveOrg,
+    projects,
     activeProject,
+    setActiveProject,
+    createProject,
     connectSource,
     triggerSync,
     refreshSources,
     refreshEvidence,
+    addToast,
   } = useLiveApp();
 
   const [activeTab, setActiveTab] = useState<ConnectProviderTab>("github");
@@ -75,6 +82,21 @@ export function ConnectSourceModal() {
   type FlowStep = "credentials" | "select_resources" | "configure_scope" | "confirm";
   const [step, setStep] = useState<FlowStep>("credentials");
   const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null);
+
+  // Target project workspace state & inline creator
+  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectDescription, setNewProjectDescription] = useState("");
+  const [showCreateProjectInline, setShowCreateProjectInline] = useState(false);
+
+  // Determined target project: explicitly selected in modal -> workspace active -> first org project
+  const targetProject =
+    (selectedProjectId ? projects.find((p) => p.id === selectedProjectId) : null) ??
+    activeProject ??
+    (projects.length > 0 ? projects[0] : null);
+
+  const effectiveProjectId = targetProject?.id ?? "";
 
   // GitHub state
   const [githubAccount, setGithubAccount] = useState("");
@@ -212,8 +234,46 @@ export function ConnectSourceModal() {
       setSelectedChannelIds(new Set());
       setShowGithubToken(false);
       setShowPermGuide(false);
+      setShowCreateProjectInline(false);
+      setNewProjectName("");
+      setNewProjectDescription("");
+
+      if (activeProject?.id) {
+        setSelectedProjectId(activeProject.id);
+      } else if (projects.length > 0 && projects[0]?.id) {
+        setSelectedProjectId(projects[0].id);
+        setActiveProject(projects[0]);
+      } else {
+        setSelectedProjectId("");
+      }
     }
-  }, [isAddSourceModalOpen, initialSourceProvider]);
+  }, [isAddSourceModalOpen, initialSourceProvider, activeProject?.id, projects, setActiveProject]);
+
+  const handleQuickCreateProject = async () => {
+    if (!newProjectName.trim()) return;
+    setIsCreatingProject(true);
+    setError(null);
+    try {
+      const proj = await createProject({
+        name: newProjectName.trim(),
+        description: newProjectDescription.trim() || undefined,
+      });
+      setSelectedProjectId(proj.id);
+      setActiveProject(proj);
+      setNewProjectName("");
+      setNewProjectDescription("");
+      setShowCreateProjectInline(false);
+      addToast({
+        type: "success",
+        title: "Project Workspace Created",
+        message: `Project ${proj.name} is now active and ready for source mapping.`,
+      });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to create project workspace.");
+    } finally {
+      setIsCreatingProject(false);
+    }
+  };
 
   if (!isAddSourceModalOpen) return null;
 
@@ -278,8 +338,11 @@ export function ConnectSourceModal() {
           setGithubAccount(resolvedName);
         }
         // Discover accessible repositories with project_id so already_mapped is returned!
-        const res = await api.sources.discoverGitHubRepositories(conn.id, 1, 100, activeProject?.id);
+        const res = await api.sources.discoverGitHubRepositories(conn.id, 1, 100, effectiveProjectId || activeProject?.id);
         setDiscoveredRepos(res.items || []);
+        if (!newProjectName && res.items?.[0]?.name) {
+          setNewProjectName(res.items[0].name);
+        }
         setStep("select_resources");
       } else if (activeTab === "jira") {
         if (!jiraEmail.trim() || !jiraToken.trim()) {
@@ -317,8 +380,13 @@ export function ConnectSourceModal() {
 
   // Step 2: Batch map selected resources and trigger background sync
   const handleBatchIngest = async () => {
-    if (!activeProject?.id || !activeConnectionId) {
-      setError("Active project or connection is missing.");
+    const finalProjectId = effectiveProjectId;
+    if (!finalProjectId) {
+      setError("Please select or create a target project workspace first before starting synchronisation.");
+      return;
+    }
+    if (!activeConnectionId) {
+      setError("Active source connection is missing. Please re-authenticate your credentials in Step 1.");
       return;
     }
     setError(null);
@@ -353,7 +421,7 @@ export function ConnectSourceModal() {
             include_code: includeCode,
           };
         });
-        const res = await api.sources.batchCreateMappings(activeProject.id, {
+        const res = await api.sources.batchCreateMappings(finalProjectId, {
           provider: "github",
           source_connection_id: activeConnectionId,
           items,
@@ -377,7 +445,7 @@ export function ConnectSourceModal() {
           const proj = discoveredProjects.find((p) => p.key === key);
           return { cloud_id: proj?.cloud_id || "jira", project_key: key };
         });
-        const res = await api.sources.batchCreateMappings(activeProject.id, {
+        const res = await api.sources.batchCreateMappings(finalProjectId, {
           provider: "jira",
           source_connection_id: activeConnectionId,
           items,
@@ -400,7 +468,7 @@ export function ConnectSourceModal() {
           const ch = discoveredChannels.find((c) => c.id === id);
           return { channel_id: id, channel_name: ch?.name || id };
         });
-        const res = await api.sources.batchCreateMappings(activeProject.id, {
+        const res = await api.sources.batchCreateMappings(finalProjectId, {
           provider: "slack",
           source_connection_id: activeConnectionId,
           items,
@@ -415,6 +483,9 @@ export function ConnectSourceModal() {
         }
       }
 
+      if (targetProject && activeProject?.id !== finalProjectId) {
+        setActiveProject(targetProject);
+      }
       await refreshSources();
       await refreshEvidence();
       setIsAddSourceModalOpen(false);
@@ -432,19 +503,23 @@ export function ConnectSourceModal() {
       setError("Please select a PDF or DOCX file to upload.");
       return;
     }
-    if (!activeProject?.id) {
-      setError("Please select an active project first.");
+    const finalProjectId = effectiveProjectId;
+    if (!finalProjectId) {
+      setError("Please select or create an active project workspace first.");
       return;
     }
     setError(null);
     setIsSubmitting(true);
 
     try {
-      await api.evidence.upload(activeProject.id, selectedFile, {
+      await api.evidence.upload(finalProjectId, selectedFile, {
         title: docCustomTitle.trim() || undefined,
         document_category: docCategory,
         document_subtype: docCategory === "project_document" ? docSubtype : undefined,
       });
+      if (targetProject && activeProject?.id !== finalProjectId) {
+        setActiveProject(targetProject);
+      }
       await refreshEvidence();
       setSelectedFile(null);
       setDocCustomTitle("");
@@ -518,6 +593,26 @@ export function ConnectSourceModal() {
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
+          {/* Workspace Context & Target Project Info Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600">
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 font-medium">Organisation:</span>
+              <span className="font-semibold text-slate-800">{activeOrg?.name || "Current Organisation"}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400 font-medium">Target Project:</span>
+              {targetProject ? (
+                <span className="font-semibold text-[#203653] bg-white px-2 py-0.5 rounded border border-slate-200 shadow-2xs">
+                  {targetProject.name}
+                </span>
+              ) : (
+                <span className="font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                  None Selected
+                </span>
+              )}
+            </div>
+          </div>
+
           {error && (
             <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
@@ -667,10 +762,75 @@ export function ConnectSourceModal() {
                     </span>
                   </div>
 
+                  {/* Target Project Workspace Selector / Creator */}
+                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-slate-700">Target Project Workspace:</span>
+                      {projects.length > 0 ? (
+                        <div className="flex items-center gap-2">
+                          <select
+                            value={targetProject?.id || ""}
+                            onChange={(e) => {
+                              const found = projects.find((p) => p.id === e.target.value);
+                              if (found) {
+                                setSelectedProjectId(found.id);
+                                setActiveProject(found);
+                              }
+                            }}
+                            className="text-xs font-semibold text-[#203653] bg-white border border-slate-200 rounded px-2.5 py-1 focus:ring-1 focus:ring-[#315FBA] outline-none"
+                          >
+                            {projects.map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.name}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => setShowCreateProjectInline(!showCreateProjectInline)}
+                            className="text-[11px] text-[#315FBA] hover:underline font-medium"
+                          >
+                            + New Project
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-xs font-semibold text-rose-600">No project workspace found</span>
+                      )}
+                    </div>
+
+                    {(projects.length === 0 || showCreateProjectInline) && (
+                      <div className="pt-2 border-t border-slate-200 space-y-2">
+                        <p className="text-[11px] text-slate-600">
+                          {projects.length === 0
+                            ? `No projects exist in ${activeOrg?.name || "this organisation"} yet. Create a project workspace to map repositories into:`
+                            : "Create a new project workspace:"}
+                        </p>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={newProjectName}
+                            onChange={(e) => setNewProjectName(e.target.value)}
+                            placeholder="e.g. HackMatrix-5.0-MISC02"
+                            className="flex-1 text-xs border border-slate-200 rounded px-2.5 py-1.5 bg-white text-slate-800"
+                          />
+                          <button
+                            type="button"
+                            disabled={!newProjectName.trim() || isCreatingProject}
+                            onClick={handleQuickCreateProject}
+                            className="px-3 py-1.5 bg-[#315FBA] hover:bg-[#264C98] disabled:opacity-50 text-white rounded text-xs font-semibold flex items-center gap-1 shrink-0"
+                          >
+                            {isCreatingProject ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                            Create Project
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   <div className="flex items-center justify-between">
                     <div>
                       <h3 className="text-xs font-bold text-slate-800">
-                        Select Repositories for &ldquo;{activeProject?.name}&rdquo;
+                        Select Repositories for &ldquo;{targetProject?.name || "Workspace"}&rdquo;
                       </h3>
                       <p className="text-[11px] text-slate-500">
                         Select one or more repositories to map into this project workspace.
@@ -848,7 +1008,7 @@ export function ConnectSourceModal() {
                       Configure Synchronisation Scope ({selectedRepoKeys.size} repositories selected)
                     </h3>
                     <p className="text-[11px] text-slate-500">
-                      Customise what information is imported and indexed into project &ldquo;{activeProject?.name}&rdquo;.
+                      Customise what information is imported and indexed into project &ldquo;{targetProject?.name || "Workspace"}&rdquo;.
                     </p>
                   </div>
 
@@ -1075,10 +1235,91 @@ export function ConnectSourceModal() {
                   </div>
 
                   <div className="border border-slate-200 rounded-lg p-4 space-y-3 text-xs bg-slate-50/30">
-                    <div className="flex justify-between py-1 border-b border-slate-200">
+                    <div className="flex flex-wrap items-center justify-between py-1.5 border-b border-slate-200 gap-2">
                       <span className="text-slate-500">Target Project</span>
-                      <span className="font-semibold text-slate-800">{activeProject?.name}</span>
+                      {targetProject ? (
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-slate-800">{targetProject.name}</span>
+                          {projects.length > 1 && (
+                            <select
+                              value={targetProject.id}
+                              onChange={(e) => {
+                                const found = projects.find((p) => p.id === e.target.value);
+                                if (found) {
+                                  setSelectedProjectId(found.id);
+                                  setActiveProject(found);
+                                }
+                              }}
+                              className="text-[11px] text-[#203653] bg-white border border-slate-200 rounded px-2 py-0.5 focus:ring-1 focus:ring-[#315FBA] outline-none"
+                            >
+                              {projects.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.name}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-right">
+                          <span className="font-semibold text-rose-600 block">No project selected</span>
+                          {projects.length > 0 ? (
+                            <select
+                              value=""
+                              onChange={(e) => {
+                                const found = projects.find((p) => p.id === e.target.value);
+                                if (found) {
+                                  setSelectedProjectId(found.id);
+                                  setActiveProject(found);
+                                }
+                              }}
+                              className="mt-1 text-[11px] text-[#203653] bg-white border border-rose-300 rounded px-2 py-0.5 outline-none"
+                            >
+                              <option value="">-- Choose Target Project --</option>
+                              {projects.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.name}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setShowCreateProjectInline(true)}
+                              className="mt-1 text-xs text-[#315FBA] font-semibold hover:underline block"
+                            >
+                              + Create Project Workspace
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
+                    {/* Inline project creator if no project selected and requested */}
+                    {!targetProject && (
+                      <div className="p-3 border border-amber-200 rounded-lg bg-amber-50/70 space-y-2">
+                        <p className="text-[11px] text-amber-900 font-medium">
+                          A project workspace is required to map your selected repositories into:
+                        </p>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={newProjectName}
+                            onChange={(e) => setNewProjectName(e.target.value)}
+                            placeholder="e.g. HackMatrix-5.0-MISC02"
+                            className="flex-1 text-xs border border-amber-300 rounded px-2.5 py-1.5 bg-white text-slate-800"
+                          />
+                          <button
+                            type="button"
+                            disabled={!newProjectName.trim() || isCreatingProject}
+                            onClick={handleQuickCreateProject}
+                            className="px-3 py-1.5 bg-[#315FBA] hover:bg-[#264C98] disabled:opacity-50 text-white rounded text-xs font-semibold flex items-center gap-1 shrink-0"
+                          >
+                            {isCreatingProject ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                            Create Project
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     <div className="flex justify-between py-1 border-b border-slate-200">
                       <span className="text-slate-500">GitHub Identity</span>
                       <span className="font-mono font-medium text-slate-800">@{githubResolvedAccount || githubAccount}</span>
@@ -1137,7 +1378,7 @@ export function ConnectSourceModal() {
                     <button
                       type="button"
                       onClick={handleBatchIngest}
-                      disabled={isSubmitting}
+                      disabled={isSubmitting || !effectiveProjectId}
                       className="px-4 py-2 bg-[#4774A9] hover:bg-[#386295] disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-2"
                     >
                       {isSubmitting ? (
@@ -1326,7 +1567,7 @@ export function ConnectSourceModal() {
                     <button
                       type="button"
                       onClick={handleBatchIngest}
-                      disabled={isSubmitting || selectedProjectKeys.size === 0}
+                      disabled={isSubmitting || selectedProjectKeys.size === 0 || !effectiveProjectId}
                       className="px-4 py-2 bg-[#4774A9] hover:bg-[#386295] disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-2"
                     >
                       {isSubmitting ? (
@@ -1498,7 +1739,7 @@ export function ConnectSourceModal() {
                     <button
                       type="button"
                       onClick={handleBatchIngest}
-                      disabled={isSubmitting || selectedChannelIds.size === 0}
+                      disabled={isSubmitting || selectedChannelIds.size === 0 || !effectiveProjectId}
                       className="px-4 py-2 bg-[#4774A9] hover:bg-[#386295] disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-2"
                     >
                       {isSubmitting ? (
@@ -1677,7 +1918,7 @@ export function ConnectSourceModal() {
               <div className="pt-2 flex justify-end">
                 <button
                   type="submit"
-                  disabled={isSubmitting || !selectedFile}
+                  disabled={isSubmitting || !selectedFile || !effectiveProjectId}
                   className="px-4 py-2 bg-[#4774A9] hover:bg-[#386295] disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-2"
                 >
                   {isSubmitting ? (

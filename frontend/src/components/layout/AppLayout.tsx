@@ -30,7 +30,7 @@ export { RoleBadge };
 export function AppLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isLoadingAuth, setUser, addToast } = useLiveApp();
+  const { user, isLoadingAuth, setUser, addToast, projects, activeProject, setActiveProject } = useLiveApp();
   const [resendStatus, setResendStatus] = useState<
     "idle" | "submitted" | "not_configured" | "failed" | "rate_limited"
   >("idle");
@@ -40,24 +40,14 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const [isRefreshingVerification, setIsRefreshingVerification] = useState(false);
   const [refreshFeedback, setRefreshFeedback] = useState<string | null>(null);
 
-  const [collapsed, setCollapsed] = useState(() => {
-    if (typeof window !== "undefined") {
-      return (
-        localStorage.getItem("handover_sidebar_collapsed") === "true" ||
-        window.location.search.includes("collapsed=true")
-      );
-    }
-    return false;
-  });
-  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(() => {
-    if (typeof window !== "undefined") {
-      return window.location.search.includes("openPalette=true");
-    }
-    return false;
-  });
+  // SSR-safe state defaults: client-only browser storage/URL params restore on mount
+  const [isMounted, setIsMounted] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
 
-  // Restore collapsed sidebar preference from localStorage or URL query
+  // Restore collapsed sidebar preference and command palette trigger from localStorage / URL query on mount
   useEffect(() => {
+    setIsMounted(true);
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("handover_sidebar_collapsed");
       const urlHasCollapsed = window.location.search.includes("collapsed=true");
@@ -69,6 +59,28 @@ export function AppLayout({ children }: { children: ReactNode }) {
       }
     }
   }, []);
+
+  // Synchronise route project ID into activeProject if navigating /projects/[id]
+  useEffect(() => {
+    if (!isMounted || !pathname) return;
+    const match = pathname.match(/^\/projects\/([0-9a-fA-F-]+)/);
+    if (match && match[1]) {
+      const routeProjId = match[1];
+      if (activeProject?.id !== routeProjId) {
+        const found = projects.find((p) => p.id === routeProjId);
+        if (found) {
+          setActiveProject(found);
+        } else {
+          api.projects
+            .get(routeProjId)
+            .then((p) => {
+              setActiveProject(p);
+            })
+            .catch(() => {});
+        }
+      }
+    }
+  }, [isMounted, pathname, projects, activeProject?.id, setActiveProject]);
 
   const handleToggleCollapse = () => {
     setCollapsed((prev) => {
@@ -137,14 +149,14 @@ export function AppLayout({ children }: { children: ReactNode }) {
         />
 
         <main id="main-scroll" className="ambient-canvas scrollbar-thin flex-1 overflow-y-auto relative">
-          <BrandLoadingScreen isLoading={!user || isLoadingAuth} />
+          <BrandLoadingScreen isLoading={!isMounted || !user || isLoadingAuth} />
 
           <div
             className={`animate-fade mx-auto w-full px-4 py-6 sm:px-6 lg:px-8 lg:py-8 ${
               isWide ? "max-w-[1600px]" : "max-w-[1360px]"
             }`}
           >
-            {user && !user.is_email_verified ? (
+            {isMounted && user && !user.is_email_verified ? (
               <div className="mx-auto max-w-xl rounded-2xl border border-amber-200 bg-white p-6 shadow-sm">
                 <div className="flex items-start gap-3">
                   <div className="rounded-xl bg-amber-50 p-2.5 text-amber-700">
