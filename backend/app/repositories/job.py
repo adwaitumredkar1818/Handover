@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, or_, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.security import utc_now
 from app.models.enums import BackgroundJobStatus, BackgroundJobType
 from app.models.job import BackgroundJob
+
+_heartbeat_logger = logging.getLogger("app.repositories.job")
 
 
 class BackgroundJobRepository:
@@ -251,3 +257,49 @@ class BackgroundJobRepository:
         job.error_message = None
         self._session.flush()
         return job
+
+
+@contextmanager
+def job_lease_heartbeat(
+    *,
+    session_factory: sessionmaker[Session],
+    job_id: uuid.UUID,
+    lease_seconds: int = 1800,
+    interval_seconds: float = 120.0,
+) -> Iterator[None]:
+    """Periodically extend a running BackgroundJob lease on an isolated session."""
+    stop_event = threading.Event()
+    effective_lease = max(300, int(lease_seconds))
+    effective_interval = max(10.0, min(float(interval_seconds), effective_lease / 3.0))
+
+    def _beat() -> None:
+        while not stop_event.wait(effective_interval):
+            try:
+                now = utc_now()
+                with session_factory() as beat_session:
+                    beat_session.execute(
+                        update(BackgroundJob)
+                        .where(
+                            BackgroundJob.id == job_id,
+                            BackgroundJob.status == BackgroundJobStatus.RUNNING.value,
+                        )
+                        .values(
+                            lease_expires_at=now + timedelta(seconds=effective_lease),
+                            locked_at=now,
+                        )
+                    )
+                    beat_session.commit()
+            except Exception as exc:  # pragma: no cover - defensive runtime safeguard
+                _heartbeat_logger.debug("Lease heartbeat failed for job %s: %s", job_id, exc)
+
+    thread = threading.Thread(
+        target=_beat,
+        name=f"job-lease-{str(job_id)[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        thread.join(timeout=2.0)

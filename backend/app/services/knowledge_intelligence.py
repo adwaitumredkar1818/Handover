@@ -8,6 +8,7 @@ from typing import Literal
 
 from sqlalchemy.orm import Session
 
+from app.core.cache.local_cache import local_response_cache
 from app.models.enums import (
     KnowledgeCategory,
     KnowledgeReviewStatus,
@@ -62,11 +63,24 @@ class KnowledgeIntelligenceService:
         include_synthetic: bool = False,
     ) -> KnowledgeIntelligenceDomainsResponse:
         """Calculate live coverage and telemetry across all 8 canonical domains."""
+        has_manage = project_ctx.has_permission("project.manage")
+        bind = self._session.get_bind()
+        cache_key = (
+            f"ki_domains:{id(bind)}:{project_ctx.project.id}:"
+            f"{project_ctx.user_id}:{int(has_manage)}:{int(include_synthetic)}"
+        )
+        cached = local_response_cache.get(cache_key)
+        if cached is not None:
+            try:
+                return KnowledgeIntelligenceDomainsResponse.model_validate(cached)
+            except Exception:
+                local_response_cache.delete(cache_key)
+
         # Query all accessible items for caller respecting source ACLs
         accessible_items, _ = self._repo.list_accessible_items_for_project(
             project_id=project_ctx.project.id,
             viewer_user_id=project_ctx.user_id,
-            has_project_manage=project_ctx.has_permission("project.manage"),
+            has_project_manage=has_manage,
             include_stale=True,
             stale_only=False,
             include_synthetic=include_synthetic,
@@ -150,11 +164,13 @@ class KnowledgeIntelligenceService:
 
         ordered_domains = sorted(domain_metrics.values(), key=lambda d: d.code)
 
-        return KnowledgeIntelligenceDomainsResponse(
+        resp = KnowledgeIntelligenceDomainsResponse(
             domains=ordered_domains,
             total_domains=len(CANONICAL_DOMAINS),
             active_domains_count=active_domains_count,
         )
+        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=60)
+        return resp
 
     def get_summary(
         self,
@@ -163,6 +179,19 @@ class KnowledgeIntelligenceService:
         include_synthetic: bool = False,
     ) -> KnowledgeIntelligenceSummaryResponse:
         """Calculate executive project knowledge intelligence summary."""
+        has_manage = project_ctx.has_permission("project.manage")
+        bind = self._session.get_bind()
+        cache_key = (
+            f"ki_summary:{id(bind)}:{project_ctx.project.id}:"
+            f"{project_ctx.user_id}:{int(has_manage)}:{int(include_synthetic)}"
+        )
+        cached = local_response_cache.get(cache_key)
+        if cached is not None:
+            try:
+                return KnowledgeIntelligenceSummaryResponse.model_validate(cached)
+            except Exception:
+                local_response_cache.delete(cache_key)
+
         domains_resp = self.get_domains_coverage(
             project_ctx=project_ctx,
             include_synthetic=include_synthetic,
@@ -193,24 +222,25 @@ class KnowledgeIntelligenceService:
             1,
         )
 
+        active_runs = 0
+        latest_run = None
         if self._reconstruction_service is not None:
-            status_summary = self._reconstruction_service.get_project_knowledge_status(
+            runs_page = self._reconstruction_service.list_extraction_runs(
                 project_ctx=project_ctx,
-                include_synthetic=include_synthetic,
+                limit=5,
+                offset=0,
             )
-            active_runs = status_summary.active_runs_count
-            latest_run = status_summary.latest_run
+            latest_run = runs_page.items[0] if runs_page.items else None
+            active_runs = sum(1 for r in runs_page.items if r.status in ("queued", "running"))
         else:
-            stats = self._repo.get_project_knowledge_stats(
+            runs, _ = self._repo.list_runs_for_project(
                 project_id=project_ctx.project.id,
-                viewer_user_id=project_ctx.user_id,
-                has_project_manage=project_ctx.has_permission("project.manage"),
-                include_synthetic=include_synthetic,
+                limit=5,
+                offset=0,
             )
-            active_runs = stats.active_runs_count
-            latest_run = None
+            active_runs = sum(1 for r in runs if r.status in ("queued", "running"))
 
-        return KnowledgeIntelligenceSummaryResponse(
+        summary_resp = KnowledgeIntelligenceSummaryResponse(
             project_id=project_ctx.project.id,
             total_findings=total_findings,
             verified_findings=verified_findings,
@@ -223,6 +253,8 @@ class KnowledgeIntelligenceService:
             active_runs_count=active_runs,
             latest_run=latest_run,
         )
+        local_response_cache.set(cache_key, summary_resp.model_dump(mode="json"), ttl_seconds=60)
+        return summary_resp
 
     def list_findings(
         self,

@@ -221,8 +221,11 @@ export function ConnectSourceModal() {
     }
   }, []);
 
+  const wasOpenRef = useRef(false);
+
   useEffect(() => {
-    if (isAddSourceModalOpen) {
+    if (isAddSourceModalOpen && !wasOpenRef.current) {
+      wasOpenRef.current = true;
       if (initialSourceProvider) {
         setActiveTab(initialSourceProvider as ConnectProviderTab);
       }
@@ -246,6 +249,8 @@ export function ConnectSourceModal() {
       } else {
         setSelectedProjectId("");
       }
+    } else if (!isAddSourceModalOpen) {
+      wasOpenRef.current = false;
     }
   }, [isAddSourceModalOpen, initialSourceProvider, activeProject?.id, projects, setActiveProject]);
 

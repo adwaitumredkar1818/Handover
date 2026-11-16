@@ -190,7 +190,25 @@ def _repo_candidate_from_json(raw: dict[str, Any]) -> GitHubRepositoryCandidate:
     )
 
 
-def _is_candidate_doc_path(path: str, include_code: bool = False) -> bool:
+_TECHNICAL_MANIFEST_NAMES = frozenset(
+    {
+        "package.json",
+        "requirements.txt",
+        "pyproject.toml",
+        "dockerfile",
+        "compose.yaml",
+        "compose.yml",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+    }
+)
+
+
+def _is_candidate_doc_path(
+    path: str,
+    include_code: bool = False,
+    include_manifests: bool = True,
+) -> bool:
     if is_excluded_binary_or_generated_path(path):
         return False
     lowered = path.lower().strip("/")
@@ -198,6 +216,8 @@ def _is_candidate_doc_path(path: str, include_code: bool = False) -> bool:
     if any(p in _EXCLUDED_PATH_DIRS for p in parts):
         return False
     basename = parts[-1] if parts else lowered
+    if include_manifests and (basename in _TECHNICAL_MANIFEST_NAMES or basename.startswith("dockerfile.")):
+        return True
     if basename in {"dockerfile", "makefile", "procfile", "caddyfile"}:
         return include_code
     if lowered.endswith(_DOC_EXTENSIONS):
@@ -755,21 +775,24 @@ class GitHubClient:
 
                 def _path_priority(p: str) -> tuple[int, str]:
                     low = p.lower()
+                    basename = low.split("/")[-1]
                     if "readme" in low:
                         return (0, p)
-                    if any(kw in low for kw in ("architecture", "adr", "design", "decision", "handover", "onboarding")):
+                    if basename in _TECHNICAL_MANIFEST_NAMES or basename.startswith("dockerfile."):
                         return (1, p)
-                    if low.startswith("docs/") or "/docs/" in low:
+                    if any(kw in low for kw in ("architecture", "adr", "design", "decision", "handover", "onboarding")):
                         return (2, p)
-                    if "/src/" in low or low.startswith("src/"):
+                    if low.startswith("docs/") or "/docs/" in low:
                         return (3, p)
-                    if "/app/" in low or low.startswith("app/"):
+                    if "/src/" in low or low.startswith("src/"):
                         return (4, p)
-                    if "/lib/" in low or low.startswith("lib/"):
+                    if "/app/" in low or low.startswith("app/"):
                         return (5, p)
+                    if "/lib/" in low or low.startswith("lib/"):
+                        return (6, p)
                     if "test" in low:
-                        return (7, p)
-                    return (6, p)
+                        return (8, p)
+                    return (7, p)
 
                 candidate_paths.sort(key=_path_priority)
                 for path in candidate_paths[: max(0, max_docs - len(docs))]:

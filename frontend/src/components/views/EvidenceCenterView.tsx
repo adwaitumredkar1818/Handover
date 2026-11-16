@@ -334,6 +334,22 @@ export function EvidenceCenterView() {
                       <div className="text-[10px] text-[#69778D] mt-1 truncate">
                         Key: {mapping.external_resource_key}
                       </div>
+                      {(mapping.status === "error" || mapping.last_error_code) && (
+                        <div className="mt-1.5 p-1.5 rounded bg-amber-50 border border-amber-200 text-[10px] text-amber-800 flex items-center justify-between gap-2">
+                          <span className="truncate" title={mapping.last_error_summary || mapping.last_error_code || ""}>
+                            {mapping.last_error_code === "GITHUB_REPO_ACCESS_REVOKED"
+                              ? "Access revoked — reconnect source"
+                              : mapping.last_error_summary || mapping.last_error_code}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setIsAddSourceModalOpen(true)}
+                            className="shrink-0 underline font-semibold text-blue-700"
+                          >
+                            Reconnect
+                          </button>
+                        </div>
+                      )}
 
                       <div className="mt-2.5 pt-2 border-t border-[#DCE3EB] flex items-center justify-between">
                         <span className="text-[10px] text-[#69778D]">

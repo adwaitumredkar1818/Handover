@@ -23,10 +23,13 @@ from app.schemas.knowledge import (
     KnowledgeItemListResponse,
 )
 from app.schemas.knowledge_intelligence import (
+    KnowledgeGraphNodeDetailResponse,
+    KnowledgeGraphProjectionResponse,
     KnowledgeIntelligenceDomainsResponse,
     KnowledgeIntelligenceExtractRequest,
     KnowledgeIntelligenceSummaryResponse,
 )
+from app.services.knowledge_graphs import KnowledgeGraphProjectionService
 from app.services.knowledge_intelligence import KnowledgeIntelligenceService
 from app.services.knowledge_quality import KnowledgeQualityEngine
 from app.services.rbac import ProjectContext
@@ -291,4 +294,64 @@ def get_knowledge_quality_assessment(
     return engine.assess_project_quality(
         project_id=project_ctx.project.id,
         user_id=project_ctx.user_id,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/knowledge-intelligence/graphs/{graph_type}",
+    response_model=KnowledgeGraphProjectionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Project Technology Stack, System Architecture, or Features & Workflows graph",
+)
+def get_knowledge_intelligence_graph(
+    graph_type: Literal["technology-stack", "system-architecture", "features-workflows"],
+    project_ctx: Annotated[
+        ProjectContext,
+        Depends(require_project_permission("project.read")),
+    ],
+    session: Annotated[Session, Depends(get_db_session)],
+    search: Annotated[str | None, Query()] = None,
+    graph_status: Annotated[str | None, Query(alias="status")] = None,
+    source_type: Annotated[str | None, Query()] = None,
+    verification_state: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 150,
+    cursor: Annotated[str | None, Query()] = None,
+    include_suggested: Annotated[bool, Query()] = True,
+) -> KnowledgeGraphProjectionResponse:
+    """Return ACL-filtered graph projection without invoking LLM inference."""
+    service = KnowledgeGraphProjectionService(session)
+    return service.get_graph(
+        project_ctx=project_ctx,
+        graph_type=graph_type,
+        search=search,
+        status=graph_status,
+        source_type=source_type,
+        verification_state=verification_state,
+        limit=limit,
+        cursor=cursor,
+        include_suggested=include_suggested,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/knowledge-intelligence/graphs/{graph_type}/nodes/{node_id}",
+    response_model=KnowledgeGraphNodeDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Inspect node details, adjacent edges, and authorised evidence links",
+)
+def get_knowledge_intelligence_graph_node_detail(
+    graph_type: Literal["technology-stack", "system-architecture", "features-workflows"],
+    node_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext,
+        Depends(require_project_permission("project.read")),
+    ],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> KnowledgeGraphNodeDetailResponse:
+    """Return detailed node provenance and adjacent relationships filtered by source ACLs."""
+    service = KnowledgeGraphProjectionService(session)
+    return service.get_node_detail(
+        project_ctx=project_ctx,
+        graph_type=graph_type,
+        node_id=node_id,
     )

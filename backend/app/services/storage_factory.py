@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 
 from app.core.config import Settings
 from app.models.enums import StorageProvider
 from app.services.storage import LocalPrivateStorageBackend, StorageBackend
 from app.services.supabase_storage import SupabaseStorageBackend
+
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
 def build_storage_backend(
@@ -43,7 +47,13 @@ def build_storage_backend(
             http_transport=http_transport,
         )
 
+    root_path = storage_cfg.upload_storage_path
+    if not root_path.is_absolute():
+        backend_candidate = (_BACKEND_DIR / root_path).resolve()
+        if backend_candidate.exists() or not root_path.exists():
+            root_path = backend_candidate
+
     return LocalPrivateStorageBackend(
-        root_path=storage_cfg.upload_storage_path,
+        root_path=root_path,
         file_encryption_key=file_encryption_key,
     )

@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, load_only, selectinload
 
 from app.models.audit import AuditLog
 from app.models.enums import (
@@ -338,7 +338,20 @@ class ProjectRepository:
                 EvidenceItem.deleted_at.is_(None),
                 EvidenceItem.processing_status != EvidenceProcessingStatus.DELETED.value,
             )
-            .options(selectinload(EvidenceItem.source_access_policy))
+            .options(
+                load_only(
+                    EvidenceItem.id,
+                    EvidenceItem.organisation_id,
+                    EvidenceItem.project_id,
+                    EvidenceItem.uploaded_by_user_id,
+                    EvidenceItem.source_type,
+                    EvidenceItem.processing_status,
+                    EvidenceItem.acl_scope,
+                    EvidenceItem.source_access_policy_id,
+                    EvidenceItem.source_connection_id,
+                ),
+                selectinload(EvidenceItem.source_access_policy),
+            )
         )
         return list(self._session.scalars(stmt).all())
 

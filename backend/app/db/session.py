@@ -60,7 +60,7 @@ def create_db_engine(settings: Settings) -> Engine:
         pool_size=15,
         max_overflow=25,
         pool_timeout=30,
-        pool_recycle=120,
+        pool_recycle=300,
         connect_args=connect_args,
     )
 

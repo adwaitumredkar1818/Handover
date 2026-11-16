@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.cache import cache_service
+from app.core.cache.local_cache import local_response_cache
 from app.core.config import Settings
 from app.core.exceptions import (
     BadRequestError,
@@ -548,6 +549,8 @@ class EvidenceService:
         self._session.refresh(job)
         cache_service.invalidate_prefix(f"dash:overview:proj:{project_ctx.project.id}")
         cache_service.invalidate_prefix(f"search:proj:{project_ctx.project.id}")
+        local_response_cache.invalidate_prefix(f"ev_list:{project_ctx.project.id}:")
+        local_response_cache.invalidate_prefix(f"ev_metrics:{project_ctx.project.id}:")
         refreshed = self._evidence_repo.get_by_id_detail(item.id) or item
         return UploadDocumentResult(
             payload=DocumentUploadResponse(
@@ -584,6 +587,19 @@ class EvidenceService:
         if category is not None and category not in _VALID_CATEGORIES:
             raise BadRequestError("Unsupported category filter value.", code="INVALID_FILTER")
 
+        has_manage = project_ctx.has_permission("project.manage")
+        bind = self._session.get_bind()
+        cache_key = (
+            f"ev_list:{project_ctx.project.id}:{id(bind)}:{project_ctx.principal.user.id}:{int(has_manage)}:"
+            f"{processing_status or ''}:{source_type or ''}:{category or ''}:{q or ''}:{provider or ''}:{limit}:{offset}"
+        )
+        cached = local_response_cache.get(cache_key)
+        if cached is not None:
+            try:
+                return EvidenceListResponse.model_validate(cached)
+            except Exception:
+                local_response_cache.delete(cache_key)
+
         items, total = self._evidence_repo.list_for_project(
             project_id=project_ctx.project.id,
             processing_status=processing_status,
@@ -592,17 +608,19 @@ class EvidenceService:
             q=q,
             provider=provider,
             viewer_user_id=project_ctx.principal.user.id,
-            has_project_manage=project_ctx.has_permission("project.manage"),
+            has_project_manage=has_manage,
             enforce_source_acl=True,
             limit=limit,
             offset=offset,
         )
-        return EvidenceListResponse(
+        resp = EvidenceListResponse(
             items=[to_evidence_summary_response(item) for item in items],
             total=total,
             limit=limit,
             offset=offset,
         )
+        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=60)
+        return resp
 
     def download_evidence_content(
         self,
@@ -645,14 +663,24 @@ class EvidenceService:
                 "You do not have permission to read evidence in this project.",
                 code="FORBIDDEN",
             )
+        bind = self._session.get_bind()
+        cache_key = f"ev_metrics:{project_ctx.project.id}:{id(bind)}"
+        cached = local_response_cache.get(cache_key)
+        if cached is not None:
+            try:
+                return EvidenceMetricsResponse.model_validate(cached)
+            except Exception:
+                local_response_cache.delete(cache_key)
         data = self._evidence_repo.get_project_evidence_metrics(project_ctx.project.id)
-        return EvidenceMetricsResponse(
+        resp = EvidenceMetricsResponse(
             total_items=data["total_items"],
             total_documents=data["total_documents"],
             total_bytes=data["total_bytes"],
             by_provider=data["by_provider"],
             by_status=data["by_status"],
         )
+        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=60)
+        return resp
 
     def get_evidence_detail(
         self,
@@ -983,6 +1011,8 @@ class EvidenceService:
         self._session.commit()
         cache_service.invalidate_prefix(f"dash:overview:proj:{evidence.project_id}")
         cache_service.invalidate_prefix(f"search:proj:{evidence.project_id}")
+        local_response_cache.invalidate_prefix(f"ev_list:{evidence.project_id}:")
+        local_response_cache.invalidate_prefix(f"ev_metrics:{evidence.project_id}:")
 
         if storage_key:
             self._storage.delete_object(storage_object_key=storage_key)
@@ -1083,5 +1113,7 @@ class EvidenceService:
             message="Queued manual reprocessing job using preserved original upload.",
         )
         self._session.commit()
+        local_response_cache.invalidate_prefix(f"ev_list:{evidence.project_id}:")
+        local_response_cache.invalidate_prefix(f"ev_metrics:{evidence.project_id}:")
         self._session.refresh(job)
         return to_background_job_response(job)

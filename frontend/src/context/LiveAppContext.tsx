@@ -337,16 +337,26 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
 
   // Initialize auth from localStorage and verify with backend
   useEffect(() => {
+    const EXCHANGED_SB_KEY = "handover_exchanged_sb_token";
     async function initAuth() {
       try {
-        // First check if there's an active Supabase session waiting to be exchanged
+        const stored = typeof window !== "undefined" ? localStorage.getItem("handover_access_token") : null;
+        const cachedUser = getStoredUser();
+
+        // Check if there's an active Supabase session that hasn't already been exchanged for this token
         try {
           const supabase = createSupabaseClient();
           if (supabase) {
             const { data } = await supabase.auth.getSession();
-            if (data?.session?.access_token) {
+            const sbToken = data?.session?.access_token;
+            const lastExchanged =
+              typeof window !== "undefined" ? sessionStorage.getItem(EXCHANGED_SB_KEY) : null;
+            if (sbToken && !(stored && cachedUser && lastExchanged === sbToken)) {
               try {
-                const exchangeRes = await api.auth.exchangeSupabaseToken(data.session.access_token);
+                const exchangeRes = await api.auth.exchangeSupabaseToken(sbToken);
+                if (typeof window !== "undefined") {
+                  sessionStorage.setItem(EXCHANGED_SB_KEY, sbToken);
+                }
                 setStoredToken(exchangeRes.access_token);
                 setStoredUser(exchangeRes.user);
                 setToken(exchangeRes.access_token);
@@ -362,9 +372,6 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         } catch {
           // Supabase client error, proceed to standard check
         }
-
-        const stored = typeof window !== "undefined" ? localStorage.getItem("handover_access_token") : null;
-        const cachedUser = getStoredUser();
 
         // If we have cached token & user, hydrate instantly in 0ms so user sees authenticated state without flash
         if (stored && cachedUser) {
@@ -445,8 +452,18 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         const { data: authListener } = supabase.auth.onAuthStateChange(
           async (event, session) => {
             if ((event === "SIGNED_IN" || event === "TOKEN_REFRESHED") && session?.access_token) {
+              const lastExchanged =
+                typeof window !== "undefined" ? sessionStorage.getItem(EXCHANGED_SB_KEY) : null;
+              const existingStored =
+                typeof window !== "undefined" ? localStorage.getItem("handover_access_token") : null;
+              if (lastExchanged === session.access_token && existingStored) {
+                return;
+              }
               try {
                 const exchangeRes = await api.auth.exchangeSupabaseToken(session.access_token);
+                if (typeof window !== "undefined") {
+                  sessionStorage.setItem(EXCHANGED_SB_KEY, session.access_token);
+                }
                 setStoredToken(exchangeRes.access_token);
                 setStoredUser(exchangeRes.user);
                 setToken(exchangeRes.access_token);
@@ -1013,21 +1030,25 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Poll for background sync jobs & notifications
+  // Poll for background sync jobs & notifications without storming on job count changes
+  const hasActiveJobs = activeJobs.length > 0;
   useEffect(() => {
     if (!user || !activeProject) return;
 
     void refreshNotifications();
     void refreshActiveJobs();
 
-    const intervalTime = activeJobs.length > 0 ? 3000 : 7000;
+    const intervalTime = hasActiveJobs ? 10000 : 30000;
     const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) {
+        return;
+      }
       void refreshActiveJobs();
       void refreshNotifications();
     }, intervalTime);
 
     return () => clearInterval(timer);
-  }, [user, activeProject?.id, activeJobs.length, refreshActiveJobs, refreshNotifications]);
+  }, [user?.id, activeProject?.id, hasActiveJobs, refreshActiveJobs, refreshNotifications]);
 
 
   // Trigger data refreshes when active project changes

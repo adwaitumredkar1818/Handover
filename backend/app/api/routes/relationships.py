@@ -20,15 +20,20 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import (
     get_db_session,
-    get_llm_client,
     require_project_permission,
 )
-from app.models.enums import TraceabilityCompletenessStatus
+from app.core.cache.local_cache import local_response_cache
+from app.models.enums import (
+    BackgroundJobType,
+    TraceabilityCompletenessStatus,
+)
 from app.models.relationship import KnowledgeEntity
+from app.repositories.job import BackgroundJobRepository
 from app.repositories.relationship import (
     EntityRepository,
     RelationshipRepository,
@@ -37,6 +42,10 @@ from app.repositories.relationship import (
     TraceabilityRepository,
 )
 from app.schemas.relationship import (
+    ContributorGraphResponse,
+    ContributorIdentityReviewRequest,
+    ContributorIdentityReviewResponse,
+    ContributorIdentitySummaryResponse,
     DecisionTraceabilityResponse,
     DependencyGraphResponse,
     EntityListResponse,
@@ -54,15 +63,24 @@ from app.schemas.relationship import (
     TimelineEventGraphResponse,
     TimelineGraphStreamResponse,
     TraceabilityListResponse,
+    WorkClusterRebuildResponse,
+    WorkClusterResponse,
 )
+from app.services.contribution_attribution import ContributionAttributionService
 from app.services.dependency_intelligence import DependencyIntelligenceService
 from app.services.graph_projection import GraphProjectionService
-from app.services.llm import StructuredLLMClient
 from app.services.rbac import ProjectContext
-from app.services.relationship_coordinator import RelationshipCoordinatorService
 from app.services.traceability import DecisionTraceabilityService
+from app.services.work_grouping import WorkGroupingService
 
 router = APIRouter(tags=["Relationship Explorer"])
+
+
+def _invalidate_project_graph_caches(project_id: uuid.UUID) -> None:
+    """Clear short-lived L1 caches for KI graphs, relationship explorer, and contributor graph."""
+    local_response_cache.invalidate_prefix(f"ki_graph:{project_id}:")
+    local_response_cache.invalidate_prefix(f"rel_graph:{project_id}:")
+    local_response_cache.invalidate_prefix(f"contrib_graph:{project_id}:")
 
 
 # ==============================================================================
@@ -264,9 +282,22 @@ def list_traceability_chains(
         if c.completeness_status == TraceabilityCompletenessStatus.CONFLICTING.value
     )
 
+    dec_ids = list({c.decision_entity_id for c in items if c.decision_entity_id})
+    dec_map = (
+        {
+            e.id: e
+            for e in db_session.execute(
+                select(KnowledgeEntity).where(KnowledgeEntity.id.in_(dec_ids))
+            )
+            .scalars()
+            .all()
+        }
+        if dec_ids
+        else {}
+    )
     res_items = []
     for c in items:
-        dec = db_session.get(KnowledgeEntity, c.decision_entity_id)
+        dec = dec_map.get(c.decision_entity_id)
         resp = DecisionTraceabilityResponse.model_validate(c)
         resp.decision_name = dec.canonical_name if dec else None
         res_items.append(resp)
@@ -362,6 +393,8 @@ def get_dependencies_graph(
     service = DependencyIntelligenceService(db_session)
     return service.analyze_dependencies(
         project_id=project_ctx.project.id,
+        viewer_user_id=project_ctx.principal.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
         root_entity_id=root_entity_id,
         max_depth=max_depth,
     )
@@ -398,10 +431,23 @@ def get_timeline_stream(
         limit=limit,
         offset=offset,
     )
+    ent_ids = list({evt.entity_id for evt in events if evt.entity_id})
+    ent_map = (
+        {
+            e.id: e
+            for e in db_session.execute(
+                select(KnowledgeEntity).where(KnowledgeEntity.id.in_(ent_ids))
+            )
+            .scalars()
+            .all()
+        }
+        if ent_ids
+        else {}
+    )
     items = []
     for evt in events:
         e_resp = TimelineEventGraphResponse.model_validate(evt)
-        ent = db_session.get(KnowledgeEntity, evt.entity_id)
+        ent = ent_map.get(evt.entity_id) if evt.entity_id else None
         if ent:
             e_resp.entity_name = ent.canonical_name
             e_resp.entity_type = ent.entity_type
@@ -424,22 +470,48 @@ def get_timeline_stream(
     "/projects/{project_id}/relationships/reconstruct",
     response_model=RelationshipReconstructionRunResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Trigger relationship discovery and graph rebuild",
+    summary="Queue asynchronous relationship discovery and graph rebuild",
 )
 def trigger_reconstruction(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.manage"))],
     db_session: Annotated[Session, Depends(get_db_session)],
-    llm_client: Annotated[StructuredLLMClient, Depends(get_llm_client)],
     payload: Annotated[ReconstructionTriggerRequest | None, Body()] = None,
 ) -> RelationshipReconstructionRunResponse:
-    """Queue or execute relationship reconstruction across project evidence."""
-    service = RelationshipCoordinatorService(db_session, llm_client=llm_client)
+    """Queue asynchronous relationship reconstruction on the background worker."""
     req = payload or ReconstructionTriggerRequest()
-    run = service.run_reconstruction(
+    run_repo = RelationshipRunRepository(db_session)
+    job_repo = BackgroundJobRepository(db_session)
+
+    active_run = run_repo.get_active_run(project_id=project_ctx.project.id)
+    if active_run is not None:
+        return RelationshipReconstructionRunResponse.model_validate(active_run)
+
+    run = run_repo.create_run(
         organisation_id=project_ctx.organisation.id,
         project_id=project_ctx.project.id,
-        include_llm_suggestions=req.include_llm_suggestions,
+        is_synthetic=False,
     )
+    active_job = job_repo.has_active_job_for_project(
+        project_id=project_ctx.project.id,
+        job_types=(BackgroundJobType.RELATIONSHIP_RECONSTRUCTION.value,),
+    )
+    if active_job is None:
+        job_repo.create_job(
+            organisation_id=project_ctx.organisation.id,
+            project_id=project_ctx.project.id,
+            evidence_id=None,
+            triggered_by_user_id=project_ctx.principal.user_id,
+            job_type=BackgroundJobType.RELATIONSHIP_RECONSTRUCTION.value,
+            max_attempts=3,
+            priority=40,
+            payload_json={
+                "run_id": str(run.id),
+                "include_llm_suggestions": bool(req.include_llm_suggestions),
+            },
+        )
+    _invalidate_project_graph_caches(project_ctx.project.id)
+    db_session.commit()
+    db_session.refresh(run)
     return RelationshipReconstructionRunResponse.model_validate(run)
 
 
@@ -508,11 +580,36 @@ def list_identity_candidates(
         limit=limit,
         offset=offset,
     )
+    ent_ids = list(
+        {
+            eid
+            for c in candidates
+            for eid in (c.left_entity_id, c.right_entity_id)
+            if eid is not None
+        }
+    )
+    ent_map = (
+        {
+            e.id: e
+            for e in db_session.execute(
+                select(KnowledgeEntity)
+                .options(selectinload(KnowledgeEntity.aliases))
+                .where(
+                    KnowledgeEntity.id.in_(ent_ids),
+                    KnowledgeEntity.is_deleted.is_(False),
+                )
+            )
+            .scalars()
+            .all()
+        }
+        if ent_ids
+        else {}
+    )
     result = []
     for c in candidates:
         c_resp = IdentityCandidateResponse.model_validate(c)
-        l_ent = repo.get_entity_by_id(c.left_entity_id)
-        r_ent = repo.get_entity_by_id(c.right_entity_id)
+        l_ent = ent_map.get(c.left_entity_id)
+        r_ent = ent_map.get(c.right_entity_id)
         if l_ent:
             c_resp.left_entity = KnowledgeEntityResponse.model_validate(l_ent)
         if r_ent:
@@ -542,6 +639,8 @@ def review_identity_candidate(
             action=payload.action,
             rationale=payload.rationale,
         )
+        _invalidate_project_graph_caches(project_ctx.project.id)
+        db_session.commit()
         return IdentityCandidateResponse.model_validate(updated)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from None
@@ -568,9 +667,222 @@ def revert_identity_candidate(
             user_id=project_ctx.principal.user_id,
             rationale=rationale,
         )
+        _invalidate_project_graph_caches(project_ctx.project.id)
+        db_session.commit()
         return IdentityCandidateResponse.model_validate(updated)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from None
+
+
+# ==============================================================================
+# People-Centric Contributor Graph, Identity Review & Work Clusters
+# ==============================================================================
+
+
+@router.get(
+    "/projects/{project_id}/relationships/contributors/graph",
+    response_model=ContributorGraphResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Project people-centric contributor and work cluster graph",
+)
+def get_contributors_graph(
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
+    db_session: Annotated[Session, Depends(get_db_session)],
+    contributor_type: Annotated[str | None, Query()] = None,
+    work_cluster: Annotated[str | None, Query()] = None,
+    repository: Annotated[str | None, Query()] = None,
+    verification_state: Annotated[str | None, Query()] = None,
+    search: Annotated[str | None, Query()] = None,
+    include_external: Annotated[bool, Query()] = True,
+    include_bots: Annotated[bool, Query()] = True,
+    expand_contributor_key: Annotated[str | None, Query()] = None,
+    expand_cluster_name: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 120,
+) -> ContributorGraphResponse:
+    """Return ACL-filtered contributor & work cluster graph projection."""
+    service = WorkGroupingService(db_session)
+    payload = service.get_contributors_graph(
+        project_id=project_ctx.project.id,
+        viewer_user_id=project_ctx.principal.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+        contributor_type=contributor_type,
+        work_cluster=work_cluster,
+        repository=repository,
+        verification_state=verification_state,
+        search=search,
+        include_external=include_external,
+        include_bots=include_bots,
+        expand_contributor_key=expand_contributor_key,
+        expand_cluster_name=expand_cluster_name,
+        limit=limit,
+    )
+    return ContributorGraphResponse.model_validate(payload)
+
+
+@router.get(
+    "/projects/{project_id}/relationships/contributors",
+    response_model=list[ContributorIdentitySummaryResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List contributor identities for review and attribution inspection",
+)
+def list_contributors(
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
+    db_session: Annotated[Session, Depends(get_db_session)],
+    contributor_type: Annotated[str | None, Query()] = None,
+    review_status: Annotated[str | None, Query()] = None,
+) -> list[ContributorIdentitySummaryResponse]:
+    """List contributor identities strictly filtered by accessible evidence."""
+    wg_service = WorkGroupingService(db_session)
+    has_manage = project_ctx.has_permission("project.manage")
+    accessible_ids = wg_service._accessible_evidence_ids(
+        project_id=project_ctx.project.id,
+        viewer_user_id=project_ctx.principal.user_id,
+        has_project_manage=has_manage,
+    )
+    attr_service = ContributionAttributionService(db_session)
+    rows = attr_service.list_contributor_identities(
+        project_id=project_ctx.project.id,
+        accessible_evidence_ids=accessible_ids,
+        has_project_manage=has_manage,
+        contributor_type_filter=contributor_type,
+        review_status_filter=review_status,
+    )
+    return [ContributorIdentitySummaryResponse.model_validate(r) for r in rows]
+
+
+@router.get(
+    "/projects/{project_id}/relationships/contributors/{contributor_key}",
+    response_model=ContributorIdentitySummaryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve detailed contributor profile and evidence references",
+)
+def get_contributor_detail(
+    contributor_key: str,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> ContributorIdentitySummaryResponse:
+    """Return aggregated contributor identity detail filtered by caller source ACLs."""
+    wg_service = WorkGroupingService(db_session)
+    has_manage = project_ctx.has_permission("project.manage")
+    accessible_ids = wg_service._accessible_evidence_ids(
+        project_id=project_ctx.project.id,
+        viewer_user_id=project_ctx.principal.user_id,
+        has_project_manage=has_manage,
+    )
+    attr_service = ContributionAttributionService(db_session)
+    rows = attr_service.list_contributor_identities(
+        project_id=project_ctx.project.id,
+        accessible_evidence_ids=accessible_ids,
+        has_project_manage=has_manage,
+    )
+    match = next((r for r in rows if r["contributor_key"] == contributor_key), None)
+    if match is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Contributor '{contributor_key}' not found or inaccessible.",
+        )
+    return ContributorIdentitySummaryResponse.model_validate(match)
+
+
+@router.post(
+    "/projects/{project_id}/relationships/contributors/{contributor_key}/review",
+    response_model=ContributorIdentityReviewResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Confirm, mark external/bot, reject, or revert contributor identity mapping",
+)
+def review_contributor_identity(
+    contributor_key: str,
+    payload: Annotated[ContributorIdentityReviewRequest, Body()],
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.manage"))],
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> ContributorIdentityReviewResponse:
+    """Human review action for unmatched or candidate contributor identities."""
+    attr_service = ContributionAttributionService(db_session)
+    result = attr_service.review_contributor_identity(
+        organisation_id=project_ctx.project.organisation_id,
+        project_id=project_ctx.project.id,
+        contributor_key=contributor_key,
+        action=payload.action,
+        reviewer_user_id=project_ctx.principal.user_id,
+        project_membership_id=payload.project_membership_id,
+        roster_member_id=payload.roster_member_id,
+        notes=payload.notes,
+    )
+    _invalidate_project_graph_caches(project_ctx.project.id)
+    db_session.commit()
+    return ContributorIdentityReviewResponse.model_validate(result)
+
+
+@router.get(
+    "/projects/{project_id}/relationships/work-clusters",
+    response_model=list[WorkClusterResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List evidence-based technical work clusters",
+)
+def list_work_clusters(
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> list[WorkClusterResponse]:
+    """List ACL-filtered technical work area clusters."""
+    service = WorkGroupingService(db_session)
+    clusters = service.list_work_clusters(
+        project_id=project_ctx.project.id,
+        viewer_user_id=project_ctx.principal.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    return [WorkClusterResponse.model_validate(c) for c in clusters]
+
+
+@router.get(
+    "/projects/{project_id}/relationships/work-clusters/{cluster_id}",
+    response_model=WorkClusterResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get detailed breakdown for one technical work cluster",
+)
+def get_work_cluster_detail(
+    cluster_id: str,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> WorkClusterResponse:
+    """Return contributor and contribution breakdown for a specific work cluster."""
+    service = WorkGroupingService(db_session)
+    clusters = service.list_work_clusters(
+        project_id=project_ctx.project.id,
+        viewer_user_id=project_ctx.principal.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    match = next(
+        (c for c in clusters if c["cluster_id"] == cluster_id or c["name"].lower() == cluster_id.lower()),
+        None,
+    )
+    if match is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Work cluster '{cluster_id}' not found or inaccessible.",
+        )
+    return WorkClusterResponse.model_validate(match)
+
+
+@router.post(
+    "/projects/{project_id}/relationships/work-clusters/rebuild",
+    response_model=WorkClusterRebuildResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Rebuild evidence-based work clusters from persisted attributions and evidence",
+)
+def rebuild_work_clusters(
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> WorkClusterRebuildResponse:
+    """Persist deterministic WorkCluster entities and relationships in PostgreSQL."""
+    service = WorkGroupingService(db_session)
+    result = service.rebuild_work_clusters(
+        organisation_id=project_ctx.project.organisation_id,
+        project_id=project_ctx.project.id,
+        triggered_by_user_id=project_ctx.principal.user_id,
+    )
+    _invalidate_project_graph_caches(project_ctx.project.id)
+    db_session.commit()
+    return WorkClusterRebuildResponse.model_validate(result)
 
 
 # ==============================================================================
@@ -667,6 +979,8 @@ def submit_relationship_review(
             action=payload.action,
             note=payload.note,
         )
+        _invalidate_project_graph_caches(project_ctx.project.id)
+        db_session.commit()
         return KnowledgeRelationshipResponse.model_validate(updated)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from None

@@ -6,15 +6,15 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
     get_current_principal,
     get_db_session,
-    require_project_permission,
     resolve_project_context,
 )
+from app.core.cache.local_cache import local_response_cache
 from app.core.exceptions import NotFoundError
 from app.core.security import utc_now
 from app.models.enums import BackgroundJobStatus
@@ -46,53 +46,54 @@ def list_user_notifications(
 ) -> NotificationListResponse:
     """Fetch user-targeted notifications and project broadcasts."""
     user_id = principal.user.id
+    bind = session.get_bind()
+    cache_key = (
+        f"notifications:{id(bind)}:{user_id}:{project_id}:{int(unread_only)}:{limit}:{offset}"
+    )
+    cached = local_response_cache.get(cache_key)
+    if cached is not None:
+        try:
+            return NotificationListResponse.model_validate(cached)
+        except Exception:
+            local_response_cache.delete(cache_key)
 
-    base_filter = or_(
+    user_scope = or_(
         NotificationItem.user_id == user_id,
         NotificationItem.user_id.is_(None),
     )
+    scope_filter = user_scope
     if project_id:
-        base_filter = base_filter & (
+        scope_filter = scope_filter & (
             or_(
                 NotificationItem.project_id == project_id,
                 NotificationItem.project_id.is_(None),
             )
         )
-    if unread_only:
-        base_filter = base_filter & (NotificationItem.is_read.is_(False))
+    list_filter = scope_filter & (NotificationItem.is_read.is_(False)) if unread_only else scope_filter
 
     stmt = (
         select(NotificationItem)
-        .where(base_filter)
+        .where(list_filter)
         .order_by(NotificationItem.created_at.desc())
         .offset(offset)
         .limit(limit)
     )
     items = session.execute(stmt).scalars().all()
 
-    # Unread count
-    unread_filter = or_(
-        NotificationItem.user_id == user_id,
-        NotificationItem.user_id.is_(None),
-    ) & (NotificationItem.is_read.is_(False))
-    if project_id:
-        unread_filter = unread_filter & (
-            or_(
-                NotificationItem.project_id == project_id,
-                NotificationItem.project_id.is_(None),
-            )
-        )
-    unread_count = (
-        session.execute(select(func.count(NotificationItem.id)).where(unread_filter)).scalar_one()
-        or 0
-    )
+    agg_row = session.execute(
+        select(
+            func.count(NotificationItem.id),
+            func.coalesce(
+                func.sum(case((NotificationItem.is_read.is_(False), 1), else_=0)),
+                0,
+            ),
+        ).where(scope_filter)
+    ).first()
+    scoped_total = int(agg_row[0] or 0) if agg_row else 0
+    unread_count = int(agg_row[1] or 0) if agg_row else 0
+    total_count = unread_count if unread_only else scoped_total
 
-    total_count = (
-        session.execute(select(func.count(NotificationItem.id)).where(base_filter)).scalar_one()
-        or 0
-    )
-
-    return NotificationListResponse(
+    resp = NotificationListResponse(
         items=[
             NotificationResponse(
                 id=item.id,
@@ -114,6 +115,8 @@ def list_user_notifications(
         unread_count=unread_count,
         total=total_count,
     )
+    local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=10)
+    return resp
 
 
 @router.patch(
@@ -136,6 +139,8 @@ def mark_notification_read(
     item.read_at = now
     session.commit()
     session.refresh(item)
+    bind = session.get_bind()
+    local_response_cache.invalidate_prefix(f"notifications:{id(bind)}:")
 
     return NotificationResponse(
         id=item.id,
@@ -177,7 +182,20 @@ def mark_all_notifications_read(
     )
     result = session.execute(stmt)
     session.commit()
-    return {"marked_read": result.rowcount}
+    bind = session.get_bind()
+    local_response_cache.invalidate_prefix(f"notifications:{id(bind)}:")
+    marked_count = int(getattr(result, "rowcount", 0) or 0)
+    return {"marked_read": marked_count}
+
+
+_INDEXING_TYPES = frozenset(
+    {
+        "evidence_indexing",
+        "evidence_chunking",
+        "evidence_embedding",
+        "evidence_reindexing",
+    }
+)
 
 
 @router.get(
@@ -200,12 +218,16 @@ def list_active_project_jobs(
             ),
         )
         .order_by(BackgroundJob.created_at.desc())
-        .limit(20)
+        .limit(100)
     )
     jobs = session.execute(stmt).scalars().all()
 
     active_jobs: list[ActiveSyncJobResponse] = []
+    indexing_jobs: list[BackgroundJob] = []
     for job in jobs:
+        if job.job_type in _INDEXING_TYPES:
+            indexing_jobs.append(job)
+            continue
         payload = job.payload_json or {}
         progress = int(payload.get("progress_percent") or 0)
         stage = payload.get("stage") or job.status
@@ -225,4 +247,25 @@ def list_active_project_jobs(
                 started_at=job.started_at,
             )
         )
+
+    if indexing_jobs:
+        lead = indexing_jobs[0]
+        running_cnt = sum(1 for j in indexing_jobs if j.status == BackgroundJobStatus.RUNNING.value)
+        active_jobs.append(
+            ActiveSyncJobResponse(
+                id=lead.id,
+                project_id=lead.project_id or project_ctx.project.id,
+                job_type=lead.job_type,
+                status="running" if running_cnt > 0 else "queued",
+                stage="indexing",
+                progress_percent=0,
+                attempt_count=lead.attempt_count,
+                total_steps=len(indexing_jobs),
+                completed_steps=0,
+                message=f"Indexing {len(indexing_jobs)} evidence item(s)",
+                created_at=lead.created_at,
+                started_at=lead.started_at,
+            )
+        )
+
     return active_jobs

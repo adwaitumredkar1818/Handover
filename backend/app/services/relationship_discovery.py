@@ -26,7 +26,7 @@ from app.models.enums import (
     RelationshipVerificationStatus,
 )
 from app.models.evidence import EvidenceChunk, EvidenceItem
-from app.models.relationship import KnowledgeEntity, KnowledgeRelationship
+from app.models.relationship import KnowledgeEntity
 from app.repositories.relationship import EntityRepository, RelationshipRepository
 from app.services.llm import LLMGenerationRequest, StructuredLLMClient
 from app.services.relationship_taxonomy import validate_relationship_endpoints
@@ -84,47 +84,28 @@ class RelationshipDiscoveryEngine:
     ) -> list[DiscoveredRelationshipDraft]:
         """Extract explicit references (Jira keys, PR #, Commit SHA, ADR) across evidence."""
         drafts: list[DiscoveredRelationshipDraft] = []
+        _, entities_by_id = self._entity_repo._project_entities(project_id)
+        all_entities = list(entities_by_id.values())
 
-        # Find all work item entities with external IDs (e.g. Jira keys like "HAND-12")
-        work_items = list(
-            self._session.execute(
-                select(KnowledgeEntity).where(
-                    KnowledgeEntity.project_id == project_id,
-                    KnowledgeEntity.entity_type == EntityType.WORK_ITEM.value,
-                    KnowledgeEntity.is_deleted.is_(False),
-                )
-            )
-            .scalars()
-            .all()
-        )
+        work_items = [e for e in all_entities if e.entity_type == EntityType.WORK_ITEM.value]
         work_item_map = {w.canonical_name.upper(): w for w in work_items}
         for w in work_items:
             if w.external_source_id:
                 work_item_map[w.external_source_id.upper()] = w
 
-        # Search PRs and Commits for references to these Jira keys
-        code_entities = list(
-            self._session.execute(
-                select(KnowledgeEntity).where(
-                    KnowledgeEntity.project_id == project_id,
-                    KnowledgeEntity.entity_type.in_(
-                        [EntityType.PULL_REQUEST.value, EntityType.COMMIT.value]
-                    ),
-                    KnowledgeEntity.is_deleted.is_(False),
-                )
-            )
-            .scalars()
-            .all()
-        )
+        code_entities = [
+            e
+            for e in all_entities
+            if e.entity_type in {EntityType.PULL_REQUEST.value, EntityType.COMMIT.value}
+        ]
+        decisions = [e for e in all_entities if e.entity_type == EntityType.DECISION.value]
 
         for ce in code_entities:
             text_to_scan = f"{ce.canonical_name} {ce.description or ''}"
-            # Check for Jira keys
             found_keys = JIRA_KEY_RE.findall(text_to_scan)
             for k in set(found_keys):
                 target_wi = work_item_map.get(k.upper())
                 if target_wi and target_wi.id != ce.id:
-                    # Valid endpoints: PR/Commit IMPLEMENTS Work Item
                     valid, _ = validate_relationship_endpoints(
                         RelationshipType.IMPLEMENTS.value, ce.entity_type, target_wi.entity_type
                     )
@@ -145,19 +126,13 @@ class RelationshipDiscoveryEngine:
                             )
                         )
 
-            # Check for ADR references
             found_adrs = ADR_REF_RE.findall(text_to_scan)
             for adr in set(found_adrs):
                 adr_norm = adr.upper()
-                # Find matching decision entity
-                decision = self._session.execute(
-                    select(KnowledgeEntity).where(
-                        KnowledgeEntity.project_id == project_id,
-                        KnowledgeEntity.entity_type == EntityType.DECISION.value,
-                        KnowledgeEntity.canonical_name.ilike(f"%{adr_norm}%"),
-                        KnowledgeEntity.is_deleted.is_(False),
-                    )
-                ).scalar_one_or_none()
+                decision = next(
+                    (d for d in decisions if adr_norm in d.canonical_name.upper()),
+                    None,
+                )
                 if decision and decision.id != ce.id and ce.primary_evidence_id:
                     drafts.append(
                         DiscoveredRelationshipDraft(
@@ -189,19 +164,9 @@ class RelationshipDiscoveryEngine:
     ) -> list[DiscoveredRelationshipDraft]:
         """Extract explicit relations directly from GitHub/Jira metadata JSON."""
         drafts: list[DiscoveredRelationshipDraft] = []
-
-        entities = list(
-            self._session.execute(
-                select(KnowledgeEntity)
-                .options(selectinload(KnowledgeEntity.aliases))
-                .where(
-                    KnowledgeEntity.project_id == project_id,
-                    KnowledgeEntity.is_deleted.is_(False),
-                )
-            )
-            .scalars()
-            .all()
-        )
+        _, entities_by_id = self._entity_repo._project_entities(project_id)
+        entities = list(entities_by_id.values())
+        aliases_by_key = self._entity_repo._project_aliases(project_id)
 
         # Build lookup indices
         people = [e for e in entities if e.entity_type == EntityType.PERSON.value]
@@ -212,11 +177,14 @@ class RelationshipDiscoveryEngine:
         ]
         work_items = [e for e in entities if e.entity_type == EntityType.WORK_ITEM.value]
 
+        people_by_id = {p.id: p for p in people}
         people_by_handle: dict[str, KnowledgeEntity] = {}
         for p in people:
             people_by_handle[p.canonical_name.lower()] = p
-            for alias in p.aliases:
-                people_by_handle[alias.normalized_alias] = p
+        for (ent_id, norm_alias, _prov), _al in aliases_by_key.items():
+            p_ent = people_by_id.get(ent_id)
+            if p_ent is not None:
+                people_by_handle[norm_alias] = p_ent
 
         components_by_name = {c.canonical_name.lower(): c for c in components}
         work_items_by_key = {w.canonical_name.upper(): w for w in work_items}
@@ -372,7 +340,6 @@ class RelationshipDiscoveryEngine:
                     for link in issue_links:
                         if isinstance(link, dict):
                             link_type = str(link.get("type", "")).lower()
-                            inward_key = link.get("inward_issue_key")
                             outward_key = link.get("outward_issue_key")
 
                             if "block" in link_type and outward_key:
@@ -412,6 +379,70 @@ class RelationshipDiscoveryEngine:
                                         )
                                     )
 
+            # 3. Commit Metadata -> Author (AUTHORED_BY)
+            elif e.entity_type == EntityType.COMMIT.value:
+                author_key = (
+                    meta.get("github_author_login")
+                    or meta.get("git_author_name")
+                    or meta.get("git_author_email")
+                )
+                if isinstance(author_key, str):
+                    p_node = people_by_handle.get(author_key.strip().lower())
+                    if p_node:
+                        drafts.append(
+                            DiscoveredRelationshipDraft(
+                                source_entity_id=e.id,
+                                target_entity_id=p_node.id,
+                                relationship_type=RelationshipType.AUTHORED_BY.value,
+                                relationship_basis=RelationshipBasis.EXPLICIT.value,
+                                confidence_score=1.0,
+                                discovery_method="structured_connector",
+                                evidence_id=ev_id,
+                                evidence_chunk_id=None,
+                                knowledge_item_id=None,
+                                supporting_excerpt=f"Git commit author: {author_key}",
+                                source_location_json={"sha": meta.get("sha"), "author": author_key},
+                            )
+                        )
+
+        # 4. Link Pull Requests -> Associated Commits (CONTAINS_COMMIT)
+        commits_by_sha: dict[str, KnowledgeEntity] = {}
+        for ent in entities:
+            if ent.entity_type == EntityType.COMMIT.value:
+                raw_sha = (ent.metadata_json or {}).get("sha")
+                if not raw_sha and ent.external_source_id and ":commit:" in ent.external_source_id:
+                    raw_sha = ent.external_source_id.split(":commit:", 1)[1]
+                if isinstance(raw_sha, str) and len(raw_sha.strip()) >= 7:
+                    norm_sha = raw_sha.strip().lower()
+                    commits_by_sha[norm_sha] = ent
+                    for plen in (7, 8, 12):
+                        if len(norm_sha) >= plen:
+                            commits_by_sha.setdefault(norm_sha[:plen], ent)
+
+        for ent in entities:
+            if ent.entity_type == EntityType.PULL_REQUEST.value and ent.primary_evidence_id:
+                assoc_shas = (ent.metadata_json or {}).get("associated_commit_shas") or []
+                if isinstance(assoc_shas, list):
+                    for sha in assoc_shas:
+                        norm = str(sha).strip().lower()
+                        c_node = commits_by_sha.get(norm) or commits_by_sha.get(norm[:12]) or commits_by_sha.get(norm[:7])
+                        if c_node:
+                            drafts.append(
+                                DiscoveredRelationshipDraft(
+                                    source_entity_id=ent.id,
+                                    target_entity_id=c_node.id,
+                                    relationship_type=RelationshipType.CONTAINS_COMMIT.value,
+                                    relationship_basis=RelationshipBasis.EXPLICIT.value,
+                                    confidence_score=1.0,
+                                    discovery_method="structured_connector",
+                                    evidence_id=ent.primary_evidence_id,
+                                    evidence_chunk_id=None,
+                                    knowledge_item_id=None,
+                                    supporting_excerpt=f"PR contains commit {str(sha)[:12]}",
+                                    source_location_json={"sha": str(sha)},
+                                )
+                            )
+
         return drafts
 
     # --------------------------------------------------------------------------
@@ -425,32 +456,15 @@ class RelationshipDiscoveryEngine:
     ) -> list[DiscoveredRelationshipDraft]:
         """Correlate PR changed files with known architecture component file paths."""
         drafts: list[DiscoveredRelationshipDraft] = []
+        _, entities_by_id = self._entity_repo._project_entities(project_id)
+        all_entities = list(entities_by_id.values())
 
-        components = list(
-            self._session.execute(
-                select(KnowledgeEntity).where(
-                    KnowledgeEntity.project_id == project_id,
-                    KnowledgeEntity.entity_type.in_(
-                        [EntityType.TECHNICAL_COMPONENT.value, EntityType.COMPONENT.value]
-                    ),
-                    KnowledgeEntity.is_deleted.is_(False),
-                )
-            )
-            .scalars()
-            .all()
-        )
-
-        prs = list(
-            self._session.execute(
-                select(KnowledgeEntity).where(
-                    KnowledgeEntity.project_id == project_id,
-                    KnowledgeEntity.entity_type == EntityType.PULL_REQUEST.value,
-                    KnowledgeEntity.is_deleted.is_(False),
-                )
-            )
-            .scalars()
-            .all()
-        )
+        components = [
+            e
+            for e in all_entities
+            if e.entity_type in {EntityType.TECHNICAL_COMPONENT.value, EntityType.COMPONENT.value}
+        ]
+        prs = [e for e in all_entities if e.entity_type == EntityType.PULL_REQUEST.value]
 
         for pr in prs:
             meta = pr.metadata_json or {}
@@ -574,12 +588,12 @@ class RelationshipDiscoveryEngine:
         )
 
         for chunk in chunks:
-            if not chunk.content or len(chunk.content.strip()) < 30:
+            if not chunk.chunk_text or len(chunk.chunk_text.strip()) < 30:
                 continue
 
             user_prompt = (
                 f"Known Entities:\n{entity_names_str}\n\n"
-                f'Evidence Text Chunk:\n"""{chunk.content[:2000]}"""\n\n'
+                f'Evidence Text Chunk:\n"""{chunk.chunk_text[:2000]}"""\n\n'
                 "Extract relationships present in this chunk."
             )
 
@@ -649,11 +663,13 @@ class RelationshipDiscoveryEngine:
         """
         created = 0
         updated = 0
+        _, entities_by_id = self._entity_repo._project_entities(project_id)
+        rels_by_fp = self._rel_repo._project_relationships(project_id)
 
         for d in drafts:
-            # Validate endpoints against taxonomy
-            s_entity = self._entity_repo.get_entity_by_id(d.source_entity_id)
-            t_entity = self._entity_repo.get_entity_by_id(d.target_entity_id)
+            # Validate endpoints against taxonomy via preloaded entity cache
+            s_entity = entities_by_id.get(d.source_entity_id)
+            t_entity = entities_by_id.get(d.target_entity_id)
             if not s_entity or not t_entity or s_entity.id == t_entity.id:
                 continue
 
@@ -663,16 +679,11 @@ class RelationshipDiscoveryEngine:
             if not valid:
                 continue
 
-            # Check if relationship already exists
+            # Check if relationship already exists in memory cache
             fingerprint = RelationshipRepository.compute_fingerprint(
                 project_id, d.source_entity_id, d.relationship_type, d.target_entity_id
             )
-            existing = self._session.execute(
-                select(KnowledgeRelationship).where(
-                    KnowledgeRelationship.project_id == project_id,
-                    KnowledgeRelationship.fingerprint == fingerprint,
-                )
-            ).scalar_one_or_none()
+            existing = rels_by_fp.get(fingerprint)
 
             if existing is None:
                 rel = self._rel_repo.create_or_get_relationship(
@@ -695,7 +706,7 @@ class RelationshipDiscoveryEngine:
                     rel.confidence_score = d.confidence_score
                 updated += 1
 
-            # Attach evidence link
+            # Attach evidence link via preloaded link cache
             self._rel_repo.add_evidence_link(
                 relationship_id=rel.id,
                 organisation_id=organisation_id,

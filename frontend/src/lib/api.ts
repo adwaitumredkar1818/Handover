@@ -927,7 +927,11 @@ export const api = {
     },
   },
   relationships: {
-    async getGraph(projectId: string, limit: number = 250): Promise<{
+    async getGraph(
+      projectId: string,
+      limit: number = 250,
+      options?: { center_node_id?: string; depth?: number; entity_type?: string }
+    ): Promise<{
       nodes: Array<{
         id: string;
         label: string;
@@ -955,7 +959,14 @@ export const api = {
       total_nodes?: number;
       total_edges?: number;
     }> {
-      return request(`/projects/${projectId}/relationships/graph?limit_nodes=${limit}&limit_edges=${limit * 2}`);
+      const qs = new URLSearchParams({
+        limit_nodes: String(limit),
+        limit_edges: String(limit * 2),
+      });
+      if (options?.center_node_id) qs.set("center_node_id", options.center_node_id);
+      if (options?.depth) qs.set("depth", String(options.depth));
+      if (options?.entity_type) qs.set("entity_type", options.entity_type);
+      return request(`/projects/${projectId}/relationships/graph?${qs.toString()}`);
     },
     async listEntities(projectId: string, type?: string, page: number = 1, pageSize: number = 50): Promise<{
       items: Array<{
@@ -1049,8 +1060,224 @@ export const api = {
         method: "POST",
       });
     },
+    async submitRelationshipReview(
+      projectId: string,
+      relationshipId: string,
+      payload: { action: "verify" | "reject" | "dispute" | "request_evidence"; note?: string }
+    ): Promise<Record<string, unknown>> {
+      return request(`/projects/${projectId}/relationships/${relationshipId}/submit-for-review`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    async getContributorsGraph(
+      projectId: string,
+      params?: {
+        contributor_type?: string;
+        work_cluster?: string;
+        repository?: string;
+        verification_state?: string;
+        search?: string;
+        include_external?: boolean;
+        include_bots?: boolean;
+        expand_contributor_key?: string;
+        expand_cluster_name?: string;
+        limit?: number;
+      }
+    ): Promise<{
+      project_id: string;
+      nodes: Array<{
+        id: string;
+        node_kind: string;
+        label: string;
+        contributor_key?: string | null;
+        contributor_type: string;
+        review_status: string;
+        verification_status: string;
+        contribution_count: number;
+        metadata: Record<string, unknown>;
+      }>;
+      edges: Array<{
+        id: string;
+        source: string;
+        target: string;
+        relationship_type: string;
+        label: string;
+        evidence_basis: string;
+      }>;
+      summary: Record<string, number>;
+    }> {
+      const qs = new URLSearchParams();
+      if (params) {
+        Object.entries(params).forEach(([k, v]) => {
+          if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+        });
+      }
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request(`/projects/${projectId}/relationships/contributors/graph${suffix}`);
+    },
+    async listContributors(
+      projectId: string,
+      params?: { contributor_type?: string; review_status?: string }
+    ): Promise<
+      Array<{
+        contributor_key: string;
+        display_name: string;
+        github_login?: string | null;
+        github_numeric_id?: string | null;
+        git_author_name?: string | null;
+        git_author_email?: string | null;
+        contributor_type: string;
+        review_status: string;
+        match_method?: string | null;
+        match_confidence?: number | null;
+        matched_project_membership_id?: string | null;
+        matched_member_name?: string | null;
+        suggested_project_membership_id?: string | null;
+        suggested_member_name?: string | null;
+        declared_responsibility?: string | null;
+        contribution_count: number;
+        commits_count: number;
+        prs_count: number;
+        issues_count: number;
+        repositories: string[];
+        work_areas: string[];
+        evidence_ids: string[];
+        review_history: Array<Record<string, unknown>>;
+      }>
+    > {
+      const qs = new URLSearchParams();
+      if (params?.contributor_type) qs.set("contributor_type", params.contributor_type);
+      if (params?.review_status) qs.set("review_status", params.review_status);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request(`/projects/${projectId}/relationships/contributors${suffix}`);
+    },
+    async getContributorDetail(projectId: string, contributorKey: string): Promise<Record<string, unknown>> {
+      return request(`/projects/${projectId}/relationships/contributors/${encodeURIComponent(contributorKey)}`);
+    },
+    async reviewContributor(
+      projectId: string,
+      contributorKey: string,
+      payload: {
+        action: "match_member" | "mark_external" | "mark_bot" | "leave_unidentified" | "reject_match" | "revert";
+        project_membership_id?: string;
+        roster_member_id?: string;
+        notes?: string;
+      }
+    ): Promise<{ contributor_key: string; contributor_type: string; review_status: string; updated_records: number }> {
+      return request(`/projects/${projectId}/relationships/contributors/${encodeURIComponent(contributorKey)}/review`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    async listWorkClusters(projectId: string): Promise<
+      Array<{
+        cluster_id: string;
+        name: string;
+        classification_method: string;
+        contribution_count: number;
+        contributor_count: number;
+        contributors: Array<{ contributor_key: string; display_name: string; contributor_type: string; count: number }>;
+        contributions: Array<{
+          evidence_id: string;
+          title: string;
+          category: string;
+          contributor_key: string;
+          contributor_name: string;
+          contributor_type: string;
+          alignment?: string | null;
+        }>;
+        changed_paths: string[];
+        evidence_ids: string[];
+      }>
+    > {
+      return request(`/projects/${projectId}/relationships/work-clusters`);
+    },
+    async rebuildWorkClusters(projectId: string): Promise<{
+      run_id: string;
+      algorithm_version: string;
+      clusters_count: number;
+      relationships_created: number;
+      completed_at: string;
+    }> {
+      return request(`/projects/${projectId}/relationships/work-clusters/rebuild`, {
+        method: "POST",
+      });
+    },
   },
   knowledgeIntelligence: {
+    async getGraph(
+      projectId: string,
+      graphType: "technology-stack" | "system-architecture" | "features-workflows",
+      params?: {
+        search?: string;
+        status?: string;
+        source_type?: string;
+        verification_state?: string;
+        limit?: number;
+        cursor?: string;
+        include_suggested?: boolean;
+      }
+    ): Promise<{
+      graph_type: "technology-stack" | "system-architecture" | "features-workflows";
+      project_id: string;
+      nodes: Array<{
+        id: string;
+        entity_type: string;
+        label: string;
+        description?: string | null;
+        category?: string | null;
+        status: string;
+        verification_status: string;
+        evidence_count: number;
+        evidence_ids: string[];
+        aliases: string[];
+        last_observed_at?: string | null;
+        metadata: Record<string, unknown>;
+      }>;
+      edges: Array<{
+        id: string;
+        source: string;
+        target: string;
+        relationship_type: string;
+        label: string;
+        evidence_basis: string;
+        verification_status: string;
+        confidence_score: number;
+        evidence_ids: string[];
+      }>;
+      summary: { node_count: number; edge_count: number; categories: Record<string, number> };
+      next_cursor?: string | null;
+    }> {
+      const qs = new URLSearchParams();
+      if (params) {
+        Object.entries(params).forEach(([k, v]) => {
+          if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+        });
+      }
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return request(`/projects/${projectId}/knowledge-intelligence/graphs/${graphType}${suffix}`);
+    },
+    async getGraphNodeDetail(
+      projectId: string,
+      graphType: "technology-stack" | "system-architecture" | "features-workflows",
+      nodeId: string
+    ): Promise<{
+      graph_type: string;
+      project_id: string;
+      node: Record<string, unknown>;
+      adjacent_edges: Array<Record<string, unknown>>;
+      related_nodes: Array<Record<string, unknown>>;
+      evidence_refs: Array<{
+        evidence_id: string;
+        title: string;
+        source_type: string;
+        source_url?: string | null;
+        supporting_excerpt?: string | null;
+      }>;
+    }> {
+      return request(`/projects/${projectId}/knowledge-intelligence/graphs/${graphType}/nodes/${nodeId}`);
+    },
     async getSummary(projectId: string): Promise<{
       total_findings: number;
       by_category: Record<string, number>;

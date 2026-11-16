@@ -27,9 +27,11 @@ target_metadata = Base.metadata
 
 def _resolve_sqlalchemy_url() -> str:
     configured = config.get_main_option("sqlalchemy.url")
-    if configured:
-        return configured
-    return get_settings().database.sqlalchemy_url()
+    url = configured if configured else get_settings().database.sqlalchemy_url()
+    # Alembic transactional DDL requires session mode (5432) rather than transaction pooler (6543).
+    if "pooler.supabase.com:6543/" in url:
+        return url.replace(":6543/", ":5432/", 1)
+    return url
 
 
 def run_migrations_offline() -> None:

@@ -24,6 +24,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from app.models.enums import (
     ContributionCategory,
+    ContributorReviewStatus,
+    ContributorType,
     IdentityMatchMethod,
     ReconciliationStatus,
     ResponsibilityAlignment,
@@ -167,6 +169,25 @@ class ContributionAttribution(Base):
     contribution_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
     responsibility_alignment: Mapped[str | None] = mapped_column(String(64), nullable=True)
     alignment_explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contributor_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=ContributorType.UNIDENTIFIED.value,
+        server_default=ContributorType.UNIDENTIFIED.value,
+    )
+    review_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=ContributorReviewStatus.PENDING.value,
+        server_default=ContributorReviewStatus.PENDING.value,
+    )
+    reviewed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(
         _JSON_VARIANT,
         nullable=False,

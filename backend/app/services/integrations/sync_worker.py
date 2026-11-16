@@ -25,11 +25,11 @@ from app.models.enums import (
     SourceSyncRunStatus,
     UserSourceAuthorisationStatus,
 )
-from app.models.integration import ProjectSourceMapping, SourceSyncRun, UserSourceAuthorisation
+from app.models.integration import ProjectSourceMapping, SourceSyncRun
 from app.repositories.audit import AuditLogRepository
 from app.repositories.evidence import EvidenceRepository
 from app.repositories.integration import IntegrationRepository
-from app.repositories.job import BackgroundJobRepository
+from app.repositories.job import BackgroundJobRepository, job_lease_heartbeat
 from app.repositories.organisation import OrganisationRepository
 from app.repositories.project import ProjectRepository
 from app.repositories.rbac import RbacRepository
@@ -109,13 +109,18 @@ class SourceSyncWorkerService:
 
         started_perf = time.perf_counter()
         try:
-            report = self._execute_claimed_sync(
+            with job_lease_heartbeat(
+                session_factory=self._session_factory,
                 job_id=job_id,
-                sync_run_id=sync_run_id,
-                mapping_id=mapping_id,
-                authorisation_id=authorisation_id,
-                sync_mode=sync_mode,
-            )
+                lease_seconds=max(1800, self._settings.ingestion.worker_lease_seconds),
+            ):
+                report = self._execute_claimed_sync(
+                    job_id=job_id,
+                    sync_run_id=sync_run_id,
+                    mapping_id=mapping_id,
+                    authorisation_id=authorisation_id,
+                    sync_mode=sync_mode,
+                )
             elapsed_ms = int((time.perf_counter() - started_perf) * 1000)
             if report is not None:
                 self._complete_success(
@@ -209,7 +214,7 @@ class SourceSyncWorkerService:
 
             job = job_repo.claim_next_job(
                 worker_id=self._worker_id,
-                lease_seconds=self._settings.ingestion.worker_lease_seconds,
+                lease_seconds=max(1800, self._settings.ingestion.worker_lease_seconds),
                 now=now,
                 job_type=BackgroundJobType.SOURCE_SYNC.value,
             )
@@ -281,8 +286,9 @@ class SourceSyncWorkerService:
                     auth = None
 
             if auth is None:
-                from app.models.integration import UserSourceAuthorisation
                 from sqlalchemy import select
+
+                from app.models.integration import UserSourceAuthorisation
                 auth = session.execute(
                     select(UserSourceAuthorisation).where(
                         UserSourceAuthorisation.source_connection_id == mapping.source_connection_id,

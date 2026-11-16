@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.cache import CacheKeys, CachePolicies, cache_service
+from app.core.cache.local_cache import local_response_cache
 from app.core.config import Settings, get_settings
 from app.core.exceptions import (
     BadRequestError,
@@ -35,7 +36,7 @@ from app.models.enums import (
     RoleName,
     RoleScopeType,
 )
-from app.models.organisation import Organisation, OrganisationInvitation
+from app.models.organisation import OrganisationInvitation
 from app.models.project import Project, ProjectMembership, ProjectTransition
 from app.repositories.organisation import OrganisationRepository
 from app.repositories.project import ProjectRepository
@@ -880,13 +881,17 @@ class ProjectService:
         self._require_active_organisation_and_project(ctx=ctx, allow_archived_project=True)
         project = ctx.project
 
+        bind_id = id(self._db.get_bind())
         cache_key = CacheKeys.dashboard_overview(project.id, ctx.principal.user.id)
+        local_key = f"{cache_key}:{bind_id}:{int(ctx.has_permission('project.manage'))}"
         cached_data = cache_service.get(cache_key)
+        if cached_data is None:
+            cached_data = local_response_cache.get(local_key)
         if cached_data is not None:
             try:
                 return ProjectOverviewResponse.model_validate(cached_data)
             except Exception:
-                pass
+                local_response_cache.delete(local_key)
 
         transition = self._project_repo.get_transition(project.id)
         source_metrics = self._project_repo.get_source_metrics(project.id)
@@ -1033,11 +1038,13 @@ class ProjectService:
             recent_activity=activity_cards,
             team_ownership=ownership_cards,
         )
+        dumped_overview = response.model_dump(mode="json")
         cache_service.set(
             cache_key,
-            response.model_dump(mode="json"),
+            dumped_overview,
             ttl=CachePolicies.DASHBOARD_STATS,
         )
+        local_response_cache.set(local_key, dumped_overview, ttl_seconds=60)
         return response
 
     def get_project_activity(

@@ -193,13 +193,11 @@ class CompositeWorkerService:
         return self.ingestion_worker.worker_id
 
     def process_next_job(self) -> bool:
-        """Claim one job across ingestion, sync, indexing, reconstruction,
-        and relationship queues."""
+        """Claim one job across ingestion, sync, reconstruction, relationship,
+        and indexing queues so bulk vector retries cannot starve AI reconstruction."""
         if self.ingestion_worker.process_next_job():
             return True
         if self.sync_worker.process_next_job():
-            return True
-        if self.indexing_worker is not None and self.indexing_worker.process_next_job():
             return True
         if (
             self.reconstruction_worker is not None
@@ -210,6 +208,8 @@ class CompositeWorkerService:
             self.relationship_worker is not None
             and self.relationship_worker.process_next_job()
         ):
+            return True
+        if self.indexing_worker is not None and self.indexing_worker.process_next_job():
             return True
         return False
 

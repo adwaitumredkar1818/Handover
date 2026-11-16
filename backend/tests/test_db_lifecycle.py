@@ -122,7 +122,10 @@ def test_alembic_configuration_and_revisions() -> None:
     script_dir = ScriptDirectory.from_config(cfg)
     heads = script_dir.get_heads()
     revisions = [rev.revision for rev in script_dir.walk_revisions()]
-    if heads == ["0019_sources_and_evidence"]:
+    if heads == ["0020_graphs_and_contributors"]:
+        assert revisions[0] == "0020_graphs_and_contributors"
+        assert revisions[1] == "0019_sources_and_evidence"
+    elif heads == ["0019_sources_and_evidence"]:
         assert revisions[0] == "0019_sources_and_evidence"
         assert revisions[1] == "0018_project_invitations"
         assert revisions[2] == "0017_password_reset_tokens"

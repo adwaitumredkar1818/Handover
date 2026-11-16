@@ -15,6 +15,7 @@ import {
 import { useFigmaStore as useStore, FigmaStoreProvider, FigmaCtx } from '../../lib/figmaStore'
 import { useLiveApp } from '../../context/LiveAppContext'
 import { api } from '../../lib/api'
+import { KnowledgeIntelligenceWorkspace } from '../knowledge/KnowledgeIntelligenceWorkspace'
 import {
   evidence, personById, SOURCE_META,
   type Evidence, type Source, type SourceType, type Verification
@@ -2985,7 +2986,7 @@ function KnowledgePageInner({
     case 'ingestion':
       return <Ingestion projectId={pid} />
     case 'knowledge':
-      return <KnowledgeExplorer projectId={pid} />
+      return <KnowledgeIntelligenceWorkspace projectId={pid} />
     default:
       return <DataSources projectId={pid} />
   }

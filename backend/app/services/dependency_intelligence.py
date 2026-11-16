@@ -20,7 +20,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.enums import RelationshipType
-from app.models.relationship import KnowledgeEntity, KnowledgeRelationship
+from app.models.evidence import EvidenceItem
+from app.models.relationship import (
+    KnowledgeEntity,
+    KnowledgeRelationship,
+    RelationshipEvidenceLink,
+)
+from app.repositories.relationship import _build_accessible_evidence_clause
 from app.schemas.relationship import DependencyEdge, DependencyGraphResponse, DependencyNode
 
 logger = logging.getLogger("app.services.dependency_intelligence")
@@ -45,15 +51,36 @@ class DependencyIntelligenceService:
         self,
         *,
         project_id: uuid.UUID,
+        viewer_user_id: uuid.UUID | None = None,
+        has_project_manage: bool = False,
         root_entity_id: uuid.UUID | None = None,
         max_depth: int = 10,
     ) -> DependencyGraphResponse:
         """Build dependency graph, run cycle detection, and identify blockers."""
-        # Query all active dependency edges in the project
+        if self._session.new or self._session.dirty or self._session.deleted:
+            self._session.flush()
+        # Query active dependency edges in the project, strictly filtered by source ACLs
         query = select(KnowledgeRelationship).where(
             KnowledgeRelationship.project_id == project_id,
             KnowledgeRelationship.relationship_type.in_(_DEPENDENCY_TYPES),
         )
+        if viewer_user_id is not None:
+            access_clause = _build_accessible_evidence_clause(
+                self._session,
+                project_id=project_id,
+                viewer_user_id=viewer_user_id,
+                has_project_manage=has_project_manage,
+            )
+            accessible_rel_ids = (
+                select(RelationshipEvidenceLink.relationship_id)
+                .join(EvidenceItem, EvidenceItem.id == RelationshipEvidenceLink.evidence_id)
+                .where(
+                    EvidenceItem.project_id == project_id,
+                    EvidenceItem.deleted_at.is_(None),
+                    access_clause,
+                )
+            )
+            query = query.where(KnowledgeRelationship.id.in_(accessible_rel_ids))
         relationships = list(self._session.execute(query).scalars().all())
 
         # Normalize directed dependency edges:
