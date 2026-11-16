@@ -71,7 +71,7 @@ function AmeliorateFlowEdgeBase({
             className={`px-1.5 py-0.5 text-[10px] leading-tight whitespace-nowrap rounded ${
               isPrimary
                 ? "bg-white font-medium text-indigo-700 border border-indigo-400 shadow-xs"
-                : "bg-white/85 font-normal text-slate-500 border border-slate-100"
+                : "bg-white/95 font-medium text-slate-500 border border-slate-200/80 shadow-xs"
             }`}
           >
             {String(label).toLowerCase()}

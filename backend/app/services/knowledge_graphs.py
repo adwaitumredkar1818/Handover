@@ -216,9 +216,8 @@ class KnowledgeGraphProjectionService:
         project_id = project_ctx.project.id
         viewer_id = project_ctx.principal.user_id
         has_manage = project_ctx.has_permission("project.manage")
-        bind = self._session.get_bind()
         cache_key = (
-            f"ki_graph:{project_id}:{id(bind)}:{viewer_id}:{int(has_manage)}:"
+            f"ki_graph:{project_id}:{viewer_id}:{int(has_manage)}:"
             f"{graph_type}:{search or ''}:{status or ''}:{source_type or ''}:"
             f"{verification_state or ''}:{limit}:{cursor or ''}:{int(include_suggested)}"
         )

@@ -206,7 +206,63 @@ interface RawOverviewResponse {
   }>;
 }
 
+const inFlightRequests = new Map<string, Promise<unknown>>();
+const getCache = new Map<string, { timestamp: number; data: unknown }>();
+const CACHE_TTL_MS = 30000; // 30s in-memory deduplication & read cache for fast tab navigation
+
+export function clearApiCache(pathPrefix?: string) {
+  if (!pathPrefix) {
+    getCache.clear();
+    return;
+  }
+  for (const key of Array.from(getCache.keys())) {
+    if (key.includes(pathPrefix)) {
+      getCache.delete(key);
+    }
+  }
+}
+
 async function request<T>(
+  path: string,
+  options: RequestInit = {},
+  isRetry = false
+): Promise<T> {
+  const method = (options.method || "GET").toUpperCase();
+  const token = getToken();
+
+  // If modifying data, invalidate cached GET endpoints for this project/resource
+  if (method !== "GET") {
+    const segments = path.split("/").filter(Boolean);
+    const scopePrefix = segments.length >= 2 ? `/${segments[0]}/${segments[1]}` : "";
+    if (scopePrefix) clearApiCache(scopePrefix);
+    else getCache.clear();
+  } else if (!isRetry && !options.body) {
+    const cacheKey = `${path}:${token || ""}`;
+    const cached = getCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      return cached.data as T;
+    }
+    const pending = inFlightRequests.get(cacheKey);
+    if (pending) {
+      return pending as Promise<T>;
+    }
+    const promise = (async () => {
+      try {
+        const result = await requestInternal<T>(path, options, isRetry);
+        getCache.set(cacheKey, { timestamp: Date.now(), data: result });
+        return result;
+      } finally {
+        inFlightRequests.delete(cacheKey);
+      }
+    })();
+    inFlightRequests.set(cacheKey, promise);
+    return promise;
+  }
+
+  return requestInternal<T>(path, options, isRetry);
+}
+
+async function requestInternal<T>(
   path: string,
   options: RequestInit = {},
   isRetry = false

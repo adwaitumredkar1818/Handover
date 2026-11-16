@@ -48,7 +48,6 @@ export interface AmeliorateNodeTheme {
   badgeBg: string;
   badgeText: string;
   typeLabel: string;
-  iconSymbol: string;
 }
 
 export interface AmeliorateNodeData extends Record<string, unknown> {
@@ -66,107 +65,123 @@ export const AMELIORATE_PRIMARY_SPOTLIGHT = "#4f46e5";
 export const AMELIORATE_SECONDARY_SPOTLIGHT = "#0284c7";
 export const AMELIORATE_DEFAULT_EDGE_COLOR = "#94a3b8";
 
-// Ameliorate palette accurately mapped to knowledge domains
+// Ameliorate palette accurately mapped to knowledge domains (vibrant solid badge headers matching Image 3)
 const ENTITY_THEME_MAP: Record<string, AmeliorateNodeTheme> = {
   project: {
     borderColor: "#a855f7",
-    badgeBg: "#f3e8ff",
-    badgeText: "#6b21a8",
+    badgeBg: "#9333ea",
+    badgeText: "#ffffff",
     typeLabel: "Project",
-    iconSymbol: "🧩",
   },
   feature: {
     borderColor: "#22c55e",
-    badgeBg: "#dcfce7",
-    badgeText: "#15803d",
+    badgeBg: "#16a34a",
+    badgeText: "#ffffff",
     typeLabel: "Feature",
-    iconSymbol: "🌿",
   },
   requirement: {
     borderColor: "#eab308",
-    badgeBg: "#fef9c3",
-    badgeText: "#854d0e",
+    badgeBg: "#d97706",
+    badgeText: "#ffffff",
     typeLabel: "Requirement",
-    iconSymbol: "⚡",
   },
   operational_procedure: {
     borderColor: "#ec4899",
-    badgeBg: "#fce7f3",
-    badgeText: "#9d174d",
+    badgeBg: "#db2777",
+    badgeText: "#ffffff",
     typeLabel: "Workflow",
-    iconSymbol: "🚨",
   },
   work_item: {
     borderColor: "#0ea5e9",
-    badgeBg: "#e0f2fe",
-    badgeText: "#0369a1",
+    badgeBg: "#0284c7",
+    badgeText: "#ffffff",
     typeLabel: "Work Item",
-    iconSymbol: "✓",
   },
   technical_component: {
     borderColor: "#14b8a6",
-    badgeBg: "#ccfbf1",
-    badgeText: "#0f766e",
+    badgeBg: "#0f766e",
+    badgeText: "#ffffff",
     typeLabel: "Component",
-    iconSymbol: "✓",
   },
   architecture_component: {
     borderColor: "#0d9488",
-    badgeBg: "#ccfbf1",
-    badgeText: "#115e59",
+    badgeBg: "#115e59",
+    badgeText: "#ffffff",
     typeLabel: "Architecture",
-    iconSymbol: "✓",
   },
   service: {
     borderColor: "#3b82f6",
-    badgeBg: "#dbeafe",
-    badgeText: "#1d4ed8",
+    badgeBg: "#2563eb",
+    badgeText: "#ffffff",
     typeLabel: "Service",
-    iconSymbol: "✓",
   },
   api: {
     borderColor: "#6366f1",
-    badgeBg: "#e0e7ff",
-    badgeText: "#4338ca",
+    badgeBg: "#4f46e5",
+    badgeText: "#ffffff",
     typeLabel: "API",
-    iconSymbol: "⚡",
   },
   technology: {
     borderColor: "#22c55e",
-    badgeBg: "#dcfce7",
-    badgeText: "#15803d",
+    badgeBg: "#16a34a",
+    badgeText: "#ffffff",
     typeLabel: "Technology",
-    iconSymbol: "🌿",
   },
   framework: {
     borderColor: "#06b6d4",
-    badgeBg: "#cffafe",
-    badgeText: "#0e7490",
+    badgeBg: "#0891b2",
+    badgeText: "#ffffff",
     typeLabel: "Framework",
-    iconSymbol: "⚡",
   },
   library: {
     borderColor: "#10b981",
-    badgeBg: "#d1fae5",
-    badgeText: "#047857",
+    badgeBg: "#059669",
+    badgeText: "#ffffff",
     typeLabel: "Library",
-    iconSymbol: "🌿",
   },
   database: {
     borderColor: "#eab308",
-    badgeBg: "#fef9c3",
-    badgeText: "#854d0e",
+    badgeBg: "#d97706",
+    badgeText: "#ffffff",
     typeLabel: "Database",
-    iconSymbol: "⚡",
+  },
+  backend: {
+    borderColor: "#14b8a6",
+    badgeBg: "#0f766e",
+    badgeText: "#ffffff",
+    typeLabel: "Backend",
+  },
+  frontend: {
+    borderColor: "#06b6d4",
+    badgeBg: "#0891b2",
+    badgeText: "#ffffff",
+    typeLabel: "Frontend",
+  },
+  ai_ml: {
+    borderColor: "#a855f7",
+    badgeBg: "#9333ea",
+    badgeText: "#ffffff",
+    typeLabel: "AI / ML",
+  },
+  storage: {
+    borderColor: "#f97316",
+    badgeBg: "#ea580c",
+    badgeText: "#ffffff",
+    typeLabel: "Storage",
+  },
+  external_integrations: {
+    borderColor: "#6366f1",
+    badgeBg: "#4f46e5",
+    badgeText: "#ffffff",
+    typeLabel: "Integration",
   },
 };
 
 const FALLBACK_THEME: AmeliorateNodeTheme = {
   borderColor: "#22c55e",
-  badgeBg: "#dcfce7",
-  badgeText: "#15803d",
+  badgeBg: "#16a34a",
+  badgeText: "#ffffff",
   typeLabel: "Node",
-  iconSymbol: "✓",
 };
 
 export function resolveAmeliorateNodeTheme(node: HandoverGraphNode): AmeliorateNodeTheme {
@@ -179,26 +194,35 @@ export function resolveAmeliorateNodeTheme(node: HandoverGraphNode): AmeliorateN
   };
 }
 
-const ENTITY_LAYER_RANK: Record<string, number> = {
+const FUNCTIONAL_LAYER_ORDER: Record<string, number> = {
   project: 0,
   requirement: 0,
-  feature: 1,
-  architecture_component: 1,
+  client: 1,
+  ui: 1,
+  frontend: 1,
+  backend: 1,
+  api_backend: 1,
+  core_services: 1,
   service: 1,
   api: 1,
-  technical_component: 2,
-  component: 2,
+  feature: 1,
   operational_procedure: 2,
   work_item: 2,
-  technology: 3,
-  framework: 3,
-  library: 3,
-  database: 3,
+  database: 2,
+  storage: 2,
+  data_storage: 2,
+  ai_ml: 2,
+  ai_processing: 2,
+  technical_component: 2,
+  architecture_component: 2,
+  framework: 2,
+  library: 2,
+  external_integrations: 3,
 };
 
 /**
- * Compute Ameliorate-style layered flowchart positions with balanced wrapping
- * so nodes do not stretch infinitely across the screen and cause tiny zoom.
+ * Compute Ameliorate-style layered flowchart positions with balanced centered tiers
+ * so nodes form a clean hierarchical flowchart exactly like Image 3 with zero node crossings.
  */
 export function buildAmeliorateFlowchartElements(
   rawNodes: HandoverGraphNode[],
@@ -274,36 +298,27 @@ export function buildAmeliorateFlowchartElements(
     }
   }
 
-  // Any remaining disconnected nodes sit on level 1
-  for (const n of rawNodes) {
-    if (!layerMap.has(n.id)) {
-      layerMap.set(n.id, 1);
-    }
-  }
-
   const byLayer = new Map<number, HandoverGraphNode[]>();
   for (const n of rawNodes) {
-    const rank = layerMap.get(n.id) ?? 0;
-    const bucket = byLayer.get(rank) || [];
+    const topRank = layerMap.get(n.id);
+    const catKey = (n.category || n.entity_type || "").toLowerCase();
+    const funcRank = n.entity_type.toLowerCase() === "project" ? 0 : (FUNCTIONAL_LAYER_ORDER[catKey] ?? 1);
+    const finalRank = topRank !== undefined && topRank > 0 ? topRank : funcRank;
+    const bucket = byLayer.get(finalRank) || [];
     bucket.push(n);
-    byLayer.set(rank, bucket);
+    byLayer.set(finalRank, bucket);
   }
 
   const sortedLayers = Array.from(byLayer.keys()).sort((a, b) => a - b);
-  const NODE_COL_GAP = 240;
+  const NODE_COL_GAP = 230;
   const NODE_ROW_GAP = 140;
-  const MAX_COLS_PER_ROW = 4;
 
-  // Flatten layers with row wrapping so wide tiers form balanced sub-rows
-  interface LayoutRow {
-    items: HandoverGraphNode[];
-    y: number;
-  }
+  // Maximum items in any layer defines canvas width
+  const maxRowItems = Math.max(...Array.from(byLayer.values()).map((items) => items.length), 1);
+  const canvasWidth = (maxRowItems - 1) * NODE_COL_GAP;
 
-  const layoutRows: LayoutRow[] = [];
-  let currentY = 40;
-
-  sortedLayers.forEach((layerIdx) => {
+  const nodes: Node<AmeliorateNodeData>[] = [];
+  sortedLayers.forEach((layerIdx, rowIdx) => {
     const rawItems = [...(byLayer.get(layerIdx) || [])];
     rawItems.sort((a, b) => {
       const aParents = incoming.get(a.id) || [];
@@ -312,26 +327,12 @@ export function buildAmeliorateFlowchartElements(
       return a.label.localeCompare(b.label);
     });
 
-    // Chunk into sub-rows of at most MAX_COLS_PER_ROW
-    for (let i = 0; i < rawItems.length; i += MAX_COLS_PER_ROW) {
-      const chunk = rawItems.slice(i, i + MAX_COLS_PER_ROW);
-      layoutRows.push({ items: chunk, y: currentY });
-      currentY += NODE_ROW_GAP;
-    }
-  });
-
-  const maxRowItems = Math.max(...layoutRows.map((r) => r.items.length), 1);
-  const canvasWidth = (maxRowItems - 1) * NODE_COL_GAP;
-
-  const nodes: Node<AmeliorateNodeData>[] = [];
-  layoutRows.forEach((row) => {
-    const rowWidth = (row.items.length - 1) * NODE_COL_GAP;
+    const rowWidth = (rawItems.length - 1) * NODE_COL_GAP;
     const startX = (canvasWidth - rowWidth) / 2 + 60;
+    const y = rowIdx * NODE_ROW_GAP + 40;
 
-    row.items.forEach((item, colIdx) => {
+    rawItems.forEach((item, colIdx) => {
       const x = startX + colIdx * NODE_COL_GAP;
-      const y = row.y;
-
       const spotlight: AmeliorateSpotlight =
         selectedNodeId === item.id
           ? "primary"

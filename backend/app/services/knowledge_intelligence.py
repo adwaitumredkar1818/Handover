@@ -64,9 +64,8 @@ class KnowledgeIntelligenceService:
     ) -> KnowledgeIntelligenceDomainsResponse:
         """Calculate live coverage and telemetry across all 8 canonical domains."""
         has_manage = project_ctx.has_permission("project.manage")
-        bind = self._session.get_bind()
         cache_key = (
-            f"ki_domains:{id(bind)}:{project_ctx.project.id}:"
+            f"ki_domains:{project_ctx.project.id}:"
             f"{project_ctx.user_id}:{int(has_manage)}:{int(include_synthetic)}"
         )
         cached = local_response_cache.get(cache_key)
@@ -180,9 +179,8 @@ class KnowledgeIntelligenceService:
     ) -> KnowledgeIntelligenceSummaryResponse:
         """Calculate executive project knowledge intelligence summary."""
         has_manage = project_ctx.has_permission("project.manage")
-        bind = self._session.get_bind()
         cache_key = (
-            f"ki_summary:{id(bind)}:{project_ctx.project.id}:"
+            f"ki_summary:{project_ctx.project.id}:"
             f"{project_ctx.user_id}:{int(has_manage)}:{int(include_synthetic)}"
         )
         cached = local_response_cache.get(cache_key)

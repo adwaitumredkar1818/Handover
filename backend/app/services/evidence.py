@@ -588,9 +588,8 @@ class EvidenceService:
             raise BadRequestError("Unsupported category filter value.", code="INVALID_FILTER")
 
         has_manage = project_ctx.has_permission("project.manage")
-        bind = self._session.get_bind()
         cache_key = (
-            f"ev_list:{project_ctx.project.id}:{id(bind)}:{project_ctx.principal.user.id}:{int(has_manage)}:"
+            f"ev_list:{project_ctx.project.id}:{project_ctx.principal.user.id}:{int(has_manage)}:"
             f"{processing_status or ''}:{source_type or ''}:{category or ''}:{q or ''}:{provider or ''}:{limit}:{offset}"
         )
         cached = local_response_cache.get(cache_key)
@@ -663,8 +662,7 @@ class EvidenceService:
                 "You do not have permission to read evidence in this project.",
                 code="FORBIDDEN",
             )
-        bind = self._session.get_bind()
-        cache_key = f"ev_metrics:{project_ctx.project.id}:{id(bind)}"
+        cache_key = f"ev_metrics:{project_ctx.project.id}:{project_ctx.principal.user.id}"
         cached = local_response_cache.get(cache_key)
         if cached is not None:
             try:

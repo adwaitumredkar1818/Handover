@@ -8,12 +8,38 @@
 
 import React, { memo } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { CheckCircle2 } from "lucide-react";
+import {
+  Boxes,
+  Sparkles,
+  Zap,
+  Workflow,
+  CheckCircle2,
+  Cpu,
+  Layers,
+  Network,
+  Database,
+  BookOpen,
+  type LucideIcon,
+} from "lucide-react";
 import {
   AMELIORATE_PRIMARY_SPOTLIGHT,
   AMELIORATE_SECONDARY_SPOTLIGHT,
   type AmeliorateNodeData,
 } from "./ameliorateAdapter";
+
+function getNodeCategoryIcon(typeLabel: string): LucideIcon {
+  const norm = typeLabel.toLowerCase();
+  if (norm.includes("project")) return Boxes;
+  if (norm.includes("feature")) return Sparkles;
+  if (norm.includes("requirement")) return Zap;
+  if (norm.includes("workflow")) return Workflow;
+  if (norm.includes("work item")) return CheckCircle2;
+  if (norm.includes("database")) return Database;
+  if (norm.includes("api")) return Network;
+  if (norm.includes("service")) return Layers;
+  if (norm.includes("library") || norm.includes("doc")) return BookOpen;
+  return Cpu;
+}
 
 function AmeliorateFlowNodeBase({ data, selected }: NodeProps) {
   const { raw, theme, spotlight } = data as AmeliorateNodeData;
@@ -31,9 +57,11 @@ function AmeliorateFlowNodeBase({ data, selected }: NodeProps) {
     raw.status === "HUMAN_VERIFIED" ||
     raw.status === "verified_implementation";
 
+  const IconComponent = getNodeCategoryIcon(theme.typeLabel);
+
   return (
     <div
-      className="group relative flex w-[204px] min-h-[68px] flex-col rounded-lg border-2 bg-white shadow-xs transition-all pointer-events-auto cursor-pointer select-none"
+      className="group relative flex w-[196px] min-h-[64px] flex-col rounded-lg border-[1.5px] bg-white shadow-xs transition-all pointer-events-auto cursor-pointer select-none"
       style={{
         borderColor,
         boxShadow: isPrimary
@@ -62,11 +90,11 @@ function AmeliorateFlowNodeBase({ data, selected }: NodeProps) {
       {/* Top row: Ameliorate colored top-left badge flush to top-left */}
       <div className="flex h-5 items-center justify-between">
         <div
-          className="flex h-5 items-center gap-1 rounded-tl-[6px] rounded-br-[6px] px-2 text-[11px] font-semibold leading-none"
+          className="flex h-5 items-center rounded-tl-[6.5px] rounded-br-[6.5px] px-2 text-[10.5px] font-semibold leading-none tracking-tight gap-1"
           style={{ backgroundColor: theme.badgeBg, color: theme.badgeText }}
         >
-          <span>{theme.iconSymbol}</span>
-          <span className="truncate max-w-[124px]">{theme.typeLabel}</span>
+          <IconComponent className="size-3 shrink-0" />
+          <span className="truncate max-w-[130px]">{theme.typeLabel}</span>
         </div>
 
         {isVerified && (
@@ -77,7 +105,7 @@ function AmeliorateFlowNodeBase({ data, selected }: NodeProps) {
       </div>
 
       {/* Middle body: clean centered Ameliorate node text */}
-      <div className="flex flex-1 items-center justify-center px-3 py-2">
+      <div className="flex flex-1 items-center justify-center px-3 py-1.5">
         <p className="text-[13px] font-medium leading-snug text-slate-800 text-center line-clamp-2">
           {raw.label}
         </p>

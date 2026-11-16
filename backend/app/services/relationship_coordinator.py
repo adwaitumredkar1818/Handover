@@ -285,6 +285,13 @@ class RelationshipCoordinatorService:
                         )
                     )
                 for c_ent in comp_entities or []:
+                    if c_ent.id == t_ent.id:
+                        continue
+                    if c_ent.canonical_name.strip().lower() == t_ent.canonical_name.strip().lower():
+                        continue
+                    c_canon = c_ent.canonical_name.strip().lower()
+                    if c_canon in {"postgresql", "chromadb", "supabase", "ollama", "sqlite"}:
+                        continue
                     if (c_ent.id, t_ent.id) not in seen_comp_tech_pairs:
                         seen_comp_tech_pairs.add((c_ent.id, t_ent.id))
                         pending_drafts.append(
@@ -701,11 +708,24 @@ class RelationshipCoordinatorService:
                     seeded += 2
                     comp_entities_by_ev.setdefault(ev_id, []).extend([src_ent, tgt_ent])
                     if src_ent.id != tgt_ent.id:
+                        tgt_canon = tgt_label.strip().lower()
+                        if "route" in tgt_canon or "api" in tgt_canon:
+                            r_type = RelationshipType.CALLS.value
+                        elif "auth" in tgt_canon:
+                            r_type = RelationshipType.AUTHENTICATES_WITH.value
+                        elif "storage" in tgt_canon or "postgres" in tgt_canon:
+                            r_type = RelationshipType.READS_FROM.value
+                        elif "ollama" in tgt_canon or "model" in tgt_canon:
+                            r_type = RelationshipType.USES_MODEL.value
+                        elif "git" in tgt_canon or "jira" in tgt_canon:
+                            r_type = RelationshipType.INTEGRATES_WITH.value
+                        else:
+                            r_type = RelationshipType.DEPENDS_ON.value
                         pending_drafts.append(
                             DiscoveredRelationshipDraft(
                                 source_entity_id=src_ent.id,
                                 target_entity_id=tgt_ent.id,
-                                relationship_type=RelationshipType.DEPENDS_ON.value,
+                                relationship_type=r_type,
                                 relationship_basis=rel_basis,
                                 confidence_score=conf,
                                 discovery_method="knowledge_payload",
