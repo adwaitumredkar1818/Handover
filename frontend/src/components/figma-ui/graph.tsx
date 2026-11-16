@@ -155,7 +155,15 @@ export function KnowledgeCanvas({
     <div ref={boxRef} className={cn('relative h-full w-full overflow-hidden', className)}>
       <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" className={cn('h-full w-full touch-none select-none', isDragging ? 'cursor-grabbing' : 'cursor-grab')}
         onPointerDown={(e) => { if ((e.target as Element).closest('[data-node]')) return; (e.target as Element).setPointerCapture?.(e.pointerId); drag.current = { x: e.clientX, y: e.clientY, vx: vp.x, vy: vp.y }; setIsDragging(true) }}
-        onPointerMove={(e) => { if (!drag.current) return; const r = svgRef.current!.getBoundingClientRect(); const s = W / r.width; setVp((v) => ({ ...v, x: drag.current!.vx + (e.clientX - drag.current!.x) * s, y: drag.current!.vy + (e.clientY - drag.current!.y) * s })) }}
+        onPointerMove={(e) => {
+          const currentDrag = drag.current;
+          if (!currentDrag || !svgRef.current) return;
+          const r = svgRef.current.getBoundingClientRect();
+          const s = W / r.width;
+          const dx = (e.clientX - currentDrag.x) * s;
+          const dy = (e.clientY - currentDrag.y) * s;
+          setVp((v) => ({ ...v, x: currentDrag.vx + dx, y: currentDrag.vy + dy }));
+        }}
         onPointerUp={() => { drag.current = null; setIsDragging(false) }} onPointerLeave={() => { drag.current = null; setIsDragging(false) }}
         role="img" aria-label={`Knowledge graph focused on ${c.label}`}>
         <g transform={`translate(${vp.x + (W / 2) * (1 - vp.k)} ${vp.y + (H / 2) * (1 - vp.k)}) scale(${vp.k})`} style={{ transition: isDragging ? 'none' : 'transform .3s cubic-bezier(.22,1,.36,1)' }}>
