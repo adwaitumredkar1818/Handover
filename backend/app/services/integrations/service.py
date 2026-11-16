@@ -1208,8 +1208,28 @@ class SourceIntegrationService:
                         include_comments=item.get("include_comments", True),
                         include_code=item.get("include_code", False),
                     )
-                    res = self.create_github_mapping(project_ctx=project_ctx, request=gh_req)
-                    created.append(res)
+                    try:
+                        res = self.create_github_mapping(project_ctx=project_ctx, request=gh_req)
+                        created.append(res)
+                    except ConflictError:
+                        existing_mappings = self._repo.list_project_mappings(
+                            project_id=project_ctx.project.id,
+                            provider="github",
+                        )
+                        target_key = f"{gh_req.owner}/{gh_req.repo}".lower()
+                        matched = next(
+                            (
+                                m
+                                for m in existing_mappings
+                                if (m.external_resource_key or "").lower() == target_key
+                                or (m.external_resource_name or "").lower() == gh_req.repo.lower()
+                            ),
+                            None,
+                        )
+                        if matched:
+                            created.append(ProjectSourceMappingResponse.model_validate(matched))
+                        else:
+                            raise
                 elif item_provider == "jira":
                     jira_req = CreateJiraMappingRequest(
                         source_connection_id=request.source_connection_id,
@@ -1220,8 +1240,28 @@ class SourceIntegrationService:
                         include_links=item.get("include_links", True),
                         include_changelog=item.get("include_changelog", True),
                     )
-                    res = self.create_jira_mapping(project_ctx=project_ctx, request=jira_req)
-                    created.append(res)
+                    try:
+                        res = self.create_jira_mapping(project_ctx=project_ctx, request=jira_req)
+                        created.append(res)
+                    except ConflictError:
+                        existing_mappings = self._repo.list_project_mappings(
+                            project_id=project_ctx.project.id,
+                            provider="jira",
+                        )
+                        target_key = jira_req.project_key.lower()
+                        matched = next(
+                            (
+                                m
+                                for m in existing_mappings
+                                if (m.external_resource_key or "").lower() == target_key
+                                or (m.external_resource_name or "").lower() == target_key
+                            ),
+                            None,
+                        )
+                        if matched:
+                            created.append(ProjectSourceMappingResponse.model_validate(matched))
+                        else:
+                            raise
                 elif item_provider == "slack":
                     slack_req = CreateSlackMappingRequest(
                         source_connection_id=request.source_connection_id,
@@ -1230,8 +1270,27 @@ class SourceIntegrationService:
                         include_threads=item.get("include_threads", True),
                         include_files=item.get("include_files", False),
                     )
-                    res = self.create_slack_mapping(project_ctx=project_ctx, request=slack_req)
-                    created.append(res)
+                    try:
+                        res = self.create_slack_mapping(project_ctx=project_ctx, request=slack_req)
+                        created.append(res)
+                    except ConflictError:
+                        existing_mappings = self._repo.list_project_mappings(
+                            project_id=project_ctx.project.id,
+                            provider="slack",
+                        )
+                        target_key = slack_req.channel_id.lower()
+                        matched = next(
+                            (
+                                m
+                                for m in existing_mappings
+                                if (m.external_resource_key or "").lower() == target_key
+                            ),
+                            None,
+                        )
+                        if matched:
+                            created.append(ProjectSourceMappingResponse.model_validate(matched))
+                        else:
+                            raise
             except Exception as exc:
                 failed += 1
                 identifier = item.get("full_name") or item.get("key") or item.get("name") or "item"

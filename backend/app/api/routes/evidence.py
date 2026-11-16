@@ -214,10 +214,18 @@ def delete_evidence_item(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue document extraction reprocessing for a failed or partial item",
 )
+@router.post(
+    "/projects/{project_id}/evidence/{evidence_id}/reprocess",
+    response_model=BackgroundJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Queue document extraction reprocessing for a failed or partial item (project alias)",
+    include_in_schema=False,
+)
 def reprocess_evidence_item(
     evidence_id: uuid.UUID,
     principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
     evidence_service: Annotated[EvidenceService, Depends(get_evidence_service)],
+    project_id: uuid.UUID | None = None,
 ) -> BackgroundJobResponse:
     """Enqueue a clean retry job using the preserved encrypted upload object."""
     return evidence_service.reprocess_evidence(

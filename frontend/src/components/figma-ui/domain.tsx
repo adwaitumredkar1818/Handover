@@ -168,8 +168,12 @@ export function useProject(projectId?: string) {
 }
 
 export function ProjectNotFound() {
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => {
+    setMounted(true)
+  }, [])
   const { isLoadingProjects, isLoadingAuth } = useLiveApp()
-  if (isLoadingProjects || isLoadingAuth) {
+  if (!mounted || isLoadingProjects || isLoadingAuth) {
     return (
       <div className="flex h-64 flex-col items-center justify-center gap-3">
         <div className="size-6 animate-spin rounded-full border-2 border-brand border-t-transparent" />

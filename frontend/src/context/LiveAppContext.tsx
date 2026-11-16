@@ -9,6 +9,7 @@ import React, {
   useRef,
   type ReactNode,
 } from "react";
+import { usePathname } from "next/navigation";
 import { api, setStoredToken, setStoredUser, getStoredUser, ApiError } from "../lib/api";
 import { createClient as createSupabaseClient } from "../lib/supabase/client";
 import type {
@@ -175,6 +176,7 @@ const LiveAppContext = createContext<LiveAppContextType | undefined>(undefined);
 
 export function LiveAppProvider({ children }: { children: ReactNode }) {
   // Auth state
+  const pathname = usePathname();
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
@@ -560,6 +562,43 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       active = false;
     };
   }, [activeOrg, refreshProjects]);
+
+  // Synchronize active project from URL pathname whenever navigating to /projects/:id
+  useEffect(() => {
+    if (!pathname) return;
+    const match = pathname.match(/^\/projects\/([a-zA-Z0-9_-]+)/);
+    if (!match || !match[1] || match[1] === "new") return;
+    const urlProjectId = match[1];
+
+    if (activeProject?.id === urlProjectId) return;
+
+    const matchedProject = projects.find(
+      (p) => p.id === urlProjectId || p.slug === urlProjectId
+    );
+
+    if (matchedProject) {
+      setActiveProject(matchedProject);
+    } else {
+      let cancelled = false;
+      api.projects
+        .get(urlProjectId)
+        .then((proj) => {
+          if (!cancelled && proj) {
+            setActiveProject(proj);
+            if (proj.organisation_id && activeOrg?.id !== proj.organisation_id) {
+              const org = organisations.find((o) => o.id === proj.organisation_id);
+              if (org) setActiveOrg(org);
+            }
+          }
+        })
+        .catch(() => {
+          // Ignore invalid project ID in URL
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+  }, [pathname, projects, activeProject?.id, organisations, activeOrg?.id, setActiveProject, setActiveOrg]);
 
   // Load project overview
   const refreshOverview = useCallback(async () => {
