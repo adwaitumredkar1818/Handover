@@ -511,8 +511,7 @@ def trigger_reconstruction(
         )
     _invalidate_project_graph_caches(project_ctx.project.id)
     db_session.commit()
-    db_session.refresh(run)
-    return RelationshipReconstructionRunResponse.model_validate(run)
+    return RelationshipReconstructionRunResponse.model_validate(run, from_attributes=True)
 
 
 @router.get(

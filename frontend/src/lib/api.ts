@@ -1528,6 +1528,16 @@ export const api = {
         method: "POST",
       });
     },
+    async assessTarget(
+      projectId: string,
+      targetType: "knowledge_item" | "relationship",
+      targetId: string
+    ): Promise<Record<string, unknown>> {
+      return request(
+        `/projects/${projectId}/verification/assess?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`,
+        { method: "POST" }
+      );
+    },
   },
   conflicts: {
     async getSummary(projectId: string): Promise<{

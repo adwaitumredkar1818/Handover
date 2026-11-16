@@ -28,7 +28,7 @@ class TimelineEventResponse(BaseSchema):
     primary_domain: str
     category: str
     timestamp: datetime
-    timestamp_precision: Literal["second", "day"]
+    timestamp_precision: Literal["second", "day", "unknown"]
     source_provider: str
     source_url: str | None = None
     author_label: str | None = None
@@ -57,13 +57,13 @@ class ProjectTimelineResponse(BaseSchema):
 
 def _parse_flexible_timestamp(
     raw_val: Any, fallback: datetime
-) -> tuple[datetime, Literal["second", "day"]]:
+) -> tuple[datetime, Literal["second", "day", "unknown"]]:
     """Parse string or datetime into a UTC datetime and precision indicator."""
     if isinstance(raw_val, datetime):
         dt = raw_val if raw_val.tzinfo else raw_val.replace(tzinfo=UTC)
         return dt, "second"
 
-    if isinstance(raw_val, str):
+    if isinstance(raw_val, str) and raw_val.strip():
         val_str = raw_val.strip()
         if _ISO_DAY_RE.match(val_str):
             try:
@@ -81,7 +81,7 @@ def _parse_flexible_timestamp(
             pass
 
     fb_dt = fallback if fallback.tzinfo else fallback.replace(tzinfo=UTC)
-    return fb_dt, "second"
+    return fb_dt, "unknown"
 
 
 def _derive_event_type(category: str, payload: dict[str, Any], status: str | None) -> str:
@@ -171,15 +171,25 @@ class ProjectTimelineService:
             attribution = dict(item.source_attribution_json or {})
             confidence = dict(item.confidence_metadata_json or {})
 
-            # Extract the most meaningful date for the event
+            # First accessible evidence link for direct navigation and provenance
+            primary_link = res.accessible_links[0] if res.accessible_links else None
+            link_meta = dict(primary_link.source_metadata_json or {}) if primary_link else {}
+
+            # Extract the most meaningful date for the event from source provenance
             raw_date = (
                 item.source_observed_at
+                or link_meta.get("source_created_at")
+                or link_meta.get("author_date")
+                or link_meta.get("commit_date")
+                or link_meta.get("created_at")
                 or payload.get("event_timestamp")
                 or payload.get("decision_date")
                 or payload.get("completed_date")
                 or payload.get("reported_date")
                 or payload.get("start_or_observed_date")
                 or payload.get("created_date")
+                or attribution.get("source_timestamp")
+                or attribution.get("observed_at")
             )
             event_dt, precision = _parse_flexible_timestamp(raw_date, fallback=item.created_at)
 
@@ -196,16 +206,14 @@ class ProjectTimelineService:
             if event_type and event_type.lower() != derived_type.lower():
                 continue
 
-            # First accessible evidence link for direct navigation
-            primary_link = res.accessible_links[0] if res.accessible_links else None
             source_url = (
-                primary_link.source_metadata_json.get("source_url")
-                if primary_link and primary_link.source_metadata_json
+                link_meta.get("source_url")
+                if link_meta
                 else attribution.get("source_url")
             )
             provider = (
-                primary_link.source_metadata_json.get("source_provider")
-                if primary_link and primary_link.source_metadata_json
+                link_meta.get("source_provider")
+                if link_meta
                 else attribution.get("source_provider", "unknown")
             )
 

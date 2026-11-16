@@ -48,7 +48,6 @@ _GRAPH_ALLOWED_ENTITY_TYPES: dict[str, set[str]] = {
         EntityType.DATABASE.value,
         EntityType.TECHNICAL_COMPONENT.value,
         EntityType.ARCHITECTURE_COMPONENT.value,
-        EntityType.DOCUMENT.value,
     },
     "system-architecture": {
         EntityType.PROJECT.value,
@@ -58,17 +57,14 @@ _GRAPH_ALLOWED_ENTITY_TYPES: dict[str, set[str]] = {
         EntityType.SERVICE.value,
         EntityType.API.value,
         EntityType.DATABASE.value,
-        EntityType.TECHNOLOGY.value,
     },
     "features-workflows": {
         EntityType.FEATURE.value,
         EntityType.REQUIREMENT.value,
         EntityType.OPERATIONAL_PROCEDURE.value,
+        EntityType.WORK_ITEM.value,
         EntityType.TECHNICAL_COMPONENT.value,
         EntityType.ARCHITECTURE_COMPONENT.value,
-        EntityType.PULL_REQUEST.value,
-        EntityType.COMMIT.value,
-        EntityType.WORK_ITEM.value,
     },
 }
 
@@ -415,41 +411,34 @@ class KnowledgeGraphProjectionService:
             EntityType.SERVICE.value,
             EntityType.API.value,
         }
-        tech_id_set = {e.id for e in entities if e.entity_type in tech_node_types}
-        comp_id_set = {e.id for e in entities if e.entity_type in arch_component_types}
-        feature_core_types = {
-            EntityType.FEATURE.value,
-            EntityType.REQUIREMENT.value,
-            EntityType.OPERATIONAL_PROCEDURE.value,
-            EntityType.WORK_ITEM.value,
+
+        # Index canonical names across types for clean cross-type deduplication
+        tech_canon_names: set[str] = {
+            e.canonical_name.strip().lower() for e in entities if e.entity_type in tech_node_types
         }
-        feature_aux_types = {
-            EntityType.COMMIT.value,
-            EntityType.PULL_REQUEST.value,
-            EntityType.TECHNICAL_COMPONENT.value,
-            EntityType.ARCHITECTURE_COMPONENT.value,
+        comp_canon_names: set[str] = {
+            e.canonical_name.strip().lower() for e in entities if e.entity_type in arch_component_types
         }
-        feature_core_id_set = {e.id for e in entities if e.entity_type in feature_core_types}
-        feature_linked_aux_ids: set[uuid.UUID] = set()
-        tech_linked_comp_ids: set[uuid.UUID] = set()
-        configured_doc_ids: set[uuid.UUID] = set()
-        arch_linked_tech_ids: set[uuid.UUID] = set()
-        for e_edge in valid_edges:
-            if e_edge.relationship_type == "CONFIGURED_IN":
-                configured_doc_ids.add(e_edge.target)
-            if e_edge.source in tech_id_set and e_edge.target in comp_id_set:
-                tech_linked_comp_ids.add(e_edge.target)
-                arch_linked_tech_ids.add(e_edge.source)
-            elif e_edge.target in tech_id_set and e_edge.source in comp_id_set:
-                tech_linked_comp_ids.add(e_edge.source)
-                arch_linked_tech_ids.add(e_edge.target)
-            if e_edge.source in feature_core_id_set:
-                feature_linked_aux_ids.add(e_edge.target)
-            if e_edge.target in feature_core_id_set:
-                feature_linked_aux_ids.add(e_edge.source)
+
+        # Identify which components have explicit technology links for pure technology-stack views
+        tech_entity_ids: set[uuid.UUID] = {e.id for e in entities if e.entity_type in tech_node_types}
+        comp_ids_with_tech_links: set[uuid.UUID] = set()
+        for edge in valid_edges:
+            src_is_tech = edge.source in tech_entity_ids
+            dst_is_tech = edge.target in tech_entity_ids
+            if src_is_tech and not dst_is_tech:
+                comp_ids_with_tech_links.add(edge.target)
+            elif dst_is_tech and not src_is_tech:
+                comp_ids_with_tech_links.add(edge.source)
+
+        _NOISE_FEATURE_TOKENS = {
+            "feat", "fix", "chore", "docs", "refactor", "style", "test", "perf", "ci", "build", "merge"
+        }
 
         candidate_nodes: list[KnowledgeGraphNode] = []
         project_root_node: KnowledgeGraphNode | None = None
+        seen_canonical_keys: set[str] = set()
+
         for ent in entities:
             ev_ids = sorted(node_ev_ids.get(ent.id, set()), key=str)
             ki_st = (
@@ -458,6 +447,8 @@ class KnowledgeGraphProjectionService:
                 else None
             )
             ent_aliases = aliases_by_ent.get(ent.id, [])
+            norm_name = ent.canonical_name.strip().lower()
+
             if ent.entity_type == EntityType.PROJECT.value:
                 project_root_node = self._to_graph_node(
                     ent,
@@ -470,24 +461,38 @@ class KnowledgeGraphProjectionService:
             if not ev_ids:
                 # Fail-closed: strip nodes with zero accessible evidence support
                 continue
-            # For technology-stack, strip unconnected generic components and non-CONFIGURED_IN documents
+
+            # Strict graph-specific semantic projections
             if graph_type == "technology-stack":
-                if ent.entity_type == EntityType.DOCUMENT.value and ent.id not in configured_doc_ids:
+                # Exclude raw documents from technology stack
+                if ent.entity_type == EntityType.DOCUMENT.value:
                     continue
-                if ent.entity_type in arch_component_types and ent.id not in tech_linked_comp_ids:
+                # If an entity is typed as a component but shares a name with a technology, prefer the technology
+                if ent.entity_type in arch_component_types and norm_name in tech_canon_names:
                     continue
-            # For system-architecture, keep technology nodes only when tied to a component/database layer
-            if graph_type == "system-architecture" and ent.entity_type == EntityType.TECHNOLOGY.value:
-                tech_cat = str((ent.metadata_json or {}).get("technology_category") or "").lower()
-                if ent.id not in arch_linked_tech_ids and tech_cat != "database":
+                # Only include components that actually connect to technologies in this project
+                if ent.entity_type in arch_component_types and ent.id not in comp_ids_with_tech_links:
                     continue
-            # For features-workflows, strip unlinked raw commits/PRs/components
-            if (
-                graph_type == "features-workflows"
-                and ent.entity_type in feature_aux_types
-                and ent.id not in feature_linked_aux_ids
-            ):
+            elif graph_type == "system-architecture":
+                # Prefer component/service/database over generic duplicate technology entity
+                if ent.entity_type in tech_node_types and norm_name in comp_canon_names:
+                    continue
+            elif graph_type == "features-workflows":
+                # Reject conventional commit noise, raw PR titles, and commit hashes as features
+                if norm_name in _NOISE_FEATURE_TOKENS:
+                    continue
+                if norm_name.startswith("pr ") and "#" in norm_name:
+                    continue
+                if "@" in norm_name and len(norm_name.split("@")[-1]) >= 7:
+                    continue
+                if "/" in norm_name and " " not in norm_name:
+                    continue
+
+            # Prevent duplicate entities with identical lowercased canonical names in the same graph
+            if norm_name in seen_canonical_keys:
                 continue
+            seen_canonical_keys.add(norm_name)
+
             node = self._to_graph_node(
                 ent,
                 graph_type=graph_type,
@@ -516,9 +521,25 @@ class KnowledgeGraphProjectionService:
         next_cursor = str(offset + limit) if offset + limit < len(candidate_nodes) else None
 
         visible_ids = {n.id for n in sliced_nodes}
-        filtered_edges = [
-            e for e in valid_edges if e.source in visible_ids and e.target in visible_ids
-        ]
+        node_name_by_id = {n.id: n.label.strip().lower() for n in sliced_nodes}
+
+        # Filter out self-loops (including cross-entity duplicates) and deduplicate parallel edges
+        filtered_edges: list[KnowledgeGraphEdge] = []
+        seen_edge_pairs: set[tuple[str, str]] = set()
+
+        for e in valid_edges:
+            if e.source not in visible_ids or e.target not in visible_ids:
+                continue
+            src_name = node_name_by_id.get(e.source)
+            dst_name = node_name_by_id.get(e.target)
+            if src_name and dst_name and src_name == dst_name:
+                # Disallow self-loops
+                continue
+            pair_key = (f"{e.source}:{e.target}", e.relationship_type)
+            if pair_key in seen_edge_pairs:
+                continue
+            seen_edge_pairs.add(pair_key)
+            filtered_edges.append(e)
 
         cat_counts = Counter(n.category or n.entity_type for n in sliced_nodes)
         resp = KnowledgeGraphProjectionResponse(

@@ -69,18 +69,16 @@ export function AmeliorateFlowchartCanvas({
       onEdgesChange={onEdgesChange}
       onNodeClick={(_, node) => onSelectNode(node)}
       fitView
-      fitViewOptions={{ padding: 0.2 }}
-      minZoom={0.2}
-      maxZoom={1.75}
+      fitViewOptions={{ padding: 0.15, maxZoom: 1.1, minZoom: 0.4 }}
     >
-      <Background gap={18} size={1} color="#cbd5e1" />
+      <Background gap={20} size={1.2} color="#cbd5e1" />
       <Controls />
       <MiniMap
         nodeColor={(n) => {
           const data = n.data as AmeliorateNodeData | undefined;
           return data?.theme?.borderColor || "#315fba";
         }}
-        maskColor="rgba(248, 250, 252, 0.72)"
+        maskColor="rgba(248, 250, 252, 0.75)"
       />
     </ReactFlow>
   );

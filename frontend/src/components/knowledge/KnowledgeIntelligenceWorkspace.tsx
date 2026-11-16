@@ -289,23 +289,18 @@ export function KnowledgeIntelligenceWorkspace({
   const handleVerifyFinding = async (findingId: string, decision: "approve" | "flag" | "reject") => {
     setActionMessage(null);
     try {
-      let queue = await api.verification.getQueue(projectId, undefined, 1);
-      let kCase = queue.items.find((c) => c.target_id === findingId);
-      if (!kCase) {
-        await api.verification.assessAll(projectId);
-        queue = await api.verification.getQueue(projectId, undefined, 1);
-        kCase = queue.items.find((c) => c.target_id === findingId);
-      }
-      if (!kCase) {
-        setActionMessage("No verification case exists yet for this finding. Open Verification Center.");
+      const kCase = await api.verification.assessTarget(projectId, "knowledge_item", findingId);
+      const caseId = kCase?.id ? String(kCase.id) : null;
+      if (!caseId) {
+        setActionMessage("Could not retrieve verification case for this finding.");
         return;
       }
       if (decision === "approve") {
-        await api.verification.approveCase(projectId, kCase.id, "Verified in Knowledge Intelligence");
+        await api.verification.approveCase(projectId, caseId, "Verified in Knowledge Intelligence");
       } else if (decision === "flag") {
-        await api.verification.markUnresolved(projectId, kCase.id, "Flagged in Knowledge Intelligence");
+        await api.verification.markUnresolved(projectId, caseId, "Flagged in Knowledge Intelligence");
       } else {
-        await api.verification.rejectCase(projectId, kCase.id, "Rejected in Knowledge Intelligence");
+        await api.verification.rejectCase(projectId, caseId, "Rejected in Knowledge Intelligence");
       }
       setActionMessage("Verification decision recorded.");
       await Promise.all([loadDomains(), refreshFindings(), refreshVerification()]);
@@ -762,7 +757,7 @@ export function KnowledgeIntelligenceWorkspace({
             <p className="text-xs text-slate-600 mt-2 leading-relaxed">
               {String(selectedFinding.structured_summary || selectedFinding.summary || "")}
             </p>
-            <div className="mt-4 flex gap-2">
+            <div className="mt-4 flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => handleVerifyFinding(String(selectedFinding.id), "approve")}
@@ -772,8 +767,15 @@ export function KnowledgeIntelligenceWorkspace({
               </button>
               <button
                 type="button"
+                onClick={() => handleVerifyFinding(String(selectedFinding.id), "flag")}
+                className="flex-1 py-2 rounded-lg border border-amber-300 bg-amber-50 text-xs font-medium text-amber-800 hover:bg-amber-100"
+              >
+                Flag Finding
+              </button>
+              <button
+                type="button"
                 onClick={() => handleVerifyFinding(String(selectedFinding.id), "reject")}
-                className="flex-1 py-2 rounded-lg border border-red-200 text-xs font-medium text-red-600 hover:bg-red-50"
+                className="py-2 px-3 rounded-lg border border-red-200 text-xs font-medium text-red-600 hover:bg-red-50"
               >
                 Reject
               </button>

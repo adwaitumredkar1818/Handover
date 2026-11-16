@@ -46,20 +46,9 @@ export interface HandoverGraphEdge {
 export interface AmeliorateNodeTheme {
   borderColor: string;
   badgeBg: string;
+  badgeText: string;
   typeLabel: string;
-  iconKey:
-    | "project"
-    | "feature"
-    | "requirement"
-    | "workflow"
-    | "component"
-    | "technology"
-    | "database"
-    | "document"
-    | "work_item"
-    | "pull_request"
-    | "commit"
-    | "default";
+  iconSymbol: string;
 }
 
 export interface AmeliorateNodeData extends Record<string, unknown> {
@@ -73,114 +62,111 @@ export interface AmeliorateEdgeData extends Record<string, unknown> {
   spotlight: AmeliorateSpotlight;
 }
 
-export const AMELIORATE_PRIMARY_SPOTLIGHT = "#315fba";
+export const AMELIORATE_PRIMARY_SPOTLIGHT = "#4f46e5";
 export const AMELIORATE_SECONDARY_SPOTLIGHT = "#0284c7";
-export const AMELIORATE_DEFAULT_EDGE_COLOR = "#b1b1b7";
+export const AMELIORATE_DEFAULT_EDGE_COLOR = "#94a3b8";
 
+// Ameliorate palette accurately mapped to knowledge domains
 const ENTITY_THEME_MAP: Record<string, AmeliorateNodeTheme> = {
   project: {
-    borderColor: "#315fba",
-    badgeBg: "#bfdbfe",
+    borderColor: "#a855f7",
+    badgeBg: "#f3e8ff",
+    badgeText: "#6b21a8",
     typeLabel: "Project",
-    iconKey: "project",
+    iconSymbol: "🧩",
   },
   feature: {
-    borderColor: "#2563eb",
-    badgeBg: "#bfdbfe",
+    borderColor: "#22c55e",
+    badgeBg: "#dcfce7",
+    badgeText: "#15803d",
     typeLabel: "Feature",
-    iconKey: "feature",
+    iconSymbol: "🌿",
   },
   requirement: {
     borderColor: "#eab308",
-    badgeBg: "#fef08a",
+    badgeBg: "#fef9c3",
+    badgeText: "#854d0e",
     typeLabel: "Requirement",
-    iconKey: "requirement",
+    iconSymbol: "⚡",
   },
   operational_procedure: {
-    borderColor: "#22c55e",
-    badgeBg: "#bbf7d0",
+    borderColor: "#ec4899",
+    badgeBg: "#fce7f3",
+    badgeText: "#9d174d",
     typeLabel: "Workflow",
-    iconKey: "workflow",
+    iconSymbol: "🚨",
   },
   work_item: {
     borderColor: "#0ea5e9",
-    badgeBg: "#bae6fd",
+    badgeBg: "#e0f2fe",
+    badgeText: "#0369a1",
     typeLabel: "Work Item",
-    iconKey: "work_item",
+    iconSymbol: "✓",
   },
   technical_component: {
     borderColor: "#14b8a6",
-    badgeBg: "#99f6e4",
+    badgeBg: "#ccfbf1",
+    badgeText: "#0f766e",
     typeLabel: "Component",
-    iconKey: "component",
+    iconSymbol: "✓",
   },
   architecture_component: {
     borderColor: "#0d9488",
-    badgeBg: "#99f6e4",
+    badgeBg: "#ccfbf1",
+    badgeText: "#115e59",
     typeLabel: "Architecture",
-    iconKey: "component",
+    iconSymbol: "✓",
   },
   service: {
-    borderColor: "#0284c7",
-    badgeBg: "#bae6fd",
+    borderColor: "#3b82f6",
+    badgeBg: "#dbeafe",
+    badgeText: "#1d4ed8",
     typeLabel: "Service",
-    iconKey: "component",
+    iconSymbol: "✓",
   },
   api: {
-    borderColor: "#06b6d4",
-    badgeBg: "#a5f3fc",
+    borderColor: "#6366f1",
+    badgeBg: "#e0e7ff",
+    badgeText: "#4338ca",
     typeLabel: "API",
-    iconKey: "component",
+    iconSymbol: "⚡",
   },
   technology: {
-    borderColor: "#16a34a",
-    badgeBg: "#bbf7d0",
+    borderColor: "#22c55e",
+    badgeBg: "#dcfce7",
+    badgeText: "#15803d",
     typeLabel: "Technology",
-    iconKey: "technology",
+    iconSymbol: "🌿",
   },
   framework: {
-    borderColor: "#0891b2",
-    badgeBg: "#a5f3fc",
+    borderColor: "#06b6d4",
+    badgeBg: "#cffafe",
+    badgeText: "#0e7490",
     typeLabel: "Framework",
-    iconKey: "technology",
+    iconSymbol: "⚡",
   },
   library: {
-    borderColor: "#22c55e",
-    badgeBg: "#bbf7d0",
+    borderColor: "#10b981",
+    badgeBg: "#d1fae5",
+    badgeText: "#047857",
     typeLabel: "Library",
-    iconKey: "technology",
+    iconSymbol: "🌿",
   },
   database: {
-    borderColor: "#f59e0b",
-    badgeBg: "#fde68a",
+    borderColor: "#eab308",
+    badgeBg: "#fef9c3",
+    badgeText: "#854d0e",
     typeLabel: "Database",
-    iconKey: "database",
-  },
-  document: {
-    borderColor: "#64748b",
-    badgeBg: "#e2e8f0",
-    typeLabel: "Document",
-    iconKey: "document",
-  },
-  pull_request: {
-    borderColor: "#3b82f6",
-    badgeBg: "#bfdbfe",
-    typeLabel: "Pull Request",
-    iconKey: "pull_request",
-  },
-  commit: {
-    borderColor: "#64748b",
-    badgeBg: "#e2e8f0",
-    typeLabel: "Commit",
-    iconKey: "commit",
+    iconSymbol: "⚡",
   },
 };
 
 const FALLBACK_THEME: AmeliorateNodeTheme = {
-  borderColor: "#315fba",
-  badgeBg: "#bfdbfe",
+  borderColor: "#22c55e",
+  badgeBg: "#dcfce7",
+  badgeText: "#15803d",
   typeLabel: "Node",
-  iconKey: "default",
+  iconSymbol: "✓",
 };
 
 export function resolveAmeliorateNodeTheme(node: HandoverGraphNode): AmeliorateNodeTheme {
@@ -208,14 +194,11 @@ const ENTITY_LAYER_RANK: Record<string, number> = {
   framework: 3,
   library: 3,
   database: 3,
-  pull_request: 3,
-  document: 4,
-  commit: 4,
 };
 
 /**
- * Compute Ameliorate-style layered flowchart positions and spotlight states
- * from The Handover's existing Knowledge Intelligence graph payload.
+ * Compute Ameliorate-style layered flowchart positions with balanced wrapping
+ * so nodes do not stretch infinitely across the screen and cause tiny zoom.
  */
 export function buildAmeliorateFlowchartElements(
   rawNodes: HandoverGraphNode[],
@@ -246,23 +229,56 @@ export function buildAmeliorateFlowchartElements(
     }
   }
 
-  const layerMap = new Map<string, number>();
+  // Dynamic topological leveling so children sit directly below their parents
+  const inDegree = new Map<string, number>();
+  const childrenMap = new Map<string, string[]>();
   for (const n of rawNodes) {
-    layerMap.set(n.id, ENTITY_LAYER_RANK[n.entity_type.toLowerCase()] ?? 2);
+    inDegree.set(n.id, 0);
+    childrenMap.set(n.id, []);
+  }
+  for (const e of validEdges) {
+    inDegree.set(e.target, (inDegree.get(e.target) || 0) + 1);
+    childrenMap.get(e.source)?.push(e.target);
   }
 
-  // Relax ranks along edges up to 4 passes so connected targets sit below sources
-  for (let pass = 0; pass < 4; pass++) {
-    let changed = false;
-    for (const e of validEdges) {
-      const srcRank = layerMap.get(e.source) ?? 0;
-      const dstRank = layerMap.get(e.target) ?? 0;
-      if (dstRank <= srcRank && srcRank < 6) {
-        layerMap.set(e.target, srcRank + 1);
-        changed = true;
+  const layerMap = new Map<string, number>();
+  const queue: { id: string; depth: number }[] = [];
+
+  // Project entity always occupies root level 0 if present
+  const projectNode = rawNodes.find((n) => n.entity_type.toLowerCase() === "project");
+  if (projectNode) {
+    layerMap.set(projectNode.id, 0);
+    queue.push({ id: projectNode.id, depth: 0 });
+  }
+
+  // Other in-degree 0 nodes take root level 0
+  for (const n of rawNodes) {
+    if (n.id === projectNode?.id) continue;
+    if ((inDegree.get(n.id) || 0) === 0) {
+      layerMap.set(n.id, 0);
+      queue.push({ id: n.id, depth: 0 });
+    }
+  }
+
+  // BFS propagation: child depth = parent depth + 1
+  while (queue.length > 0) {
+    const { id, depth } = queue.shift()!;
+    const children = childrenMap.get(id) || [];
+    for (const childId of children) {
+      const curDepth = layerMap.get(childId);
+      const nextDepth = depth + 1;
+      if (curDepth === undefined || curDepth < nextDepth) {
+        layerMap.set(childId, nextDepth);
+        queue.push({ id: childId, depth: nextDepth });
       }
     }
-    if (!changed) break;
+  }
+
+  // Any remaining disconnected nodes sit on level 1
+  for (const n of rawNodes) {
+    if (!layerMap.has(n.id)) {
+      layerMap.set(n.id, 1);
+    }
   }
 
   const byLayer = new Map<number, HandoverGraphNode[]>();
@@ -274,36 +290,47 @@ export function buildAmeliorateFlowchartElements(
   }
 
   const sortedLayers = Array.from(byLayer.keys()).sort((a, b) => a - b);
-  const NODE_COL_GAP = 228;
-  const NODE_ROW_GAP = 148;
-  const xPosById = new Map<string, number>();
-  const maxCols = Math.max(...sortedLayers.map((l) => (byLayer.get(l) || []).length), 1);
-  const canvasCenterWidth = (maxCols - 1) * NODE_COL_GAP;
+  const NODE_COL_GAP = 240;
+  const NODE_ROW_GAP = 140;
+  const MAX_COLS_PER_ROW = 4;
 
-  const nodes: Node<AmeliorateNodeData>[] = [];
-  sortedLayers.forEach((layerIdx, rowIdx) => {
-    const items = [...(byLayer.get(layerIdx) || [])];
-    items.sort((a, b) => {
+  // Flatten layers with row wrapping so wide tiers form balanced sub-rows
+  interface LayoutRow {
+    items: HandoverGraphNode[];
+    y: number;
+  }
+
+  const layoutRows: LayoutRow[] = [];
+  let currentY = 40;
+
+  sortedLayers.forEach((layerIdx) => {
+    const rawItems = [...(byLayer.get(layerIdx) || [])];
+    rawItems.sort((a, b) => {
       const aParents = incoming.get(a.id) || [];
       const bParents = incoming.get(b.id) || [];
-      const aAvg =
-        aParents.length > 0
-          ? aParents.reduce((sum, p) => sum + (xPosById.get(p) ?? 0), 0) / aParents.length
-          : 0;
-      const bAvg =
-        bParents.length > 0
-          ? bParents.reduce((sum, p) => sum + (xPosById.get(p) ?? 0), 0) / bParents.length
-          : 0;
-      if (aAvg !== bAvg) return aAvg - bAvg;
+      if (aParents.length !== bParents.length) return bParents.length - aParents.length;
       return a.label.localeCompare(b.label);
     });
 
-    const rowWidth = (items.length - 1) * NODE_COL_GAP;
-    const startX = (canvasCenterWidth - rowWidth) / 2 + 40;
-    items.forEach((item, colIdx) => {
+    // Chunk into sub-rows of at most MAX_COLS_PER_ROW
+    for (let i = 0; i < rawItems.length; i += MAX_COLS_PER_ROW) {
+      const chunk = rawItems.slice(i, i + MAX_COLS_PER_ROW);
+      layoutRows.push({ items: chunk, y: currentY });
+      currentY += NODE_ROW_GAP;
+    }
+  });
+
+  const maxRowItems = Math.max(...layoutRows.map((r) => r.items.length), 1);
+  const canvasWidth = (maxRowItems - 1) * NODE_COL_GAP;
+
+  const nodes: Node<AmeliorateNodeData>[] = [];
+  layoutRows.forEach((row) => {
+    const rowWidth = (row.items.length - 1) * NODE_COL_GAP;
+    const startX = (canvasWidth - rowWidth) / 2 + 60;
+
+    row.items.forEach((item, colIdx) => {
       const x = startX + colIdx * NODE_COL_GAP;
-      const y = rowIdx * NODE_ROW_GAP + 40;
-      xPosById.set(item.id, x);
+      const y = row.y;
 
       const spotlight: AmeliorateSpotlight =
         selectedNodeId === item.id
@@ -341,12 +368,14 @@ export function buildAmeliorateFlowchartElements(
       type: "ameliorateEdge",
       source: e.source,
       target: e.target,
+      sourceHandle: "bottom",
+      targetHandle: "top",
       label: e.label,
       markerEnd: {
         type: MarkerType.ArrowClosed,
         color: strokeColor,
-        width: 15,
-        height: 15,
+        width: 14,
+        height: 14,
       },
       data: {
         raw: e,

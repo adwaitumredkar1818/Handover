@@ -210,7 +210,19 @@ export function filterVisibleGraphEdges<T extends { source: string; target: stri
 }
 
 export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps) {
-  const { members: projectMembers } = useLiveApp();
+  const { members: liveMembers } = useLiveApp();
+  const [fetchedMembers, setFetchedMembers] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    api.members.list(projectId).then((m) => {
+      if (Array.isArray(m) && m.length > 0) {
+        setFetchedMembers(m);
+      }
+    }).catch(() => {});
+  }, [projectId]);
+
+  const projectMembers = fetchedMembers.length > 0 ? fetchedMembers : liveMembers;
 
   const [activeTab, setActiveTab] = useState<RelationshipTab>("people");
   const [graphSubmode, setGraphSubmode] = useState<"contributors" | "entities">("contributors");

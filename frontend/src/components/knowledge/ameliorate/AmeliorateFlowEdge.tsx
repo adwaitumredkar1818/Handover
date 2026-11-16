@@ -1,6 +1,6 @@
 /**
  * Adapted from Ameliorate (https://github.com/amelioro/ameliorate)
- * src/web/topic/components/Edge/Edge.tsx, Edge.styles.tsx & DirectEdge.tsx
+ * src/web/topic/components/Edge/Edge.tsx & DirectEdge.tsx
  * Original MIT License: Copyright (c) 2022 Joel Keyser
  */
 
@@ -54,9 +54,9 @@ function AmeliorateFlowEdgeBase({
         markerEnd={markerEnd}
         style={{
           stroke,
-          strokeWidth: isPrimary ? 2 : 1.25,
+          strokeWidth: isPrimary ? 2 : 1.4,
           strokeDasharray: isInferred ? "5 4" : undefined,
-          opacity: isPrimary ? 1 : 0.9,
+          opacity: isPrimary ? 1 : 0.85,
         }}
       />
       {label && (
@@ -68,10 +68,10 @@ function AmeliorateFlowEdgeBase({
               pointerEvents: "none",
               zIndex: isPrimary ? 10 : 1,
             }}
-            className={`rounded px-1.5 py-0.5 text-[11px] leading-tight whitespace-nowrap ${
+            className={`px-1.5 py-0.5 text-[10px] leading-tight whitespace-nowrap rounded ${
               isPrimary
-                ? "bg-white font-medium text-blue-700 border border-blue-500 shadow-xs"
-                : "bg-white/95 font-normal text-slate-700"
+                ? "bg-white font-medium text-indigo-700 border border-indigo-400 shadow-xs"
+                : "bg-white/85 font-normal text-slate-500 border border-slate-100"
             }`}
           >
             {String(label).toLowerCase()}
