@@ -154,11 +154,14 @@ class KnowledgeRepository:
         self,
         *,
         project_id: uuid.UUID,
+        evidence_id: uuid.UUID | None = None,
         status: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[KnowledgeExtractionRun], int]:
         filters: list[Any] = [KnowledgeExtractionRun.project_id == project_id]
+        if evidence_id is not None:
+            filters.append(KnowledgeExtractionRun.evidence_id == evidence_id)
         if status is not None:
             filters.append(KnowledgeExtractionRun.status == status)
 

@@ -45,13 +45,13 @@ export default function RootLayout({
       <body className="antialiased font-sans" suppressHydrationWarning>
         <QueryProvider>
           <FigmaStoreProvider>
-            <LiveAppProvider>
-              <FigmaLiveBridge />
-              <Suspense fallback={<div className="min-h-screen bg-[#F6F8FC]" />}>
+            <Suspense fallback={<div className="min-h-screen bg-[#F6F8FC]" />}>
+              <LiveAppProvider>
+                <FigmaLiveBridge />
                 <AppLayout>{children}</AppLayout>
-              </Suspense>
-              <AgentationToolbar />
-            </LiveAppProvider>
+                <AgentationToolbar />
+              </LiveAppProvider>
+            </Suspense>
           </FigmaStoreProvider>
         </QueryProvider>
       </body>

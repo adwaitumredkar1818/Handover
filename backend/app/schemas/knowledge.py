@@ -635,3 +635,52 @@ class KnowledgeItemFilterQuery(BaseSchema):
         ):
             raise ValueError("date_from must not be after date_to.")
         return self
+
+
+class ExtractedFactItemResponse(BaseSchema):
+    """Atomic fact extracted by Qwen3 8B with source grounding and domain attribution."""
+
+    id: uuid.UUID
+    evidence_id: uuid.UUID
+    knowledge_item_id: uuid.UUID | None = None
+    chunk_id: uuid.UUID | None = None
+    title: str
+    description: str
+    category: str
+    primary_domain: str | None = None
+    confidence_level: str = "high"
+    grounding_score: float = 1.0
+    confidence_explanation: str | None = None
+    original_excerpt: str
+    page_or_section: str | None = None
+    validation_state: str = "candidate"
+    is_ai_extracted: bool = True
+    created_at: datetime
+
+
+class RawChunkItemResponse(BaseSchema):
+    """Raw document or source chunk for distinction from AI-extracted facts."""
+
+    id: uuid.UUID
+    chunk_index: int
+    page_number: int | None = None
+    chunk_type: str
+    char_count: int
+    token_estimate: int
+    text_content: str
+    indexing_status: str
+
+
+class EvidenceFactsResponse(BaseSchema):
+    """Combined payload of AI-extracted structured facts and raw source chunks."""
+
+    evidence_id: uuid.UUID
+    project_id: uuid.UUID
+    total_facts: int
+    ai_extracted_count: int
+    raw_chunk_count: int
+    latest_run_id: uuid.UUID | None = None
+    latest_run_status: str | None = None
+    facts: list[ExtractedFactItemResponse] = Field(default_factory=list)
+    raw_chunks: list[RawChunkItemResponse] = Field(default_factory=list)
+
