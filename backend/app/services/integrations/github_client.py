@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -241,6 +243,35 @@ class GitHubClient:
         self._gh = settings.integrations.github
         self._timeout = settings.integrations.http_timeout_seconds
         self._transport = transport
+        self._shared_client: Any = None
+
+    def __enter__(self) -> GitHubClient:
+        if self._shared_client is None or getattr(self._shared_client, "is_closed", True):
+            self._shared_client = create_integration_http_client(
+                timeout_seconds=self._timeout,
+                transport=self._transport,
+            )
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self._shared_client is not None:
+            try:
+                self._shared_client.close()
+            except Exception:
+                pass
+            self._shared_client = None
+
+    @contextmanager
+    def _get_http_client(self) -> Iterator[Any]:
+        """Provide a pooled HTTP client, reusing persistent connection if active."""
+        if self._shared_client is not None and not getattr(self._shared_client, "is_closed", False):
+            yield self._shared_client
+        else:
+            with create_integration_http_client(
+                timeout_seconds=self._timeout,
+                transport=self._transport,
+            ) as client:
+                yield client
 
     def _headers(self, access_token: str, *, etag: str | None = None) -> dict[str, str]:
         headers = {
@@ -262,10 +293,7 @@ class GitHubClient:
         access_token: str,
     ) -> dict[str, Any]:
         """Validate PAT and retrieve authenticated user profile and rate-limit metadata."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/user",
                 headers=self._headers(access_token),
@@ -298,10 +326,7 @@ class GitHubClient:
         max_branches: int = 50,
     ) -> list[dict[str, Any]]:
         """Fetch accessible branches for repository."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/branches",
                 headers=self._headers(access_token),
@@ -324,10 +349,7 @@ class GitHubClient:
         sha: str,
     ) -> dict[str, Any] | None:
         """Fetch individual commit detail including stats and changed files."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/commits/{sha}",
                 headers=self._headers(access_token),
@@ -348,10 +370,7 @@ class GitHubClient:
         max_items: int = 50,
     ) -> list[dict[str, Any]]:
         """Fetch supplementary contributor list and statistics."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/contributors",
                 headers=self._headers(access_token),
@@ -375,10 +394,7 @@ class GitHubClient:
         max_commits: int = 100,
     ) -> list[str]:
         """Fetch commit SHAs associated with a pull request."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/pulls/{pr_number}/commits",
                 headers=self._headers(access_token),
@@ -404,10 +420,7 @@ class GitHubClient:
         per_page: int = 30,
     ) -> tuple[list[GitHubRepositoryCandidate], bool]:
         """List explicitly accessible repositories for the calling authenticated user."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/user/repos",
                 headers=self._headers(access_token),
@@ -437,10 +450,7 @@ class GitHubClient:
         repo: str,
     ) -> tuple[bool, GitHubRepositoryCandidate | None]:
         """Verify whether the caller's delegated token can inspect `{owner}/{repo}`."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}",
                 headers=self._headers(access_token),
@@ -497,10 +507,7 @@ class GitHubClient:
         page = 1
         per_page = min(100, max(1, max_items))
 
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             while len(collected) < max_items:
                 params: dict[str, Any] = {
                     "state": "all",
@@ -560,10 +567,7 @@ class GitHubClient:
         issue_number: int,
         max_items: int = 50,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/issues/{issue_number}/comments",
                 headers=self._headers(access_token),
@@ -597,10 +601,7 @@ class GitHubClient:
         review_comments: list[dict[str, Any]] = []
         files: list[dict[str, Any]] = []
 
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             headers = self._headers(access_token)
             detail_resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/pulls/{pr_number}",
@@ -661,10 +662,7 @@ class GitHubClient:
         page = 1
         per_page = min(100, max(1, max_items))
 
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             while len(collected) < max_items:
                 params: dict[str, Any] = {
                     "per_page": min(per_page, max_items - len(collected)),
@@ -724,10 +722,7 @@ class GitHubClient:
         warnings: list[str] = []
         seen_paths: set[str] = set()
 
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             headers = self._headers(access_token)
             readme_resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/readme",
@@ -842,10 +837,7 @@ class GitHubClient:
         max_items: int = 50,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """Fetch repository discussions when enabled/supported without failing disabled repos."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/discussions",
                 headers=self._headers(access_token),

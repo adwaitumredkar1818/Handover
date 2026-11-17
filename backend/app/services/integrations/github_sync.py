@@ -45,6 +45,12 @@ _BOT_NAME_PATTERNS = (
     "codecov",
     "snyk-bot",
     "greenkeeper",
+    "lovable",
+    "gpt-engineer",
+    "copilot",
+    "cursor",
+    "invalid-email-address",
+    "lovable.dev",
 )
 
 
@@ -58,17 +64,11 @@ def is_bot_identity(
     """Detect automated bot accounts using provider account type first, then naming patterns."""
     if provider_type and provider_type.strip().lower() == "bot":
         return True, "provider_account_type"
-    # Never override an explicit provider 'User' account unless login explicitly carries '[bot]'
-    explicit_user = bool(provider_type and provider_type.strip().lower() == "user")
     for candidate in (login, name, email):
         if not candidate:
             continue
         low = candidate.strip().lower()
-        if "[bot]" in low:
-            return True, "bot_naming_pattern"
-        if not explicit_user and (
-            any(pat in low for pat in _BOT_NAME_PATTERNS) or low.endswith("-bot")
-        ):
+        if "[bot]" in low or any(pat in low for pat in _BOT_NAME_PATTERNS) or low.endswith("-bot"):
             return True, "bot_naming_pattern"
     return False, None
 
@@ -142,6 +142,28 @@ class GitHubSyncOrchestrator:
         self._policy_svc = access_policy_service
 
     def execute_sync(
+        self,
+        *,
+        mapping: ProjectSourceMapping,
+        policy: SourceAccessPolicy,
+        access_token: str,
+        actor_user_id: uuid.UUID,
+        external_user_id: str,
+        external_username: str | None,
+        sync_mode: str,
+    ) -> SyncExecutionReport:
+        with self._client:
+            return self._execute_sync_internal(
+                mapping=mapping,
+                policy=policy,
+                access_token=access_token,
+                actor_user_id=actor_user_id,
+                external_user_id=external_user_id,
+                external_username=external_username,
+                sync_mode=sync_mode,
+            )
+
+    def _execute_sync_internal(
         self,
         *,
         mapping: ProjectSourceMapping,
@@ -483,24 +505,11 @@ class GitHubSyncOrchestrator:
                     if sha not in unique_commits:
                         unique_commits[sha] = commit
 
-            for sha, commit in unique_commits.items():
+            commits_list = list(unique_commits.items())
+            total_commits_count = len(commits_list)
+            for idx, (sha, commit) in enumerate(commits_list):
                 if report.items_discovered >= max_items:
                     break
-                # Retrieve commit detail for changed_files metadata when absent
-                if not isinstance(commit.get("files"), list) and hasattr(
-                    self._client, "fetch_commit_detail"
-                ):
-                    try:
-                        detail = self._client.fetch_commit_detail(
-                            access_token=access_token,
-                            owner=owner,
-                            repo=repo_name,
-                            sha=sha,
-                        )
-                        if isinstance(detail, dict) and isinstance(detail.get("files"), list):
-                            commit = {**commit, "files": detail["files"]}
-                    except Exception:
-                        pass
                 record = self._normalize_commit(
                     repo_id=repo_id,
                     owner_repo=owner_repo,
@@ -510,6 +519,7 @@ class GitHubSyncOrchestrator:
                     commit=commit,
                     discovered_branches=sorted(list(seen_shas_to_branches[sha])),
                 )
+                do_flush = ((idx + 1) % 25 == 0) or ((idx + 1) == total_commits_count)
                 self._record_upsert(
                     report=report,
                     mapping=mapping,
@@ -517,6 +527,7 @@ class GitHubSyncOrchestrator:
                     now=now,
                     seen_external_ids=seen_external_ids,
                     record=record,
+                    flush=do_flush,
                 )
 
             # Bounded resumable backfill of historical commits missing changed_files metadata
@@ -795,6 +806,7 @@ class GitHubSyncOrchestrator:
         now: Any,
         seen_external_ids: set[str],
         record: NormalizedSourceEvidence,
+        flush: bool = True,
     ) -> None:
         report.items_discovered += 1
         seen_external_ids.add(record.source_external_id)
@@ -805,6 +817,7 @@ class GitHubSyncOrchestrator:
             triggered_by_user_id=triggered_by_user_id,
             record=record,
             now=now,
+            flush=flush,
         )
         if outcome.action == "created":
             report.items_created += 1
@@ -812,6 +825,22 @@ class GitHubSyncOrchestrator:
             report.items_updated += 1
         else:
             report.items_unchanged += 1
+
+        # Periodically commit and signal worker so items appear live in Evidence Center
+        is_major_doc = record.category in (
+            EvidenceCategory.DESIGN_DOCUMENT.value,
+            EvidenceCategory.PROJECT_DOCUMENT.value,
+        )
+        if is_major_doc or (report.items_discovered % 5 == 0):
+            session = getattr(self._ingestor, "_session", None)
+            if session is not None:
+                try:
+                    session.commit()
+                    from app.main import signal_worker_activity
+
+                    signal_worker_activity()
+                except Exception:
+                    pass
 
     def _normalize_issue(
         self,
