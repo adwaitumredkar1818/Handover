@@ -1,5 +1,8 @@
 """Update check constraint ck_relationship_type_valid on knowledge_relationships."""
 
+import sys
+sys.path.insert(0, "backend")
+
 from app.core.config import get_settings
 from app.db.session import create_db_engine, create_session_factory, session_scope
 from app.models.enums import RelationshipType
