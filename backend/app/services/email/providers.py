@@ -202,12 +202,15 @@ class GmailSMTPEmailProvider:
                     )
                 except TypeError:
                     client = self._smtp_client_factory(self._host, self._port)
+            elif self._port == 465:
+                context = ssl.create_default_context()
+                client = smtplib.SMTP_SSL(self._host, self._port, timeout=self._timeout_seconds, context=context)
             else:
                 client = smtplib.SMTP(self._host, self._port, timeout=self._timeout_seconds)
 
             try:
                 client.ehlo()
-                if self._use_tls:
+                if self._use_tls and self._port != 465:
                     context = ssl.create_default_context()
                     client.starttls(context=context)
                     client.ehlo()

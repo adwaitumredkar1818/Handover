@@ -2051,6 +2051,34 @@ export const api = {
       const detail = await this.getConversation(projectId, conversationId);
       return detail.messages || [];
     },
+    async startInvestigation(
+      projectId: string,
+      conversationId: string,
+      data: {
+        question: string;
+        mode?: "hybrid" | "keyword" | "semantic";
+        response_mode?: AssistantResponseMode;
+        include_domains?: string[];
+      }
+    ): Promise<{
+      investigation_id: string;
+      conversation_id: string;
+      status: string;
+      events_url: string;
+    }> {
+      return request(
+        `/projects/${projectId}/assistant/conversations/${conversationId}/investigations`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            question: data.question,
+            mode: data.mode || "hybrid",
+            response_mode: data.response_mode || "standard",
+            include_domains: data.include_domains,
+          }),
+        }
+      );
+    },
     async deleteConversation(projectId: string, conversationId: string): Promise<void> {
       return request(`/projects/${projectId}/assistant/conversations/${conversationId}`, {
         method: "DELETE",
