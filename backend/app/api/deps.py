@@ -89,6 +89,7 @@ _RBAC_CACHE_MAX_ITEMS = 1024
 _rbac_cache_lock = threading.RLock()
 _principal_cache: OrderedDict[tuple[Any, ...], tuple[float, AuthenticatedPrincipal]] = OrderedDict()
 _project_ctx_cache: OrderedDict[tuple[Any, ...], tuple[float, ProjectContext]] = OrderedDict()
+_org_ctx_cache: OrderedDict[tuple[Any, ...], tuple[float, OrganisationContext]] = OrderedDict()
 
 
 def _rbac_cache_get(store: OrderedDict[tuple[Any, ...], Any], key: tuple[Any, ...]) -> Any | None:
@@ -114,21 +115,32 @@ def _rbac_cache_set(store: OrderedDict[tuple[Any, ...], Any], key: tuple[Any, ..
             store.popitem(last=False)
 
 
-def invalidate_rbac_cache(*, user_id: uuid.UUID | None = None, project_id: uuid.UUID | None = None) -> None:
-    """Clear short-lived RBAC principal/project caches on mutations."""
+def invalidate_rbac_cache(
+    *,
+    user_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
+    organisation_id: uuid.UUID | None = None,
+) -> None:
+    """Clear short-lived RBAC principal/project/org caches on mutations."""
     with _rbac_cache_lock:
-        if user_id is None and project_id is None:
+        if user_id is None and project_id is None and organisation_id is None:
             _principal_cache.clear()
             _project_ctx_cache.clear()
+            _org_ctx_cache.clear()
             return
         if user_id is not None:
             for k in [k for k in _principal_cache if len(k) >= 2 and k[1] == user_id]:
                 _principal_cache.pop(k, None)
             for k in [k for k in _project_ctx_cache if len(k) >= 2 and k[1] == user_id]:
                 _project_ctx_cache.pop(k, None)
+            for k in [k for k in _org_ctx_cache if len(k) >= 2 and k[1] == user_id]:
+                _org_ctx_cache.pop(k, None)
         if project_id is not None:
             for k in [k for k in _project_ctx_cache if len(k) >= 3 and k[2] == project_id]:
                 _project_ctx_cache.pop(k, None)
+        if organisation_id is not None:
+            for k in [k for k in _org_ctx_cache if len(k) >= 3 and k[2] == organisation_id]:
+                _org_ctx_cache.pop(k, None)
 
 
 def _safe_expunge(session: Session, *objs: Any) -> None:
@@ -772,27 +784,49 @@ def require_permission(
 
 
 def resolve_organisation_context(
+    request: Request,
     organisation_id: uuid.UUID,
     principal: AuthenticatedPrincipal = Depends(get_current_principal),  # noqa: B008
     rbac_service: RbacService = Depends(get_rbac_service),  # noqa: B008
+    db_session: Session = Depends(get_db_session),  # noqa: B008
 ) -> OrganisationContext:
     """Resolve verified active membership context for `{organisation_id}` (404 otherwise)."""
-    return rbac_service.resolve_organisation_context(
+    is_read_method = request.method.upper() in {"GET", "HEAD"}
+    bind_id = id(db_session.get_bind())
+    cache_key = (bind_id, principal.user_id, organisation_id)
+    if is_read_method:
+        cached = _rbac_cache_get(_org_ctx_cache, cache_key)
+        if cached is not None:
+            return cast(OrganisationContext, cached)
+    else:
+        invalidate_rbac_cache(user_id=principal.user_id, organisation_id=organisation_id)
+
+    ctx = rbac_service.resolve_organisation_context(
         organisation_id=organisation_id,
         principal=principal,
     )
+    if is_read_method:
+        _ = (
+            ctx.organisation.id,
+            ctx.organisation.status,
+            ctx.organisation.name,
+            ctx.organisation.slug,
+        )
+        _safe_expunge(
+            db_session,
+            ctx.organisation,
+            ctx.membership,
+            ctx.role,
+        )
+        _rbac_cache_set(_org_ctx_cache, cache_key, ctx)
+    return ctx
 
 
 def require_organisation_membership(
-    organisation_id: uuid.UUID,
-    principal: AuthenticatedPrincipal = Depends(get_current_principal),  # noqa: B008
-    rbac_service: RbacService = Depends(get_rbac_service),  # noqa: B008
+    org_ctx: OrganisationContext = Depends(resolve_organisation_context),  # noqa: B008
 ) -> OrganisationContext:
     """Verify active organisation membership before accessing tenant-scoped resources."""
-    return rbac_service.resolve_organisation_context(
-        organisation_id=organisation_id,
-        principal=principal,
-    )
+    return org_ctx
 
 
 def require_organisation_permissions(

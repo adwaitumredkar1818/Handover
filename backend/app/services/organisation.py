@@ -66,6 +66,7 @@ from app.schemas.project import CreateProjectInvitationRequest
 from app.services.audit import AuditService
 from app.services.email import TransactionalEmailService, build_email_provider
 from app.services.rbac import AuthenticatedPrincipal, OrganisationContext, ProjectContext, RbacService
+from app.core.cache.local_cache import local_response_cache
 
 
 def _build_organisation_summary(
@@ -270,6 +271,17 @@ class OrganisationService:
                 code="EMAIL_VERIFICATION_REQUIRED",
             )
 
+        bind_id = id(self._db.get_bind())
+        cache_key = (
+            f"orgs:my:{principal.user.id}:{bind_id}:{status or ''}:{search or ''}:{limit}:{offset}"
+        )
+        cached = local_response_cache.get(cache_key)
+        if cached is not None:
+            try:
+                return OrganisationListResponse.model_validate(cached)
+            except Exception:
+                local_response_cache.delete(cache_key)
+
         rows, total = self._org_repo.list_for_user(
             user_id=principal.user.id,
             status=status,
@@ -281,7 +293,9 @@ class OrganisationService:
             _build_organisation_summary(org, my_role=membership.role.name)
             for org, membership in rows
         ]
-        return OrganisationListResponse(items=items, total=total)
+        resp = OrganisationListResponse(items=items, total=total)
+        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=30)
+        return resp
 
     def get_organisation_detail(self, ctx: OrganisationContext) -> OrganisationResponse:
         """Return safe organisation metadata and caller's resolved org permissions."""
@@ -476,6 +490,10 @@ class OrganisationService:
             ),
         )
         self._db.commit()
+        from app.api.deps import invalidate_rbac_cache
+        invalidate_rbac_cache(user_id=target_user_id, organisation_id=ctx.organisation.id)
+        local_response_cache.invalidate_prefix("orgs:my:")
+        local_response_cache.invalidate_prefix("org_projects:")
         refreshed = self._org_repo.get_active_membership(
             organisation_id=ctx.organisation.id,
             user_id=target_user_id,
@@ -548,6 +566,10 @@ class OrganisationService:
             ),
         )
         self._db.commit()
+        from app.api.deps import invalidate_rbac_cache
+        invalidate_rbac_cache(user_id=target_user_id, organisation_id=ctx.organisation.id)
+        local_response_cache.invalidate_prefix("orgs:my:")
+        local_response_cache.invalidate_prefix("org_projects:")
         return RemoveMembershipResponse(
             message="Organisation member removed and project access revoked immediately.",
             user_id=target_user_id,

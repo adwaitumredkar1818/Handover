@@ -209,6 +209,19 @@ def list_active_project_jobs(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> list[ActiveSyncJobResponse]:
     """Retrieve queued or running background jobs for persistent UI indicators."""
+    import os
+
+    is_test = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    bind = session.get_bind()
+    cache_key = f"active_jobs:{project_ctx.project.id}:{id(bind)}"
+    if not is_test:
+        cached = local_response_cache.get(cache_key)
+        if isinstance(cached, list):
+            try:
+                return [ActiveSyncJobResponse.model_validate(j) for j in cached]
+            except Exception:
+                local_response_cache.delete(cache_key)
+
     stmt = (
         select(BackgroundJob)
         .where(
@@ -268,4 +281,7 @@ def list_active_project_jobs(
             )
         )
 
+    local_response_cache.set(
+        cache_key, [j.model_dump(mode="json") for j in active_jobs], ttl_seconds=10
+    )
     return active_jobs

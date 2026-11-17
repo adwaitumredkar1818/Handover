@@ -343,37 +343,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         const stored = typeof window !== "undefined" ? localStorage.getItem("handover_access_token") : null;
         const cachedUser = getStoredUser();
 
-        // Check if there's an active Supabase session that hasn't already been exchanged for this token
-        try {
-          const supabase = createSupabaseClient();
-          if (supabase) {
-            const { data } = await supabase.auth.getSession();
-            const sbToken = data?.session?.access_token;
-            const lastExchanged =
-              typeof window !== "undefined" ? sessionStorage.getItem(EXCHANGED_SB_KEY) : null;
-            if (sbToken && !(stored && cachedUser && lastExchanged === sbToken)) {
-              try {
-                const exchangeRes = await api.auth.exchangeSupabaseToken(sbToken);
-                if (typeof window !== "undefined") {
-                  sessionStorage.setItem(EXCHANGED_SB_KEY, sbToken);
-                }
-                setStoredToken(exchangeRes.access_token);
-                setStoredUser(exchangeRes.user);
-                setToken(exchangeRes.access_token);
-                setUser(exchangeRes.user);
-                setIsLoadingAuth(false);
-                return;
-              } catch (exchangeErr) {
-                // Non-fatal: Supabase token exchange failed (e.g. backend offline or expired), fall back to standard session check
-                console.warn("Supabase token exchange skipped:", exchangeErr);
-              }
-            }
-          }
-        } catch {
-          // Supabase client error, proceed to standard check
-        }
-
-        // If we have cached token & user, hydrate instantly in 0ms so user sees authenticated state without flash
+        // 1. If we have cached token & user, hydrate instantly in 0ms so user sees authenticated state without flash
         if (stored && cachedUser) {
           setStoredToken(stored);
           setToken(stored);
@@ -400,6 +370,33 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
             }
           }
           return;
+        }
+
+        // 2. Only if unauthenticated, check if there's an active Supabase OAuth session to exchange
+        try {
+          const supabase = createSupabaseClient();
+          if (supabase) {
+            const { data } = await supabase.auth.getSession();
+            const sbToken = data?.session?.access_token;
+            if (sbToken) {
+              try {
+                const exchangeRes = await api.auth.exchangeSupabaseToken(sbToken);
+                if (typeof window !== "undefined") {
+                  sessionStorage.setItem(EXCHANGED_SB_KEY, sbToken);
+                }
+                setStoredToken(exchangeRes.access_token);
+                setStoredUser(exchangeRes.user);
+                setToken(exchangeRes.access_token);
+                setUser(exchangeRes.user);
+                setIsLoadingAuth(false);
+                return;
+              } catch (exchangeErr) {
+                console.warn("Supabase token exchange skipped:", exchangeErr);
+              }
+            }
+          }
+        } catch {
+          // Supabase client error, proceed to standard check
         }
 
         setIsLoadingAuth(true);
@@ -452,10 +449,14 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         const { data: authListener } = supabase.auth.onAuthStateChange(
           async (event, session) => {
             if ((event === "SIGNED_IN" || event === "TOKEN_REFRESHED") && session?.access_token) {
-              const lastExchanged =
-                typeof window !== "undefined" ? sessionStorage.getItem(EXCHANGED_SB_KEY) : null;
               const existingStored =
                 typeof window !== "undefined" ? localStorage.getItem("handover_access_token") : null;
+              const isCallback = typeof window !== "undefined" && window.location.pathname.startsWith("/auth/callback");
+              if (existingStored && !isCallback) {
+                return;
+              }
+              const lastExchanged =
+                typeof window !== "undefined" ? sessionStorage.getItem(EXCHANGED_SB_KEY) : null;
               if (lastExchanged === session.access_token && existingStored) {
                 return;
               }
@@ -1055,9 +1056,17 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     let active = true;
     void Promise.resolve().then(() => {
       if (!active) return;
-      void refreshOverview();
+      const isOverviewRoute =
+        !pathname ||
+        pathname === "/overview" ||
+        pathname === "/dashboard" ||
+        Boolean(pathname.match(/^\/projects\/[^/]+$/));
+      const isSourcesRoute = Boolean(
+        pathname?.includes("/evidence") || pathname?.includes("/sources")
+      );
+      if (isOverviewRoute) void refreshOverview();
       void refreshMembers();
-      void refreshSources();
+      if (isSourcesRoute) void refreshSources();
     });
     return () => {
       active = false;

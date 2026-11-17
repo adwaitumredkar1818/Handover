@@ -12,6 +12,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from app.core.logging import reset_correlation_id, set_correlation_id
+from app.db.session import request_sql_stats
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class RequestCorrelationMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         ctx_token = set_correlation_id(request_id)
         started_at = time.perf_counter()
+        request_sql_stats[request_id] = [0, 0.0]
 
         try:
             response = await call_next(request)
@@ -42,7 +44,13 @@ class RequestCorrelationMiddleware(BaseHTTPMiddleware):
             reset_correlation_id(ctx_token)
 
         duration_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+        stats = request_sql_stats.pop(request_id, [0, 0.0])
+        sql_count = int(stats[0])
+        sql_dur = round(float(stats[1]), 2)
+
         response.headers["X-Request-ID"] = request_id
+        response.headers["X-SQL-Query-Count"] = str(sql_count)
+        response.headers["X-SQL-Duration-Ms"] = str(sql_dur)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -57,6 +65,8 @@ class RequestCorrelationMiddleware(BaseHTTPMiddleware):
                     "http_path": request.url.path,
                     "status_code": response.status_code,
                     "duration_ms": duration_ms,
+                    "sql_queries": sql_count,
+                    "sql_duration_ms": sql_dur,
                 },
             )
         finally:

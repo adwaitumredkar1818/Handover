@@ -9,12 +9,15 @@ from contextlib import contextmanager
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
+from app.core.logging import get_correlation_id
 
 logger = logging.getLogger(__name__)
+
+request_sql_stats: dict[str, list[float]] = {}
 
 
 def build_db_connect_args(
@@ -54,7 +57,7 @@ def create_db_engine(settings: Settings) -> Engine:
     raw_url = settings.database.sqlalchemy_url()
     connect_args = build_db_connect_args(settings, raw_url)
 
-    return create_engine(
+    engine = create_engine(
         raw_url,
         pool_pre_ping=True,
         pool_size=20,
@@ -63,6 +66,24 @@ def create_db_engine(settings: Settings) -> Engine:
         pool_recycle=180,
         connect_args=connect_args,
     )
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        context._query_start = time.perf_counter()
+        req_id = get_correlation_id()
+        if req_id and req_id in request_sql_stats:
+            request_sql_stats[req_id][0] += 1
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        start = getattr(context, "_query_start", None)
+        if start:
+            elapsed = (time.perf_counter() - start) * 1000.0
+            req_id = get_correlation_id()
+            if req_id and req_id in request_sql_stats:
+                request_sql_stats[req_id][1] += elapsed
+
+    return engine
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:

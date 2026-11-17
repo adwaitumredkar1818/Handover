@@ -134,40 +134,42 @@ export function KnowledgeIntelligenceWorkspace({
   }, [projectId, mode, selectedDomain]);
 
   useEffect(() => {
-    let isCurrent = true;
     if (mode === "domains") {
-      loadDomains();
-    } else {
-      if (!projectId) return;
-      setLoading(true);
-      setError(null);
-      setSelectedNodeDetail(null);
-      api.knowledgeIntelligence
-        .getGraph(projectId, mode, {
-          search: searchQuery.trim() || undefined,
-          status: statusFilter !== "all" ? statusFilter : undefined,
-          verification_state: verificationFilter !== "all" ? verificationFilter : undefined,
-          include_suggested: includeSuggested,
-        })
-        .then((res) => {
-          if (!isCurrent) return;
-          setRawNodes(res.nodes || []);
-          setRawEdges(res.edges || []);
-        })
-        .catch((err) => {
-          if (!isCurrent) return;
-          setError(err instanceof Error ? err.message : "Failed to load Knowledge Intelligence graph.");
-          setRawNodes([]);
-          setRawEdges([]);
-        })
-        .finally(() => {
-          if (isCurrent) setLoading(false);
-        });
+      void loadDomains();
     }
+  }, [mode, loadDomains]);
+
+  useEffect(() => {
+    if (mode === "domains" || !projectId) return;
+    let isCurrent = true;
+    setLoading(true);
+    setError(null);
+    setSelectedNodeDetail(null);
+    api.knowledgeIntelligence
+      .getGraph(projectId, mode, {
+        search: searchQuery.trim() || undefined,
+        status: statusFilter !== "all" ? statusFilter : undefined,
+        verification_state: verificationFilter !== "all" ? verificationFilter : undefined,
+        include_suggested: includeSuggested,
+      })
+      .then((res) => {
+        if (!isCurrent) return;
+        setRawNodes(res.nodes || []);
+        setRawEdges(res.edges || []);
+      })
+      .catch((err) => {
+        if (!isCurrent) return;
+        setError(err instanceof Error ? err.message : "Failed to load Knowledge Intelligence graph.");
+        setRawNodes([]);
+        setRawEdges([]);
+      })
+      .finally(() => {
+        if (isCurrent) setLoading(false);
+      });
     return () => {
       isCurrent = false;
     };
-  }, [projectId, mode, searchQuery, statusFilter, verificationFilter, includeSuggested, loadDomains, reloadCounter]);
+  }, [projectId, mode, searchQuery, statusFilter, verificationFilter, includeSuggested, reloadCounter]);
 
   const handleSelectNode = async (_: unknown, node: Node) => {
     if (mode === "domains") return;

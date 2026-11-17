@@ -374,6 +374,7 @@ class ProjectService:
                 ),
             )
             self._db.commit()
+            local_response_cache.invalidate_prefix("org_projects:")
         except IntegrityError as exc:
             self._db.rollback()
             raise ConflictError(
@@ -397,6 +398,18 @@ class ProjectService:
         offset: int = 0,
     ) -> ProjectListResponse:
         """List permitted projects strictly scoped to the caller's verified organisation."""
+        bind_id = id(self._db.get_bind())
+        cache_key = (
+            f"org_projects:{org_ctx.organisation.id}:{org_ctx.principal.user.id}:{bind_id}:"
+            f"{status or ''}:{search or ''}:{limit}:{offset}"
+        )
+        cached = local_response_cache.get(cache_key)
+        if cached is not None:
+            try:
+                return ProjectListResponse.model_validate(cached)
+            except Exception:
+                local_response_cache.delete(cache_key)
+
         rows, total = self._project_repo.list_for_user_in_org(
             organisation_id=org_ctx.organisation.id,
             user_id=org_ctx.principal.user.id,
@@ -413,7 +426,9 @@ class ProjectService:
             )
             for project, mem in rows
         ]
-        return ProjectListResponse(items=items, total=total)
+        resp = ProjectListResponse(items=items, total=total)
+        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=30)
+        return resp
 
     def get_project_detail(self, ctx: ProjectContext) -> ProjectResponse:
         """Return project metadata plus effective permissions in the verified project context."""
@@ -558,6 +573,7 @@ class ProjectService:
         )
         try:
             self._db.commit()
+            local_response_cache.invalidate_prefix("org_projects:")
         except IntegrityError as exc:
             self._db.rollback()
             raise ConflictError(
@@ -592,6 +608,7 @@ class ProjectService:
             message=f"Archived project '{ctx.project.id}'.",
         )
         self._db.commit()
+        local_response_cache.invalidate_prefix(f"project_transition:{ctx.project.id}:")
         refreshed = self._rbac_service.resolve_project_context(
             project_id=ctx.project.id,
             principal=ctx.principal,
@@ -607,16 +624,27 @@ class ProjectService:
         offset: int = 0,
     ) -> ProjectMemberListResponse:
         """List members strictly scoped to one verified project."""
+        bind_id = id(self._db.get_bind())
+        cache_key = f"project_members:{ctx.project.id}:{bind_id}:{status or ''}:{limit}:{offset}"
+        cached = local_response_cache.get(cache_key)
+        if cached is not None:
+            try:
+                return ProjectMemberListResponse.model_validate(cached)
+            except Exception:
+                local_response_cache.delete(cache_key)
+
         rows, total = self._project_repo.list_memberships(
             project_id=ctx.project.id,
             status=status,
             limit=limit,
             offset=offset,
         )
-        return ProjectMemberListResponse(
+        resp = ProjectMemberListResponse(
             items=[_build_project_member_response(row) for row in rows],
             total=total,
         )
+        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=30)
+        return resp
 
     def add_project_member(
         self,
@@ -674,8 +702,10 @@ class ProjectService:
                 ),
             )
             self._db.commit()
+            local_response_cache.invalidate_prefix("org_projects:")
             cache_service.invalidate_prefix(f"dash:overview:proj:{ctx.project.id}")
             cache_service.delete(CacheKeys.rbac_user_project_permissions(ctx.project.id, payload.user_id))
+            local_response_cache.invalidate_prefix(f"project_members:{ctx.project.id}:")
         except IntegrityError as exc:
             self._db.rollback()
             raise ConflictError(
@@ -753,8 +783,10 @@ class ProjectService:
             ),
         )
         self._db.commit()
+        local_response_cache.invalidate_prefix(f"project_transition:{ctx.project.id}:")
         cache_service.invalidate_prefix(f"dash:overview:proj:{ctx.project.id}")
         cache_service.delete(CacheKeys.rbac_user_project_permissions(ctx.project.id, target_user_id))
+        local_response_cache.invalidate_prefix(f"project_members:{ctx.project.id}:")
         refreshed = self._project_repo.get_active_membership(
             project_id=ctx.project.id,
             user_id=target_user_id,
@@ -804,8 +836,10 @@ class ProjectService:
             message=f"Removed user '{target_user_id}' from project '{ctx.project.id}'.",
         )
         self._db.commit()
+        local_response_cache.invalidate_prefix(f"project_transition:{ctx.project.id}:")
         cache_service.invalidate_prefix(f"dash:overview:proj:{ctx.project.id}")
         cache_service.delete(CacheKeys.rbac_user_project_permissions(ctx.project.id, target_user_id))
+        local_response_cache.invalidate_prefix(f"project_members:{ctx.project.id}:")
         return RemoveMembershipResponse(
             message="Project member removed and project access revoked immediately.",
             user_id=target_user_id,
@@ -815,10 +849,25 @@ class ProjectService:
     def get_project_transition(self, ctx: ProjectContext) -> ProjectTransitionResponse | None:
         """Retrieve configured transition participants and parameters."""
         self._require_active_organisation_and_project(ctx=ctx, allow_archived_project=True)
+        bind_id = id(self._db.get_bind())
+        cache_key = f"project_transition:{ctx.project.id}:{bind_id}"
+        cached = local_response_cache.get(cache_key)
+        if cached is not None:
+            if isinstance(cached, dict) and cached.get("__none__"):
+                return None
+            try:
+                return ProjectTransitionResponse.model_validate(cached)
+            except Exception:
+                local_response_cache.delete(cache_key)
+
         transition = self._project_repo.get_transition(ctx.project.id)
         if transition is None:
+            local_response_cache.set(cache_key, {"__none__": True}, ttl_seconds=60)
             return None
-        return _build_project_transition_response(transition)
+        resp = _build_project_transition_response(transition)
+        if resp is not None:
+            local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=60)
+        return resp
 
     def upsert_project_transition(
         self,
@@ -868,6 +917,7 @@ class ProjectService:
             message=f"Configured transition participants for project '{ctx.project.id}'.",
         )
         self._db.commit()
+        local_response_cache.invalidate_prefix(f"project_transition:{ctx.project.id}:")
         loaded = self._project_repo.get_transition(ctx.project.id)
         if loaded is None:
             raise NotFoundError(
@@ -1187,6 +1237,7 @@ class ProjectService:
             message=f"Created project invitation '{invitation.id}' for project '{ctx.project.id}'.",
         )
         self._db.commit()
+        local_response_cache.invalidate_prefix(f"project_transition:{ctx.project.id}:")
 
         delivery_result = self._email_service.send_project_invitation_email(
             to_email=invitation.email,
@@ -1216,6 +1267,7 @@ class ProjectService:
                 ),
             )
             self._db.commit()
+            local_response_cache.invalidate_prefix("org_projects:")
             message = (
                 "Invitation created, but outbound email delivery failed. "
                 "Please verify email configuration or retry."
@@ -1252,12 +1304,21 @@ class ProjectService:
                 code="FORBIDDEN",
             )
 
+        cache_key = f"proj_invitations:{ctx.project.id}:{status or ''}:{limit}:{offset}"
+        cached = local_response_cache.get(cache_key)
+        if cached is not None:
+            try:
+                return InvitationListResponse.model_validate(cached)
+            except Exception:
+                local_response_cache.delete(cache_key)
+
         changed = self._org_repo.expire_stale_invitations_in_project(
             project_id=ctx.project.id,
             now=utc_now(),
         )
         if changed:
             self._db.commit()
+            local_response_cache.invalidate_prefix("org_projects:")
 
         rows, total = self._org_repo.list_project_invitations(
             project_id=ctx.project.id,
@@ -1265,10 +1326,12 @@ class ProjectService:
             limit=limit,
             offset=offset,
         )
-        return InvitationListResponse(
+        resp = InvitationListResponse(
             items=[_build_invitation_summary(row) for row in rows],
             total=total,
         )
+        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=30)
+        return resp
 
     def revoke_project_invitation(
         self,
@@ -1324,6 +1387,7 @@ class ProjectService:
             if invitation.status == InvitationStatus.PENDING.value:
                 invitation.status = InvitationStatus.EXPIRED.value
                 self._db.commit()
+            local_response_cache.invalidate_prefix("org_projects:")
             raise GoneError("Expired invitations cannot be revoked.", code="INVITATION_EXPIRED")
 
         invitation.status = InvitationStatus.REVOKED.value
@@ -1340,4 +1404,6 @@ class ProjectService:
             message=f"Revoked project invitation '{invitation.id}'.",
         )
         self._db.commit()
+        local_response_cache.invalidate_prefix(f"project_transition:{ctx.project.id}:")
+        local_response_cache.invalidate_prefix(f"proj_invitations:{ctx.project.id}:")
         return _build_invitation_summary(invitation)

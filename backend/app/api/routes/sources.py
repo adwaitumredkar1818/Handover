@@ -21,6 +21,7 @@ from app.api.deps import (
     require_organisation_permission,
     require_project_permission,
 )
+from app.core.cache.local_cache import local_response_cache
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from app.models.enums import BackgroundJobStatus, BackgroundJobType, RoleName
 from app.models.integration import (
@@ -355,6 +356,15 @@ def list_organisation_sources(
 ) -> SourceConnectionListResponse:
     from sqlalchemy import select
 
+    bind_id = id(session.get_bind())
+    cache_key = f"org_sources:{organisation_id}:{bind_id}"
+    cached = local_response_cache.get(cache_key)
+    if cached is not None:
+        try:
+            return SourceConnectionListResponse.model_validate(cached)
+        except Exception:
+            local_response_cache.delete(cache_key)
+
     stmt = select(SourceConnection).where(
         SourceConnection.organisation_id == organisation_id,
         SourceConnection.status == "active",
@@ -372,7 +382,9 @@ def list_organisation_sources(
         )
         for c in connections
     ]
-    return SourceConnectionListResponse(items=items, total=len(items))
+    resp = SourceConnectionListResponse(items=items, total=len(items))
+    local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=30)
+    return resp
 
 
 @router.get(
@@ -633,6 +645,15 @@ def list_project_source_mappings(
 ) -> SourceMappingListResponse:
     from sqlalchemy import select
 
+    bind_id = id(session.get_bind())
+    cache_key = f"source_mappings:{project_id}:{bind_id}"
+    cached = local_response_cache.get(cache_key)
+    if cached is not None:
+        try:
+            return SourceMappingListResponse.model_validate(cached)
+        except Exception:
+            local_response_cache.delete(cache_key)
+
     stmt = select(ProjectSourceMapping).where(
         ProjectSourceMapping.project_id == project_id,
         ProjectSourceMapping.status == "active",
@@ -651,7 +672,9 @@ def list_project_source_mappings(
         )
         for m in mappings
     ]
-    return SourceMappingListResponse(items=items, total=len(items))
+    resp = SourceMappingListResponse(items=items, total=len(items))
+    local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=30)
+    return resp
 
 
 @router.post(
