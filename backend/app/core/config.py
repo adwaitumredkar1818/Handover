@@ -391,7 +391,7 @@ class ExtractionSettings(BaseModel):
     max_retries: int = Field(default=2, ge=0, le=5)
     max_chunks_per_batch: int = Field(default=6, ge=1, le=20)
     max_chars_per_batch: int = Field(default=5500, ge=1000, le=24000)
-    auto_reextract_on_update: bool = False
+    auto_reextract_on_update: bool = True
 
 
 class IngestionSettings(BaseModel):
@@ -656,7 +656,7 @@ class Settings(BaseSettings):
     extraction_max_retries: int = Field(default=2, ge=0, le=5)
     extraction_max_chunks_per_batch: int = Field(default=6, ge=1, le=20)
     extraction_max_chars_per_batch: int = Field(default=5500, ge=1000, le=24000)
-    extraction_auto_reextract_on_update: bool = False
+    extraction_auto_reextract_on_update: bool = True
 
     # Document ingestion, OCR triage & lightweight worker fields (`settings.ingestion`)
     max_upload_size_mb: int = Field(default=50, ge=1, le=500)

@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from sqlalchemy import Engine, create_engine, event, text
+from sqlalchemy.exc import DisconnectionError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
@@ -59,13 +60,34 @@ def create_db_engine(settings: Settings) -> Engine:
 
     engine = create_engine(
         raw_url,
-        pool_pre_ping=True,
-        pool_size=20,
-        max_overflow=30,
+        pool_pre_ping=False,
+        pool_size=8,
+        max_overflow=10,
         pool_timeout=30,
-        pool_recycle=180,
+        pool_recycle=1800,
         connect_args=connect_args,
     )
+
+    @event.listens_for(engine, "checkout")
+    def _ping_connection_if_idle(dbapi_connection, connection_record, connection_proxy):
+        now = time.monotonic()
+        last_used = connection_record.info.get("last_used")
+        # If connection was used within the last 30 seconds, skip the remote ping
+        if last_used is not None and (now - last_used) < 30.0:
+            return
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("SELECT 1")
+        except Exception as exc:
+            connection_record.info.pop("last_used", None)
+            raise DisconnectionError(f"Connection ping failed: {exc}") from exc
+        finally:
+            cursor.close()
+        connection_record.info["last_used"] = now
+
+    @event.listens_for(engine, "checkin")
+    def _on_checkin(dbapi_connection, connection_record):
+        connection_record.info["last_used"] = time.monotonic()
 
     @event.listens_for(engine, "before_cursor_execute")
     def _before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
