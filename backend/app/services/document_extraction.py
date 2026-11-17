@@ -102,15 +102,40 @@ class DocumentExtractionService:
         category: str,
         raw_bytes: bytes,
         document_title: str | None = None,
+        mime_type: str | None = None,
     ) -> ExtractedDocumentResult:
         """Dispatch validated bytes to PDF or DOCX extractor cleanly."""
-        if category == EvidenceCategory.PDF_DOCUMENT.value:
+        is_pdf = (
+            category in (EvidenceCategory.PDF_DOCUMENT.value, "pdf_document")
+            or (mime_type is not None and "pdf" in mime_type.lower())
+            or (document_title is not None and document_title.lower().endswith(".pdf"))
+            or raw_bytes.startswith(b"%PDF-")
+        )
+        if is_pdf:
             return self._extract_pdf(raw_bytes=raw_bytes, document_title=document_title)
-        if category == EvidenceCategory.DOCX_DOCUMENT.value:
+
+        is_docx = (
+            category in (EvidenceCategory.DOCX_DOCUMENT.value, "docx_document")
+            or (
+                mime_type is not None
+                and ("wordprocessingml" in mime_type.lower() or "docx" in mime_type.lower())
+            )
+            or (document_title is not None and document_title.lower().endswith(".docx"))
+            or (
+                raw_bytes.startswith(b"PK\x03\x04")
+                and document_title is not None
+                and document_title.lower().endswith(".docx")
+            )
+        )
+        if is_docx:
             return self._extract_docx(raw_bytes=raw_bytes)
+
+        if raw_bytes.startswith(b"%PDF-"):
+            return self._extract_pdf(raw_bytes=raw_bytes, document_title=document_title)
+
         raise DocumentExtractionError(
             code="UNSUPPORTED_EXTRACTION_CATEGORY",
-            message="Evidence category is not supported by document extractors.",
+            message=f"Evidence category '{category}' (mime: {mime_type}) is not supported by document extractors.",
             retryable=False,
         )
 
