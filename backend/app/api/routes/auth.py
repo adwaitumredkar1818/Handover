@@ -12,6 +12,7 @@ from app.api.deps import (
     get_auth_service,
     get_optional_principal,
     get_organisation_service,
+    invalidate_rbac_cache,
     require_auth_rate_limit,
     require_permission,
 )
@@ -169,7 +170,9 @@ def reset_password(
     auth_service: AuthService = Depends(get_auth_service),  # noqa: B008
 ) -> ResetPasswordResponse:
     """Validate reset token, update password hash, and revoke existing sessions."""
-    return auth_service.reset_password(payload=payload)
+    res = auth_service.reset_password(payload=payload)
+    invalidate_rbac_cache()
+    return res
 
 
 @router.post(
@@ -184,7 +187,9 @@ def verify_email(
     auth_service: AuthService = Depends(get_auth_service),  # noqa: B008
 ) -> VerifyEmailResponse:
     """Activate email verified status for an account using a cryptographically signed token."""
-    return auth_service.verify_email(token=payload.token)
+    res = auth_service.verify_email(token=payload.token)
+    invalidate_rbac_cache()
+    return res
 
 
 @router.post(
