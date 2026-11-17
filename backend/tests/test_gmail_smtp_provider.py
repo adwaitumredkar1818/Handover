@@ -673,13 +673,13 @@ def test_sender_address_auto_alignment_in_settings() -> None:
     )
     assert s1.email.from_address == "my.account@gmail.com"
 
-    # Resend default onboarding@resend.dev aligns to smtp_username under gmail_smtp
+    # Non-routable .local aligns to smtp_username under gmail_smtp
     s2 = Settings(
         email_delivery_enabled=True,
         email_provider="gmail_smtp",
         smtp_username="my.account@gmail.com",
         smtp_app_password="app-pass-token",
-        from_address="onboarding@resend.dev",
+        from_address="noreply@service.local",
     )
     assert s2.email.from_address == "my.account@gmail.com"
 
@@ -694,11 +694,13 @@ def test_sender_address_auto_alignment_in_settings() -> None:
     assert s3.email.from_address == "notifications@company.org"
 
 
-def test_build_email_provider_factory_gmail_smtp() -> None:
+def test_build_email_provider_factory_gmail_smtp(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify build_email_provider instantiates GmailSMTPEmailProvider without silent fallback."""
+    monkeypatch.delenv("EMAIL_FROM_ADDRESS", raising=False)
     settings = Settings(
         email_delivery_enabled=True,
         email_provider="gmail_smtp",
+        email_from_address="dev.mailer@gmail.com",
         smtp_host="smtp.gmail.com",
         smtp_port=587,
         smtp_username="dev.mailer@gmail.com",

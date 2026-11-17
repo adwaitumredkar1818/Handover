@@ -546,17 +546,16 @@ class IntegrationsSettings(BaseModel):
 
 
 class EmailSettings(BaseModel):
-    """Transactional email delivery settings (Gmail SMTP / Resend / Mock / Disabled)."""
+    """Transactional email delivery settings (Gmail SMTP / Mock / Disabled)."""
 
     delivery_enabled: bool = False
-    provider: Literal["none", "mock", "resend", "gmail_smtp"] = "none"
-    resend_api_key: SecretStr | None = None
+    provider: Literal["none", "mock", "gmail_smtp"] = "none"
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = Field(default=587, ge=1, le=65535)
     smtp_username: str | None = None
     smtp_app_password: SecretStr | None = None
     smtp_use_tls: bool = True
-    smtp_timeout_seconds: float = Field(default=10.0, gt=0.5, le=60.0)
+    smtp_timeout_seconds: float = Field(default=20.0, gt=0.5, le=60.0)
     from_address: str = "noreply@handover.local"
     from_name: str = "The Handover"
     frontend_base_url: str = "http://localhost:3000"
@@ -706,13 +705,9 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("email_delivery_enabled", "enable_email_delivery"),
     )
-    email_provider: Literal["none", "mock", "resend", "gmail_smtp"] = Field(
+    email_provider: Literal["none", "mock", "gmail_smtp"] = Field(
         default="none",
         validation_alias=AliasChoices("email_provider", "mail_provider"),
-    )
-    resend_api_key: SecretStr | None = Field(
-        default=None,
-        validation_alias=AliasChoices("resend_api_key", "resend_key"),
     )
     smtp_host: str = Field(
         default="smtp.gmail.com",
@@ -738,7 +733,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("smtp_use_tls", "smtp_tls", "gmail_smtp_tls"),
     )
     smtp_timeout_seconds: float = Field(
-        default=10.0,
+        default=20.0,
         gt=0.5,
         le=60.0,
         validation_alias=AliasChoices("smtp_timeout_seconds", "gmail_smtp_timeout_seconds"),
@@ -1162,17 +1157,8 @@ class Settings(BaseSettings):
                 "FRONTEND_BASE_URL must use https:// when transactional email delivery is enabled in production."
             )
         from_addr = self.email_from_address.strip()
-        # If Resend provider is selected and the configured from_address is the default non-routable
-        # or local domain, automatically fall back to Resend's verified test domain 'onboarding@resend.dev'
-        # so testing works without failing on unverified domain errors.
-        if self.email_provider == "resend" and (
+        if self.email_provider == "gmail_smtp" and (
             from_addr == "noreply@handover.local"
-            or from_addr.endswith(".local")
-            or from_addr.endswith(".invalid")
-        ):
-            from_addr = "onboarding@resend.dev"
-        elif self.email_provider == "gmail_smtp" and (
-            from_addr in ("noreply@handover.local", "onboarding@resend.dev")
             or from_addr.endswith(".local")
             or from_addr.endswith(".invalid")
         ):
@@ -1182,7 +1168,6 @@ class Settings(BaseSettings):
         return EmailSettings(
             delivery_enabled=self.email_delivery_enabled,
             provider=self.email_provider,
-            resend_api_key=self.resend_api_key,
             smtp_host=self.smtp_host.strip(),
             smtp_port=self.smtp_port,
             smtp_username=self.smtp_username.strip() if self.smtp_username else None,

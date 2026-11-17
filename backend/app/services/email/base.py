@@ -35,7 +35,7 @@ EmailDispatchResult = EmailDeliveryResult
 
 
 class EmailProviderProtocol(Protocol):
-    """Pluggable provider interface allowing Resend, mock, or future SMTP/SES backends."""
+    """Pluggable provider interface allowing Gmail SMTP, mock, or future SMTP/SES backends."""
 
     @property
     def provider_name(self) -> str:

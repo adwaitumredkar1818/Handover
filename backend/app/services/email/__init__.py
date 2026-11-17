@@ -18,7 +18,6 @@ from app.services.email.providers import (
     DisabledEmailProvider,
     GmailSMTPEmailProvider,
     MockEmailProvider,
-    ResendEmailProvider,
 )
 from app.services.email.service import TransactionalEmailService, build_email_provider
 
@@ -36,7 +35,6 @@ __all__ = [
     "EmailRecipientRejectedError",
     "GmailSMTPEmailProvider",
     "MockEmailProvider",
-    "ResendEmailProvider",
     "TransactionalEmailService",
     "build_email_provider",
 ]

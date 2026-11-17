@@ -11,7 +11,6 @@ from app.services.email.providers import (
     DisabledEmailProvider,
     GmailSMTPEmailProvider,
     MockEmailProvider,
-    ResendEmailProvider,
 )
 from app.services.email.templates import (
     render_email_verification,
@@ -39,18 +38,6 @@ def build_email_provider(settings: Settings) -> EmailProviderProtocol:
         return DisabledEmailProvider()
     if email_cfg.provider == "mock":
         return MockEmailProvider()
-    if email_cfg.provider == "resend":
-        api_key = (
-            email_cfg.resend_api_key.get_secret_value()
-            if email_cfg.resend_api_key is not None
-            else None
-        )
-        return ResendEmailProvider(
-            api_key=api_key,
-            from_address=email_cfg.from_address,
-            from_name=email_cfg.from_name,
-            timeout_seconds=email_cfg.http_timeout_seconds,
-        )
     if email_cfg.provider == "gmail_smtp":
         app_password = (
             email_cfg.smtp_app_password.get_secret_value()
