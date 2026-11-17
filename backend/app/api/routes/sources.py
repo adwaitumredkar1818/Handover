@@ -327,6 +327,7 @@ def create_organisation_source(
 
     session.commit()
     session.refresh(conn)
+    local_response_cache.invalidate_prefix(f"org_sources:{conn.organisation_id}")
 
     return SourceConnectionItemResponse(
         id=conn.id,
@@ -479,6 +480,7 @@ def patch_source_connection(
 
     session.commit()
     session.refresh(conn)
+    local_response_cache.invalidate_prefix(f"org_sources:{conn.organisation_id}")
 
     return SourceConnectionItemResponse(
         id=conn.id,
@@ -524,6 +526,7 @@ def disconnect_source_connection(
     conn.status = "disconnected"
     session.commit()
     session.refresh(conn)
+    local_response_cache.invalidate_prefix(f"org_sources:{conn.organisation_id}")
 
     return SourceConnectionItemResponse(
         id=conn.id,
@@ -614,8 +617,69 @@ def create_project_source_mapping(
         },
     )
     session.add(mapping)
+    session.flush()
+
+    # Automatically enqueue durable initial SOURCE_SYNC job
+    from app.models.enums import BackgroundJobType
+    from app.models.integration import SourceSyncRun, UserSourceAuthorisation
+    from app.models.job import BackgroundJob
+
+    auth = session.execute(
+        select(UserSourceAuthorisation).where(
+            UserSourceAuthorisation.source_connection_id == conn.id,
+            UserSourceAuthorisation.status == "active",
+        ).order_by(UserSourceAuthorisation.created_at.desc())
+    ).scalars().first()
+
+    if auth is not None:
+        init_job = BackgroundJob(
+            organisation_id=project_ctx.organisation.id,
+            project_id=project_id,
+            evidence_id=None,
+            triggered_by_user_id=project_ctx.principal.user.id,
+            job_type=BackgroundJobType.SOURCE_SYNC.value,
+            max_attempts=3,
+            priority=2,
+            payload_json={
+                "mapping_id": str(mapping.id),
+                "source_connection_id": str(mapping.source_connection_id),
+                "authorisation_id": str(auth.id),
+                "provider": mapping.provider,
+                "sync_mode": "initial",
+            },
+        )
+        session.add(init_job)
+        session.flush()
+
+        sync_run = SourceSyncRun(
+            organisation_id=project_ctx.organisation.id,
+            project_id=project_id,
+            project_source_mapping_id=mapping.id,
+            source_connection_id=mapping.source_connection_id,
+            background_job_id=init_job.id,
+            triggered_by_user_id=project_ctx.principal.user.id,
+            provider=mapping.provider,
+            sync_mode="initial",
+            cursor_before_json=dict(mapping.sync_cursor_json or {}),
+        )
+        session.add(sync_run)
+        session.flush()
+
+        init_job.payload_json = {
+            **init_job.payload_json,
+            "sync_run_id": str(sync_run.id),
+        }
+
     session.commit()
     session.refresh(mapping)
+    local_response_cache.invalidate_prefix(f"source_mappings:{project_id}")
+
+    try:
+        from app.main import signal_worker_activity
+
+        signal_worker_activity()
+    except Exception:
+        pass
 
     return SourceMappingItemResponse(
         id=mapping.id,
