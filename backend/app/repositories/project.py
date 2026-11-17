@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.orm import Session, load_only, selectinload
+from sqlalchemy.orm import Session, joinedload, load_only, selectinload
 
 from app.models.audit import AuditLog
 from app.models.enums import (
@@ -37,12 +37,12 @@ class ProjectRepository:
             select(Project)
             .where(Project.id == project_id)
             .options(
-                selectinload(Project.organisation),
-                selectinload(Project.owner),
-                selectinload(Project.created_by),
+                joinedload(Project.organisation),
+                joinedload(Project.owner),
+                joinedload(Project.created_by),
             )
         )
-        return self._session.scalar(stmt)
+        return self._session.scalars(stmt).unique().first()
 
     def get_by_slug_in_org(
         self,
@@ -123,15 +123,15 @@ class ProjectRepository:
         total = int(self._session.scalar(select(func.count()).select_from(base.subquery())) or 0)
         stmt = (
             base.options(
-                selectinload(Project.owner),
-                selectinload(ProjectMembership.role),
+                joinedload(Project.owner),
+                joinedload(ProjectMembership.role),
             )
             .order_by(Project.created_at.desc(), Project.id.asc())
             .offset(offset)
             .limit(limit)
         )
         rows: list[tuple[Project, ProjectMembership | None]] = [
-            (project, mem) for project, mem in self._session.execute(stmt).all()
+            (project, mem) for project, mem in self._session.execute(stmt).unique().all()
         ]
         return rows, total
 
@@ -154,13 +154,13 @@ class ProjectRepository:
                 ProjectMembership.status == ProjectMembershipStatus.ACTIVE.value,
             )
             .options(
-                selectinload(ProjectMembership.user),
-                selectinload(ProjectMembership.role)
-                .selectinload(Role.role_permissions)
-                .selectinload(RolePermission.permission),
+                joinedload(ProjectMembership.user),
+                joinedload(ProjectMembership.role)
+                .joinedload(Role.role_permissions)
+                .joinedload(RolePermission.permission),
             )
         )
-        return self._session.scalar(stmt)
+        return self._session.scalars(stmt).unique().first()
 
     def list_memberships(
         self,
@@ -169,22 +169,27 @@ class ProjectRepository:
         status: str | None = ProjectMembershipStatus.ACTIVE.value,
         limit: int = 50,
         offset: int = 0,
+        include_total: bool = True,
     ) -> tuple[list[ProjectMembership], int]:
         base = select(ProjectMembership).where(ProjectMembership.project_id == project_id)
         if status is not None:
             base = base.where(ProjectMembership.status == status)
 
-        total = int(self._session.scalar(select(func.count()).select_from(base.subquery())) or 0)
+        total = (
+            int(self._session.scalar(select(func.count()).select_from(base.subquery())) or 0)
+            if include_total
+            else 0
+        )
         stmt = (
             base.options(
-                selectinload(ProjectMembership.user),
-                selectinload(ProjectMembership.role),
+                joinedload(ProjectMembership.user),
+                joinedload(ProjectMembership.role),
             )
             .order_by(ProjectMembership.joined_at.asc(), ProjectMembership.id.asc())
             .offset(offset)
             .limit(limit)
         )
-        return list(self._session.scalars(stmt).all()), total
+        return list(self._session.scalars(stmt).unique().all()), total
 
     def create_membership(
         self,
@@ -229,11 +234,11 @@ class ProjectRepository:
             select(ProjectTransition)
             .where(ProjectTransition.project_id == project_id)
             .options(
-                selectinload(ProjectTransition.departing_user),
-                selectinload(ProjectTransition.successor_user),
+                joinedload(ProjectTransition.departing_user),
+                joinedload(ProjectTransition.successor_user),
             )
         )
-        return self._session.scalar(stmt)
+        return self._session.scalars(stmt).unique().first()
 
     def upsert_transition(
         self,
@@ -280,16 +285,21 @@ class ProjectRepository:
         project_id: uuid.UUID,
         limit: int = 10,
         offset: int = 0,
+        include_total: bool = True,
     ) -> tuple[list[AuditLog], int]:
         base = select(AuditLog).where(AuditLog.project_id == project_id)
-        total = int(self._session.scalar(select(func.count()).select_from(base.subquery())) or 0)
+        total = (
+            int(self._session.scalar(select(func.count()).select_from(base.subquery())) or 0)
+            if include_total
+            else 0
+        )
         stmt = (
-            base.options(selectinload(AuditLog.actor_user))
+            base.options(joinedload(AuditLog.actor_user))
             .order_by(AuditLog.created_at.desc())
             .offset(offset)
             .limit(limit)
         )
-        return list(self._session.scalars(stmt).all()), total
+        return list(self._session.scalars(stmt).unique().all()), total
 
     def get_source_metrics(self, project_id: uuid.UUID) -> dict[str, Any]:
         stmt = (
@@ -303,9 +313,9 @@ class ProjectRepository:
                     ]
                 ),
             )
-            .options(selectinload(ProjectSourceMapping.source_connection))
+            .options(joinedload(ProjectSourceMapping.source_connection))
         )
-        mappings = list(self._session.scalars(stmt).all())
+        mappings = list(self._session.scalars(stmt).unique().all())
         total_sources = len(mappings)
         active_providers = sorted({m.provider for m in mappings})
         last_synced = None
@@ -350,10 +360,10 @@ class ProjectRepository:
                     EvidenceItem.source_access_policy_id,
                     EvidenceItem.source_connection_id,
                 ),
-                selectinload(EvidenceItem.source_access_policy),
+                joinedload(EvidenceItem.source_access_policy),
             )
         )
-        return list(self._session.scalars(stmt).all())
+        return list(self._session.scalars(stmt).unique().all())
 
     def get_knowledge_metrics(self, project_id: uuid.UUID) -> dict[str, Any]:
         stmt = (

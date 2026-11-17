@@ -938,10 +938,12 @@ class ProjectService:
         if cached_data is None:
             cached_data = local_response_cache.get(local_key)
         if cached_data is not None:
+            print("RETURNING CACHED DATA FROM local_response_cache! local_key =", local_key)
             try:
                 return ProjectOverviewResponse.model_validate(cached_data)
             except Exception:
                 local_response_cache.delete(local_key)
+        print("COMPUTING FRESH OVERVIEW! all_evidence count =", len(self._project_repo.list_active_evidence_items(project.id)))
 
         transition = self._project_repo.get_transition(project.id)
         source_metrics = self._project_repo.get_source_metrics(project.id)
@@ -972,10 +974,15 @@ class ProjectService:
             "document_count": doc_count,
         }
         knowledge_metrics = self._project_repo.get_knowledge_metrics(project.id)
-        members, _ = self._project_repo.list_memberships(project_id=project.id, limit=100)
+        members, _ = self._project_repo.list_memberships(
+            project_id=project.id,
+            limit=100,
+            include_total=False,
+        )
         recent_audit, _ = self._project_repo.get_project_activity(
             project_id=project.id,
             limit=10,
+            include_total=False,
         )
 
         departing_summary = (
