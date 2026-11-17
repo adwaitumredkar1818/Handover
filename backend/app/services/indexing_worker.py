@@ -213,6 +213,9 @@ class IndexingWorkerService:
                 evidence.indexing_status = EvidenceIndexingStatus.PROCESSING.value
                 evidence.index_error_code = None
                 evidence.index_error_message = None
+                claim_meta = dict(evidence.metadata_json or {})
+                claim_meta["lifecycle_stage"] = "indexing"
+                evidence.metadata_json = claim_meta
 
             claimed = _ClaimedIndexJob(
                 job_id=job.id,
@@ -402,6 +405,77 @@ class IndexingWorkerService:
                     message=f"Completed evidence indexing ({outcome.chunk_count} chunk(s)).",
                 )
                 session.commit()
+
+                # Run per-evidence fast extraction and progressive relationship updates immediately
+                try:
+                    from app.services.fast_extractor import FastKnowledgeExtractor
+                    from app.repositories.evidence import EvidenceRepository
+
+                    with self._session_factory() as item_session:
+                        ev_item = EvidenceRepository(item_session).get_by_id(claimed.evidence_id, include_deleted=False)
+                        if ev_item is not None:
+                            fast_extractor = FastKnowledgeExtractor(item_session)
+                            fast_items = fast_extractor.extract_evidence_knowledge(
+                                evidence=ev_item,
+                                force_rerun=False,
+                            )
+                            item_session.commit()
+
+                            meta = dict(ev_item.metadata_json or {})
+                            k_count = len(fast_items) if fast_items else meta.get("knowledge_count", 0)
+                            meta["knowledge_count"] = k_count
+                            if k_count > 0:
+                                meta["lifecycle_stage"] = "knowledge_ready"
+                            else:
+                                meta["lifecycle_stage"] = "indexed"
+                            ev_item.metadata_json = meta
+                            item_session.commit()
+
+                            # If fast items were created or manifest/code/commit was indexed, run progressive relationship reconstruction
+                            is_graph_relevant = (
+                                bool(fast_items)
+                                or ev_item.category in ("source_code", "commit", "pull_request", "documentation", "architecture")
+                                or "package.json" in (ev_item.title or "").lower()
+                                or "requirements.txt" in (ev_item.title or "").lower()
+                            )
+                            if is_graph_relevant:
+                                try:
+                                    from app.services.knowledge_graphs import invalidate_knowledge_graph_cache
+                                    from app.services.relationship_coordinator import RelationshipCoordinatorService
+
+                                    with self._session_factory() as rel_session:
+                                        RelationshipCoordinatorService(rel_session).run_reconstruction(
+                                            organisation_id=claimed.organisation_id,
+                                            project_id=claimed.project_id,
+                                            include_llm_suggestions=False,
+                                        )
+                                        rel_session.commit()
+                                    invalidate_knowledge_graph_cache(claimed.project_id)
+
+                                    with self._session_factory() as upd_session:
+                                        ev_upd = EvidenceRepository(upd_session).get_by_id(claimed.evidence_id, include_deleted=False)
+                                        if ev_upd:
+                                            m = dict(ev_upd.metadata_json or {})
+                                            m["lifecycle_stage"] = "graph_updated"
+                                            ev_upd.metadata_json = m
+                                            upd_session.commit()
+                                except Exception as rel_exc:
+                                    logger.warning("Progressive relationship update failed: %s", rel_exc)
+                except Exception as fast_exc:
+                    logger.warning("Per-evidence fast extraction skipped: %s", fast_exc)
+
+                trigger = (claimed.payload_json or {}).get("trigger")
+                if trigger == "pipeline_auto":
+                    try:
+                        from app.services.pipeline_coordinator import PipelineCoordinatorService
+
+                        with self._session_factory() as pipe_session:
+                            PipelineCoordinatorService(pipe_session).trigger_auto_pipeline(
+                                project_id=claimed.project_id,
+                            )
+                    except Exception as pipe_exc:
+                        logger.warning("PipelineCoordinator auto trigger failed after indexing: %s", pipe_exc)
+
                 return
 
             # Degraded (`partially_indexed`) or chunking failure (`failed`)
@@ -833,26 +907,23 @@ class IndexingWorkerService:
                     )
                 )
 
-            for batch_start in range(0, len(records), 64):
-                self._vector_store.upsert_records(records[batch_start : batch_start + 64])
+            vector_error: Any = None
+            try:
+                for batch_start in range(0, len(records), 64):
+                    self._vector_store.upsert_records(records[batch_start : batch_start + 64])
+            except (EmbeddingExecutionError, VectorStoreError) as exc:
+                vector_error = exc
+                self._record_partial_vector_failure(
+                    evidence_id=evidence_id,
+                    collection_name=collection_name,
+                    error_code=exc.code,
+                    error_message=exc.message,
+                )
+        except Exception as exc:  # Catch other unexpected vector errors
+            vector_error = exc
+            logger.warning("Vector indexing encountered unexpected issue: %s", exc)
 
-        except (EmbeddingExecutionError, VectorStoreError) as exc:
-            self._record_partial_vector_failure(
-                evidence_id=evidence_id,
-                collection_name=collection_name,
-                error_code=exc.code,
-                error_message=exc.message,
-            )
-            return _ItemIndexOutcome(
-                status="partially_indexed",
-                chunk_count=len(chunks_snapshot),
-                vectors_upserted=0,
-                retryable=exc.retryable,
-                error_code=exc.code,
-                error_message=exc.message,
-            )
-
-        # Phase 3: Mark canonical chunks & parent EvidenceItem fully indexed
+        # Phase 3: Mark canonical chunks & parent EvidenceItem (allow downstream extraction regardless)
         now = utc_now()
         with self._session_factory() as session:
             ev_repo = EvidenceRepository(session)
@@ -862,26 +933,36 @@ class IndexingWorkerService:
                 return _ItemIndexOutcome(
                     status="skipped",
                     chunk_count=len(chunks_snapshot),
-                    vectors_upserted=len(chunks_snapshot),
+                    vectors_upserted=len(chunks_snapshot) if vector_error is None else 0,
                 )
             chunks = chunk_repo.list_chunks_for_evidence(ev.id)
-            chunk_repo.mark_chunks_vector_results(
-                chunks=chunks,
-                indexing_status=ChunkIndexingStatus.INDEXED.value,
-                collection_name=collection_name,
-                embedding_model=self._embedding.model_name,
-                embedding_dimensions=self._embedding.expected_dimensions,
-                embedded_at=now,
-                error_code=None,
-                error_message=None,
-            )
-            ev.indexing_status = EvidenceIndexingStatus.INDEXED.value
+            if vector_error is None:
+                chunk_repo.mark_chunks_vector_results(
+                    chunks=chunks,
+                    indexing_status=ChunkIndexingStatus.INDEXED.value,
+                    collection_name=collection_name,
+                    embedding_model=self._embedding.model_name,
+                    embedding_dimensions=self._embedding.expected_dimensions,
+                    embedded_at=now,
+                    error_code=None,
+                    error_message=None,
+                )
+                ev.indexing_status = EvidenceIndexingStatus.INDEXED.value
+                ev.index_error_code = None
+                ev.index_error_message = None
+            else:
+                ev.indexing_status = EvidenceIndexingStatus.PARTIALLY_INDEXED.value
+                ev.index_error_code = getattr(vector_error, "code", "VECTOR_STORE_ERROR")
+                ev.index_error_message = str(getattr(vector_error, "message", vector_error))
+
             ev.chunk_count = len(chunks)
             ev.indexed_at = now
             ev.embedding_model = self._embedding.model_name
             ev.index_version = self._vector_store.index_version
-            ev.index_error_code = None
-            ev.index_error_message = None
+            meta = dict(ev.metadata_json or {})
+            if meta.get("lifecycle_stage") in (None, "discovered", "imported", "indexing"):
+                meta["lifecycle_stage"] = "indexed"
+            ev.metadata_json = meta
 
             if (
                 chunks
@@ -925,7 +1006,7 @@ class IndexingWorkerService:
                             "scope_type": ExtractionRunScope.EVIDENCE.value,
                             "evidence_ids": [str(ev.id)],
                             "categories": categories,
-                            "force_rerun": True,
+                            "force_rerun": False,
                             "include_synthetic": is_synth,
                             "trigger": "auto_reextract_on_update",
                         },
@@ -933,6 +1014,22 @@ class IndexingWorkerService:
                     auto_run.background_job_id = auto_job.id
 
             session.commit()
+            try:
+                from app.main import signal_worker_activity
+
+                signal_worker_activity()
+            except Exception:
+                pass
+
+        if vector_error is not None:
+            return _ItemIndexOutcome(
+                status="partially_indexed",
+                chunk_count=len(chunks_snapshot),
+                vectors_upserted=0,
+                retryable=bool(getattr(vector_error, "retryable", True)),
+                error_code=getattr(vector_error, "code", "VECTOR_STORE_ERROR"),
+                error_message=str(getattr(vector_error, "message", vector_error)),
+            )
 
         return _ItemIndexOutcome(
             status="indexed",
