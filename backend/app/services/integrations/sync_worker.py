@@ -305,7 +305,7 @@ class SourceSyncWorkerService:
                 return None
 
             auth_id = auth.id
-            sync_mode = str(payload.get("sync_mode") or "full")
+            sync_mode = str(payload.get("sync_mode") or "initial")
 
             if (
                 sync_run is None
@@ -521,6 +521,7 @@ class SourceSyncWorkerService:
                 if exc.status_code != 401:
                     raise
                 session.rollback()
+                ingestor.clear_cache()
                 # Re-fetch cleanly before refresh rotation and retry once
                 reloaded_mapping = int_repo.get_mapping_by_id(mapping_id)
                 if reloaded_mapping is not None:
@@ -654,6 +655,32 @@ class SourceSyncWorkerService:
             session.add(notif)
             session.commit()
 
+            try:
+                from app.services.knowledge_graphs import invalidate_knowledge_graph_cache
+                from app.services.relationship_coordinator import RelationshipCoordinatorService
+
+                with self._session_factory() as rel_session:
+                    RelationshipCoordinatorService(rel_session).run_reconstruction(
+                        organisation_id=sync_run.organisation_id,
+                        project_id=sync_run.project_id,
+                        include_llm_suggestions=False,
+                    )
+                    rel_session.commit()
+                invalidate_knowledge_graph_cache(sync_run.project_id)
+            except Exception as rel_exc:
+                logger.warning("Deterministic manifest graph reconstruction failed after source sync: %s", rel_exc)
+
+            try:
+                from app.services.pipeline_coordinator import PipelineCoordinatorService
+
+                with self._session_factory() as coord_session:
+                    PipelineCoordinatorService(coord_session).trigger_auto_pipeline(
+                        project_id=sync_run.project_id,
+                        triggered_by_user_id=sync_run.triggered_by_user_id,
+                    )
+            except Exception as pipe_exc:
+                logger.warning("Failed to trigger auto pipeline after source sync: %s", pipe_exc)
+
     def _complete_failure(
         self,
         *,
@@ -784,3 +811,29 @@ class SourceSyncWorkerService:
                     )
                     session.add(notif)
             session.commit()
+
+            try:
+                from app.services.knowledge_graphs import invalidate_knowledge_graph_cache
+                from app.services.relationship_coordinator import RelationshipCoordinatorService
+
+                with self._session_factory() as rel_session:
+                    RelationshipCoordinatorService(rel_session).run_reconstruction(
+                        organisation_id=sync_run.organisation_id,
+                        project_id=sync_run.project_id,
+                        include_llm_suggestions=False,
+                    )
+                    rel_session.commit()
+                invalidate_knowledge_graph_cache(sync_run.project_id)
+            except Exception as rel_exc:
+                logger.warning("Deterministic manifest graph reconstruction failed after source sync: %s", rel_exc)
+
+            try:
+                from app.services.pipeline_coordinator import PipelineCoordinatorService
+
+                with self._session_factory() as coord_session:
+                    PipelineCoordinatorService(coord_session).trigger_auto_pipeline(
+                        project_id=sync_run.project_id,
+                        triggered_by_user_id=sync_run.triggered_by_user_id,
+                    )
+            except Exception as pipe_exc:
+                logger.warning("Failed to trigger auto pipeline after source sync: %s", pipe_exc)

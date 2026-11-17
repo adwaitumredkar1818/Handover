@@ -89,6 +89,21 @@ class SourceEvidenceIngestor:
         self._session = session
         self._evidence_repo = evidence_repository
         self._job_repo = job_repository or BackgroundJobRepository(session)
+        self._existing_items_cache: dict[tuple[uuid.UUID, str, str], EvidenceItem | None] = {}
+        self._attribution_svc: Any = None
+
+    def clear_cache(self) -> None:
+        """Clear cached existing items after rollback or between sync batches."""
+        self._existing_items_cache.clear()
+
+    def _get_attribution_service(self) -> Any:
+        if self._attribution_svc is None:
+            try:
+                from app.services.contribution_attribution import ContributionAttributionService
+                self._attribution_svc = ContributionAttributionService(self._session)
+            except Exception:
+                self._attribution_svc = None
+        return self._attribution_svc
 
     def _enqueue_indexing_after_upsert(
         self,
@@ -98,6 +113,7 @@ class SourceEvidenceIngestor:
         extracted_text: str,
         trigger: str,
         now: datetime,
+        flush: bool = True,
     ) -> None:
         if not extracted_text.strip():
             item.indexing_status = EvidenceIndexingStatus.INDEXED.value
@@ -106,10 +122,14 @@ class SourceEvidenceIngestor:
             item.index_error_code = None
             item.index_error_message = None
             return
-        if not self._job_repo.has_active_job_for_evidence(
-            evidence_id=item.id,
-            job_type=BackgroundJobType.EVIDENCE_INDEXING.value,
-        ):
+        should_create = True
+        if trigger != "connector_created":
+            should_create = not self._job_repo.has_active_job_for_evidence(
+                evidence_id=item.id,
+                job_type=BackgroundJobType.EVIDENCE_INDEXING.value,
+            )
+        if should_create:
+            trigger_name = "pipeline_auto" if trigger in ("connector_created", "connector_updated") else trigger
             self._job_repo.create_job(
                 organisation_id=item.organisation_id,
                 project_id=item.project_id,
@@ -120,8 +140,9 @@ class SourceEvidenceIngestor:
                 payload_json={
                     "target": "full",
                     "force_rechunk": True,
-                    "trigger": trigger,
+                    "trigger": trigger_name,
                 },
+                flush=flush,
             )
         item.indexing_status = EvidenceIndexingStatus.QUEUED.value
         item.index_error_code = None
@@ -136,6 +157,7 @@ class SourceEvidenceIngestor:
         triggered_by_user_id: uuid.UUID | None,
         record: NormalizedSourceEvidence,
         now: datetime | None = None,
+        flush: bool = True,
     ) -> UpsertEvidenceOutcome:
         """Create or update an external evidence item in place without touching uploads."""
         timestamp = now or utc_now()
@@ -156,12 +178,31 @@ class SourceEvidenceIngestor:
             else None
         )
 
-        existing = self._evidence_repo.find_active_by_source_external_id(
-            project_id=project_id,
-            source_type=record.source_type,
-            source_external_id=record.source_external_id,
+        cache_key = (project_id, record.source_type, record.source_external_id)
+        if cache_key in self._existing_items_cache:
+            existing = self._existing_items_cache[cache_key]
+        else:
+            existing = self._evidence_repo.find_active_by_source_external_id(
+                project_id=project_id,
+                source_type=record.source_type,
+                source_external_id=record.source_external_id,
+            )
+            self._existing_items_cache[cache_key] = existing
+
+        text_len = len(record.extracted_text.strip())
+        is_semantic_eligible = (
+            record.category in ("documentation", "architecture", "pdf_document", "docx_document")
+            or record.mime_type in ("text/markdown", "application/pdf")
+            or text_len >= 200
         )
+        initial_semantic_status = "queued" if is_semantic_eligible else "not_applicable"
+
         if existing is None:
+            meta = dict(record.metadata_json)
+            meta["lifecycle_stage"] = "imported"
+            meta["semantic_status"] = initial_semantic_status
+            meta.setdefault("knowledge_count", 0)
+
             created_item = self._evidence_repo.create_evidence_item(
                 organisation_id=organisation_id,
                 project_id=project_id,
@@ -195,13 +236,17 @@ class SourceEvidenceIngestor:
                 page_count=len(record.pages),
                 error_code=error_code,
                 error_message=error_message,
-                metadata_json=dict(record.metadata_json),
+                metadata_json=meta,
+                flush=flush,
             )
+            self._existing_items_cache[cache_key] = created_item
             self._evidence_repo.replace_extracted_content(
                 evidence_id=created_item.id,
                 extracted_text=record.extracted_text,
                 warnings=record.warnings,
                 pages=record.pages,
+                flush=flush,
+                is_new=True,
             )
             self._enqueue_indexing_after_upsert(
                 item=created_item,
@@ -209,11 +254,13 @@ class SourceEvidenceIngestor:
                 extracted_text=record.extracted_text,
                 trigger="connector_created",
                 now=timestamp,
+                flush=flush,
             )
             if created_item.category in ("commit", "pull_request"):
                 try:
-                    from app.services.contribution_attribution import ContributionAttributionService
-                    ContributionAttributionService(self._session).attribute_evidence(created_item)
+                    attr_svc = self._get_attribution_service()
+                    if attr_svc is not None:
+                        attr_svc.attribute_evidence(created_item, flush=flush)
                 except Exception as exc:
                     logger.debug("Contribution attribution error on create: %s", exc)
             return UpsertEvidenceOutcome(action="created", evidence_item=created_item)
@@ -223,7 +270,15 @@ class SourceEvidenceIngestor:
             existing.source_connection_id = source_connection_id
             existing.source_access_policy_id = record.source_access_policy_id
             existing.acl_scope = record.acl_scope
-            self._session.flush()
+            if existing.metadata_json:
+                meta = dict(existing.metadata_json)
+                if "lifecycle_stage" not in meta:
+                    meta["lifecycle_stage"] = "indexed" if existing.indexing_status == "indexed" else "imported"
+                if "semantic_status" not in meta:
+                    meta["semantic_status"] = initial_semantic_status
+                existing.metadata_json = meta
+            if flush:
+                self._session.flush()
             return UpsertEvidenceOutcome(action="unchanged", evidence_item=existing)
 
         existing.source_provider = record.source_provider
@@ -249,14 +304,23 @@ class SourceEvidenceIngestor:
         existing.page_count = len(record.pages)
         existing.error_code = error_code
         existing.error_message = error_message
-        existing.metadata_json = dict(record.metadata_json)
-        self._session.flush()
+        updated_meta = dict(record.metadata_json)
+        updated_meta["lifecycle_stage"] = "imported"
+        updated_meta["semantic_status"] = initial_semantic_status
+        updated_meta.setdefault(
+            "knowledge_count",
+            (existing.metadata_json or {}).get("knowledge_count", 0),
+        )
+        existing.metadata_json = updated_meta
+        if flush:
+            self._session.flush()
 
         self._evidence_repo.replace_extracted_content(
             evidence_id=existing.id,
             extracted_text=record.extracted_text,
             warnings=record.warnings,
             pages=record.pages,
+            flush=flush,
         )
         KnowledgeRepository(self._session).mark_stale_for_evidence(
             evidence_id=existing.id,
