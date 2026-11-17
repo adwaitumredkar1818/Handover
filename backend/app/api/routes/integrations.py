@@ -14,6 +14,7 @@ from app.api.deps import (
     require_project_permission,
     resolve_project_context,
 )
+from app.core.cache.local_cache import local_response_cache
 from app.core.exceptions import ForbiddenError
 from app.schemas.integrations import (
     BatchCreateMappingsRequest,
@@ -288,7 +289,9 @@ def create_github_mapping(
 ) -> ProjectSourceMappingResponse:
     """Verify caller access and bind one GitHub repository to the target project."""
     _require_project_contributor_or_manager(project_ctx)
-    return service.create_github_mapping(project_ctx=project_ctx, request=request)
+    res = service.create_github_mapping(project_ctx=project_ctx, request=request)
+    local_response_cache.invalidate_prefix(f"source_mappings:{project_ctx.project.id}")
+    return res
 
 
 @router.post(
@@ -304,7 +307,9 @@ def create_jira_mapping(
 ) -> ProjectSourceMappingResponse:
     """Verify caller site & project access and bind one Jira project cleanly."""
     _require_project_contributor_or_manager(project_ctx)
-    return service.create_jira_mapping(project_ctx=project_ctx, request=request)
+    res = service.create_jira_mapping(project_ctx=project_ctx, request=request)
+    local_response_cache.invalidate_prefix(f"source_mappings:{project_ctx.project.id}")
+    return res
 
 
 @router.post(
@@ -320,7 +325,9 @@ def create_slack_mapping(
 ) -> ProjectSourceMappingResponse:
     """Verify caller access and bind one Slack channel cleanly."""
     _require_project_contributor_or_manager(project_ctx)
-    return service.create_slack_mapping(project_ctx=project_ctx, request=request)
+    res = service.create_slack_mapping(project_ctx=project_ctx, request=request)
+    local_response_cache.invalidate_prefix(f"source_mappings:{project_ctx.project.id}")
+    return res
 
 
 @router.post(
@@ -336,7 +343,9 @@ def batch_create_mappings(
 ) -> BatchCreateMappingsResponse:
     """Batch map selected source items."""
     _require_project_contributor_or_manager(project_ctx)
-    return service.batch_create_mappings(project_ctx=project_ctx, request=request)
+    res = service.batch_create_mappings(project_ctx=project_ctx, request=request)
+    local_response_cache.invalidate_prefix(f"source_mappings:{project_ctx.project.id}")
+    return res
 
 
 @router.delete(
@@ -352,7 +361,9 @@ def disable_project_mapping(
 ) -> ProjectSourceMappingResponse:
     """Disable future syncs on a mapping cleanly without deleting historical evidence."""
     _require_project_contributor_or_manager(project_ctx)
-    return service.disable_mapping(project_ctx=project_ctx, mapping_id=mapping_id)
+    res = service.disable_mapping(project_ctx=project_ctx, mapping_id=mapping_id)
+    local_response_cache.invalidate_prefix(f"source_mappings:{project_ctx.project.id}")
+    return res
 
 
 @router.post(
