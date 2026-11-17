@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
 
 from app.core.cache.cache_metrics import CacheMetricsCollector
 from app.core.cache.cache_policies import CachePolicy
@@ -147,7 +147,7 @@ class CacheService:
         """Transparent read-through caching pattern."""
         cached = self.get(key)
         if cached is not None:
-            return cached  # type: ignore[return-value]
+            return cast(T, cached)
 
         result = producer()
         if result is not None:

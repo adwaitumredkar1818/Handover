@@ -424,7 +424,30 @@ class IngestionWorkerService:
             job = job_repo.get_by_id(job_id)
             if job is None:
                 return
-            evidence = evidence_repo.get_by_id(evidence_id, include_deleted=False)
+            evidence = evidence_repo.get_by_id_detail(evidence_id, include_deleted=False)
+
+            has_persisted_extract = (
+                evidence is not None
+                and evidence.content is not None
+                and bool((evidence.content.extracted_text or "").strip())
+            )
+            if error_code in {
+                "STORAGE_OBJECT_MISSING",
+                "STORAGE_KEY_INVALID",
+                "STORAGE_KEY_UNSUPPORTED",
+            } and has_persisted_extract and evidence is not None:
+                job.status = BackgroundJobStatus.SUCCEEDED.value
+                job.completed_at = now
+                job.duration_ms = duration_ms
+                job.locked_by = None
+                job.lease_expires_at = None
+                job.error_code = None
+                job.error_message = None
+                evidence.processing_status = EvidenceProcessingStatus.EXTRACTED.value
+                evidence.error_code = None
+                evidence.error_message = None
+                session.commit()
+                return
 
             if retryable:
                 backoff_seconds = min(

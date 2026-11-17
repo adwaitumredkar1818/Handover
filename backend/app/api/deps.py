@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
-from typing import cast
+from typing import Any, cast
 
 import httpx
 from fastapi import Depends, Request
@@ -77,7 +81,64 @@ from app.services.vector_store import (
     build_chroma_collection_name,
 )
 
+logger = logging.getLogger("app.api.deps")
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+_RBAC_CACHE_TTL_SECONDS = 60.0
+_RBAC_CACHE_MAX_ITEMS = 1024
+_rbac_cache_lock = threading.RLock()
+_principal_cache: OrderedDict[tuple[Any, ...], tuple[float, AuthenticatedPrincipal]] = OrderedDict()
+_project_ctx_cache: OrderedDict[tuple[Any, ...], tuple[float, ProjectContext]] = OrderedDict()
+
+
+def _rbac_cache_get(store: OrderedDict[tuple[Any, ...], Any], key: tuple[Any, ...]) -> Any | None:
+    now = time.monotonic()
+    with _rbac_cache_lock:
+        entry = store.get(key)
+        if entry is None:
+            return None
+        expires_at, value = entry
+        if expires_at <= now:
+            store.pop(key, None)
+            return None
+        store.move_to_end(key)
+        return value
+
+
+def _rbac_cache_set(store: OrderedDict[tuple[Any, ...], Any], key: tuple[Any, ...], value: Any) -> None:
+    expires_at = time.monotonic() + _RBAC_CACHE_TTL_SECONDS
+    with _rbac_cache_lock:
+        store[key] = (expires_at, value)
+        store.move_to_end(key)
+        while len(store) > _RBAC_CACHE_MAX_ITEMS:
+            store.popitem(last=False)
+
+
+def invalidate_rbac_cache(*, user_id: uuid.UUID | None = None, project_id: uuid.UUID | None = None) -> None:
+    """Clear short-lived RBAC principal/project caches on mutations."""
+    with _rbac_cache_lock:
+        if user_id is None and project_id is None:
+            _principal_cache.clear()
+            _project_ctx_cache.clear()
+            return
+        if user_id is not None:
+            for k in [k for k in _principal_cache if len(k) >= 2 and k[1] == user_id]:
+                _principal_cache.pop(k, None)
+            for k in [k for k in _project_ctx_cache if len(k) >= 2 and k[1] == user_id]:
+                _project_ctx_cache.pop(k, None)
+        if project_id is not None:
+            for k in [k for k in _project_ctx_cache if len(k) >= 3 and k[2] == project_id]:
+                _project_ctx_cache.pop(k, None)
+
+
+def _safe_expunge(session: Session, *objs: Any) -> None:
+    for obj in objs:
+        if obj is not None:
+            try:
+                if obj in session:
+                    session.expunge(obj)
+            except Exception as exc:
+                logger.debug("Ignoring session expunge error during cache prepare: %s", exc)
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -571,24 +632,14 @@ def get_knowledge_intelligence_service(
         session=db_session,
         reconstruction_service=reconstruction_service,
     )
-def get_current_principal(
-    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),  # noqa: B008
-    settings: Settings = Depends(get_app_settings),  # noqa: B008
-    db_session: Session = Depends(get_db_session),  # noqa: B008
-    rbac_service: RbacService = Depends(get_rbac_service),  # noqa: B008
-) -> AuthenticatedPrincipal:
-    """Validate FastAPI Bearer JWT, verify active user status & session family, and resolve RBAC."""
-    if (
-        credentials is None
-        or credentials.scheme.lower() != "bearer"
-        or not credentials.credentials
-    ):
-        raise UnauthorizedError(
-            "Authentication credentials were not provided.",
-            code="AUTHENTICATION_REQUIRED",
-        )
-
-    claims = decode_access_token(credentials.credentials, settings)
+def _resolve_principal_uncached(
+    *,
+    credentials_token: str,
+    settings: Settings,
+    db_session: Session,
+    rbac_service: RbacService,
+) -> tuple[AuthenticatedPrincipal, uuid.UUID]:
+    claims = decode_access_token(credentials_token, settings)
     user = UserRepository(db_session).get_by_id(claims.subject)
     if user is None or user.status != UserStatus.ACTIVE.value:
         raise UnauthorizedError(
@@ -607,10 +658,59 @@ def get_current_principal(
             code="SESSION_REVOKED",
         )
 
-    return rbac_service.resolve_principal(
+    principal = rbac_service.resolve_principal(
         user=user,
         session_family_id=claims.session_family_id,
     )
+    return principal, claims.subject
+
+
+def get_current_principal(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),  # noqa: B008
+    settings: Settings = Depends(get_app_settings),  # noqa: B008
+    db_session: Session = Depends(get_db_session),  # noqa: B008
+    rbac_service: RbacService = Depends(get_rbac_service),  # noqa: B008
+) -> AuthenticatedPrincipal:
+    """Validate FastAPI Bearer JWT, verify active user status & session family, and resolve RBAC."""
+    if (
+        credentials is None
+        or credentials.scheme.lower() != "bearer"
+        or not credentials.credentials
+    ):
+        raise UnauthorizedError(
+            "Authentication credentials were not provided.",
+            code="AUTHENTICATION_REQUIRED",
+        )
+
+    is_read_method = request.method.upper() in {"GET", "HEAD"}
+    claims = decode_access_token(credentials.credentials, settings)
+    bind_id = id(db_session.get_bind())
+    cache_key = (bind_id, claims.subject, claims.session_family_id)
+    if is_read_method:
+        cached = _rbac_cache_get(_principal_cache, cache_key)
+        if cached is not None:
+            return cast(AuthenticatedPrincipal, cached)
+    else:
+        invalidate_rbac_cache(user_id=claims.subject)
+
+    principal, _subject = _resolve_principal_uncached(
+        credentials_token=credentials.credentials,
+        settings=settings,
+        db_session=db_session,
+        rbac_service=rbac_service,
+    )
+    if is_read_method:
+        _ = (
+            principal.user.id,
+            principal.user.email,
+            principal.user.full_name,
+            principal.user.status,
+            principal.user.is_email_verified,
+        )
+        _safe_expunge(db_session, principal.user)
+        _rbac_cache_set(_principal_cache, cache_key, principal)
+    return principal
 
 
 def get_optional_principal(
@@ -717,39 +817,128 @@ def require_organisation_permission(
     return require_organisation_permissions(permission_code)
 
 
+def _resolve_project_ctx_with_cache(
+    *,
+    request: Request,
+    project_id: uuid.UUID,
+    principal: AuthenticatedPrincipal,
+    rbac_service: RbacService,
+    db_session: Session,
+    require_explicit_membership: bool = False,
+    read_visibility_mode: bool = False,
+) -> ProjectContext:
+    is_read_method = request.method.upper() in {"GET", "HEAD"}
+    bind_id = id(db_session.get_bind())
+    cache_key = (
+        bind_id,
+        principal.user_id,
+        project_id,
+        require_explicit_membership,
+        read_visibility_mode,
+    )
+    if is_read_method:
+        cached = _rbac_cache_get(_project_ctx_cache, cache_key)
+        if cached is not None:
+            return cast(ProjectContext, cached)
+    else:
+        invalidate_rbac_cache(user_id=principal.user_id, project_id=project_id)
+
+    if read_visibility_mode:
+        ctx = rbac_service.resolve_project_read_context(
+            project_id=project_id,
+            principal=principal,
+        )
+    else:
+        ctx = rbac_service.resolve_project_context(
+            project_id=project_id,
+            principal=principal,
+            require_explicit_membership=require_explicit_membership,
+        )
+
+    if is_read_method:
+        _ = (
+            ctx.organisation.id,
+            ctx.organisation.status,
+            ctx.organisation.name,
+            ctx.organisation.slug,
+            ctx.project.id,
+            ctx.project.name,
+            ctx.project.slug,
+            ctx.project.status,
+            ctx.project.visibility,
+            ctx.project.organisation_id,
+            ctx.project.owner_id,
+            ctx.project.start_date,
+            ctx.project.target_completion_date,
+        )
+        if ctx.project.owner is not None:
+            _ = (ctx.project.owner.id, ctx.project.owner.full_name, ctx.project.owner.email)
+        if ctx.project.created_by is not None:
+            _ = (ctx.project.created_by.id, ctx.project.created_by.full_name, ctx.project.created_by.email)
+        _safe_expunge(
+            db_session,
+            ctx.project,
+            ctx.project.owner,
+            ctx.project.created_by,
+            ctx.organisation,
+            ctx.organisation_membership,
+            ctx.organisation_role,
+            ctx.project_membership,
+            ctx.project_role,
+        )
+        _rbac_cache_set(_project_ctx_cache, cache_key, ctx)
+    return ctx
+
+
 def resolve_project_context(
+    request: Request,
     project_id: uuid.UUID,
     principal: AuthenticatedPrincipal = Depends(get_current_principal),  # noqa: B008
     rbac_service: RbacService = Depends(get_rbac_service),  # noqa: B008
+    db_session: Session = Depends(get_db_session),  # noqa: B008
 ) -> ProjectContext:
     """Resolve verified project context with dynamic parent-organisation membership check."""
-    return rbac_service.resolve_project_context(
+    return _resolve_project_ctx_with_cache(
+        request=request,
         project_id=project_id,
         principal=principal,
+        rbac_service=rbac_service,
+        db_session=db_session,
     )
 
 
 def resolve_project_read_context(
+    request: Request,
     project_id: uuid.UUID,
     principal: AuthenticatedPrincipal = Depends(get_current_principal),  # noqa: B008
     rbac_service: RbacService = Depends(get_rbac_service),  # noqa: B008
+    db_session: Session = Depends(get_db_session),  # noqa: B008
 ) -> ProjectContext:
     """Resolve verified project read context honoring `private` vs `organisation` visibility."""
-    return rbac_service.resolve_project_read_context(
+    return _resolve_project_ctx_with_cache(
+        request=request,
         project_id=project_id,
         principal=principal,
+        rbac_service=rbac_service,
+        db_session=db_session,
+        read_visibility_mode=True,
     )
 
 
 def require_project_membership(
+    request: Request,
     project_id: uuid.UUID,
     principal: AuthenticatedPrincipal = Depends(get_current_principal),  # noqa: B008
     rbac_service: RbacService = Depends(get_rbac_service),  # noqa: B008
+    db_session: Session = Depends(get_db_session),  # noqa: B008
 ) -> ProjectContext:
     """Require both active parent-organisation membership and explicit active project membership."""
-    return rbac_service.resolve_project_context(
+    return _resolve_project_ctx_with_cache(
+        request=request,
         project_id=project_id,
         principal=principal,
+        rbac_service=rbac_service,
+        db_session=db_session,
         require_explicit_membership=True,
     )
 

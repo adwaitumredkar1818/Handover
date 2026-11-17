@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.config import ExtractionSettings, IngestionSettings
+from app.core.config import ChunkingSettings, ExtractionSettings, IngestionSettings, get_settings
 from app.core.exceptions import AppError
 from app.core.logging import redact_sensitive_text
 from app.core.security import utc_now
@@ -37,6 +37,7 @@ from app.repositories.project import ProjectRepository
 from app.repositories.rbac import RbacRepository
 from app.repositories.user import UserRepository
 from app.services.audit import AuditService
+from app.services.chunking import ChunkingService
 from app.services.extraction_prompts import (
     ALL_EXTRACTION_CATEGORIES,
     ChunkPromptInput,
@@ -46,7 +47,10 @@ from app.services.extraction_prompts import (
     partition_chunks_into_batches,
 )
 from app.services.integrations.access_policy import SourceAccessPolicyService
-from app.services.knowledge_validator import KnowledgeCandidateValidator
+from app.services.knowledge_validator import (
+    KnowledgeCandidateValidator,
+    get_category_response_json_schema,
+)
 from app.services.llm import (
     LLMExecutionError,
     LLMGenerationRequest,
@@ -183,7 +187,7 @@ class ReconstructionWorkerService:
 
             job = job_repo.claim_next_job(
                 worker_id=self._worker_id,
-                lease_seconds=self._ingestion_settings.worker_lease_seconds,
+                lease_seconds=max(1800, self._ingestion_settings.worker_lease_seconds),
                 now=now,
                 job_types=(BackgroundJobType.KNOWLEDGE_RECONSTRUCTION.value,),
             )
@@ -220,6 +224,7 @@ class ReconstructionWorkerService:
                 ev_ids.append(run.evidence_id)
             if not ev_ids:
                 from sqlalchemy import case, select
+
                 from app.models.evidence import EvidenceItem
                 items = session.execute(
                     select(EvidenceItem.id)
@@ -357,9 +362,11 @@ class ReconstructionWorkerService:
             chunks=batch,
             prompt_version=self._extraction_settings.prompt_version,
         )
+        json_schema = get_category_response_json_schema(category)
         req = LLMGenerationRequest(
             system_prompt=prompt.system_prompt,
             user_prompt=prompt.user_prompt,
+            json_schema=json_schema,
         )
         max_attempts = 1 + max(0, int(self._extraction_settings.max_retries))
         last_exc: LLMExecutionError | None = None
@@ -391,6 +398,7 @@ class ReconstructionWorkerService:
                     req = LLMGenerationRequest(
                         system_prompt=repair.system_prompt,
                         user_prompt=repair.user_prompt,
+                        json_schema=json_schema,
                     )
                     continue
                 raise
@@ -469,7 +477,36 @@ class ReconstructionWorkerService:
                     acc.skipped_items += 1
                     continue
 
-                chunks = EvidenceChunkRepository(session).list_chunks_for_evidence(ev.id)
+                chunk_repo = EvidenceChunkRepository(session)
+                chunks = chunk_repo.list_chunks_for_evidence(ev.id)
+                if not chunks:
+                    detailed_ev = EvidenceRepository(session).get_by_id_detail(
+                        ev.id,
+                        include_deleted=False,
+                    )
+                    if (
+                        detailed_ev is not None
+                        and detailed_ev.content is not None
+                        and (detailed_ev.content.extracted_text or "").strip()
+                    ):
+                        chunker = ChunkingService(settings=ChunkingSettings())
+                        drafts = chunker.chunk_evidence(detailed_ev)
+                        if drafts:
+                            settings = get_settings()
+                            from app.services.vector_store import build_chroma_collection_name
+
+                            collection_name = build_chroma_collection_name(
+                                prefix=settings.chroma.collection_prefix,
+                                embedding_model=settings.ollama.embedding_model,
+                                index_version=settings.chroma.index_version,
+                            )
+                            chunks, _ = chunk_repo.replace_chunks_for_evidence(
+                                evidence=detailed_ev,
+                                drafts=drafts,
+                                collection_name=collection_name,
+                            )
+                            detailed_ev.chunk_count = len(chunks)
+                            session.commit()
                 if not chunks:
                     acc.skipped_items += 1
                     continue
@@ -565,20 +602,6 @@ class ReconstructionWorkerService:
             else:
                 acc.processed_items += 1
 
-            try:
-                with self._session_factory() as session:
-                    k_repo = KnowledgeRepository(session)
-                    run_row = k_repo.get_run_by_id(claimed.run_id)
-                    if run_row is not None:
-                        run_row.processed_evidence_items = acc.processed_items
-                        run_row.failed_evidence_items = acc.failed_items
-                        run_row.skipped_evidence_items = acc.skipped_items
-                        run_row.candidates_generated = acc.candidates_generated
-                        run_row.batches_executed = acc.batches_executed
-                        session.commit()
-            except Exception as prog_exc:
-                logger.debug("Failed to record extraction run progress: %s", prog_exc)
-
         elapsed_ms = int((time.perf_counter() - started_perf) * 1000)
         logger.info(
             "Knowledge reconstruction run %s finished in %d ms: %d items persisted, %d candidates, %d chunks evaluated.",
@@ -589,6 +612,25 @@ class ReconstructionWorkerService:
             acc.chunks_evaluated,
         )
         self._finalize_run(claimed=claimed, acc=acc, duration_ms=elapsed_ms)
+
+        # Synchronize downstream canonical graph entities & relationships when knowledge updates
+        if acc.claims_persisted > 0 or acc.duplicates_merged > 0:
+            try:
+                from app.services.relationship_coordinator import RelationshipCoordinatorService
+
+                with self._session_factory() as rel_session:
+                    RelationshipCoordinatorService(rel_session, llm_client=self._llm).run_reconstruction(
+                        organisation_id=claimed.organisation_id,
+                        project_id=claimed.project_id,
+                        include_llm_suggestions=False,
+                    )
+                    rel_session.commit()
+            except Exception as rel_exc:
+                logger.warning(
+                    "Post-extraction relationship synchronization failed for project %s: %s",
+                    claimed.project_id,
+                    rel_exc,
+                )
 
     def _finalize_denied_run(
         self,

@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, exists, func, or_, select
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy import and_, event, exists, func, or_, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.security import utc_now
 from app.models.enums import (
@@ -135,6 +135,41 @@ def _build_accessible_evidence_clause(
 
 
 # ==============================================================================
+# Session Cache Lifecycle Helper
+# ==============================================================================
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    """Normalize timezone-naive datetimes (e.g. SQLite roundtrips) to UTC."""
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
+def _flush_if_pending(session: Session) -> None:
+    """Flush pending ORM mutations before read queries when autoflush is disabled."""
+    if session.new or session.dirty or session.deleted:
+        session.flush()
+
+
+def _get_project_session_cache(session: Session) -> dict[Any, Any]:
+    """Return per-session repository lookup cache, invalidated on commit/rollback."""
+    cache = session.info.setdefault("_rel_repo_cache", {})
+    if not session.info.get("_rel_repo_cache_listeners"):
+        session.info["_rel_repo_cache_listeners"] = True
+
+        @event.listens_for(session, "after_commit")
+        def _clear_on_commit(_sess: Session) -> None:
+            cache.clear()
+
+        @event.listens_for(session, "after_rollback")
+        def _clear_on_rollback(_sess: Session) -> None:
+            cache.clear()
+
+    return cache  # type: ignore[no-any-return]
+
+
+# ==============================================================================
 # EntityRepository
 # ==============================================================================
 
@@ -147,6 +182,77 @@ class EntityRepository:
         from app.services.integrations.access_policy import SourceAccessPolicyService
 
         self._access_policy = SourceAccessPolicyService()
+
+    def _project_entities(
+        self, project_id: uuid.UUID
+    ) -> tuple[dict[tuple[str, str], KnowledgeEntity], dict[uuid.UUID, KnowledgeEntity]]:
+        cache = _get_project_session_cache(self._session)
+        key = ("entities", project_id)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached  # type: ignore[no-any-return]
+        rows = list(
+            self._session.execute(
+                select(KnowledgeEntity).where(
+                    KnowledgeEntity.project_id == project_id,
+                    KnowledgeEntity.is_deleted.is_(False),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_type_norm: dict[tuple[str, str], KnowledgeEntity] = {}
+        by_id: dict[uuid.UUID, KnowledgeEntity] = {}
+        for row in rows:
+            by_type_norm[(row.entity_type, row.normalized_name)] = row
+            by_id[row.id] = row
+        pair = (by_type_norm, by_id)
+        cache[key] = pair
+        return pair
+
+    def _project_aliases(
+        self, project_id: uuid.UUID
+    ) -> dict[tuple[uuid.UUID, str, str], EntityAlias]:
+        cache = _get_project_session_cache(self._session)
+        key = ("aliases", project_id)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached  # type: ignore[no-any-return]
+        rows = list(
+            self._session.execute(
+                select(EntityAlias).where(EntityAlias.project_id == project_id)
+            )
+            .scalars()
+            .all()
+        )
+        by_key: dict[tuple[uuid.UUID, str, str], EntityAlias] = {
+            (r.entity_id, r.normalized_alias, r.source_provider): r for r in rows
+        }
+        cache[key] = by_key
+        return by_key
+
+    def _project_candidates(
+        self, project_id: uuid.UUID
+    ) -> dict[tuple[uuid.UUID, uuid.UUID], IdentityResolutionCandidate]:
+        cache = _get_project_session_cache(self._session)
+        key = ("candidates", project_id)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached  # type: ignore[no-any-return]
+        rows = list(
+            self._session.execute(
+                select(IdentityResolutionCandidate).where(
+                    IdentityResolutionCandidate.project_id == project_id
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_pair: dict[tuple[uuid.UUID, uuid.UUID], IdentityResolutionCandidate] = {
+            (r.left_entity_id, r.right_entity_id): r for r in rows
+        }
+        cache[key] = by_pair
+        return by_pair
 
     def create_or_get_entity(
         self,
@@ -167,18 +273,14 @@ class EntityRepository:
         is_synthetic: bool = False,
     ) -> KnowledgeEntity:
         norm_name = canonical_name.strip().lower()
-        stmt = select(KnowledgeEntity).where(
-            KnowledgeEntity.project_id == project_id,
-            KnowledgeEntity.entity_type == entity_type,
-            KnowledgeEntity.normalized_name == norm_name,
-            KnowledgeEntity.is_deleted.is_(False),
-        )
-        existing = self._session.execute(stmt).scalar_one_or_none()
+        by_type_norm, by_id = self._project_entities(project_id)
+        existing = by_type_norm.get((entity_type, norm_name))
         if existing is not None:
-            if last_observed_at and (
-                not existing.last_observed_at or last_observed_at > existing.last_observed_at
-            ):
-                existing.last_observed_at = last_observed_at
+            if last_observed_at is not None:
+                cand_last = _as_utc(last_observed_at)
+                cur_last = _as_utc(existing.last_observed_at)
+                if cur_last is None or (cand_last is not None and cand_last > cur_last):
+                    existing.last_observed_at = cand_last
             if metadata_json:
                 merged_meta = dict(existing.metadata_json or {})
                 merged_meta.update(metadata_json)
@@ -186,6 +288,7 @@ class EntityRepository:
             return existing
 
         entity = KnowledgeEntity(
+            id=uuid.uuid4(),
             organisation_id=organisation_id,
             project_id=project_id,
             entity_type=entity_type,
@@ -197,13 +300,17 @@ class EntityRepository:
             external_source_id=external_source_id,
             source_provider=source_provider,
             confidence_score=confidence_score,
+            resolution_status=EntityResolutionStatus.CANONICAL.value,
+            is_deleted=False,
+            is_stale=False,
             metadata_json=metadata_json or {},
             first_observed_at=first_observed_at or utc_now(),
             last_observed_at=last_observed_at or utc_now(),
             is_synthetic=is_synthetic,
         )
         self._session.add(entity)
-        self._session.flush()
+        by_type_norm[(entity_type, norm_name)] = entity
+        by_id[entity.id] = entity
         return entity
 
     def get_entity_by_id(
@@ -212,6 +319,7 @@ class EntityRepository:
         *,
         project_id: uuid.UUID | None = None,
     ) -> KnowledgeEntity | None:
+        _flush_if_pending(self._session)
         stmt = (
             select(KnowledgeEntity)
             .options(selectinload(KnowledgeEntity.aliases))
@@ -264,6 +372,7 @@ class EntityRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[KnowledgeEntity], int]:
+        _flush_if_pending(self._session)
         filters: list[Any] = [
             KnowledgeEntity.project_id == project_id,
             KnowledgeEntity.is_deleted.is_(False),
@@ -327,16 +436,13 @@ class EntityRepository:
         is_synthetic: bool = False,
     ) -> EntityAlias:
         norm_alias = alias_value.strip().lower()
-        stmt = select(EntityAlias).where(
-            EntityAlias.entity_id == entity_id,
-            EntityAlias.normalized_alias == norm_alias,
-            EntityAlias.source_provider == source_provider,
-        )
-        existing = self._session.execute(stmt).scalar_one_or_none()
+        by_key = self._project_aliases(project_id)
+        existing = by_key.get((entity_id, norm_alias, source_provider))
         if existing is not None:
             return existing
 
         alias = EntityAlias(
+            id=uuid.uuid4(),
             entity_id=entity_id,
             organisation_id=organisation_id,
             project_id=project_id,
@@ -349,7 +455,11 @@ class EntityRepository:
             is_synthetic=is_synthetic,
         )
         self._session.add(alias)
-        self._session.flush()
+        by_key[(entity_id, norm_alias, source_provider)] = alias
+        _, by_id = self._project_entities(project_id)
+        ent = by_id.get(entity_id)
+        if ent is not None and "aliases" in ent.__dict__ and alias not in ent.aliases:
+            ent.aliases.append(alias)
         return alias
 
     def find_entity_by_alias(
@@ -359,6 +469,7 @@ class EntityRepository:
         alias_value: str,
         source_provider: str | None = None,
     ) -> KnowledgeEntity | None:
+        _flush_if_pending(self._session)
         norm = alias_value.strip().lower()
         stmt = (
             select(KnowledgeEntity)
@@ -390,12 +501,8 @@ class EntityRepository:
         if str(left_entity_id) > str(right_entity_id):
             left_entity_id, right_entity_id = right_entity_id, left_entity_id
 
-        stmt = select(IdentityResolutionCandidate).where(
-            IdentityResolutionCandidate.project_id == project_id,
-            IdentityResolutionCandidate.left_entity_id == left_entity_id,
-            IdentityResolutionCandidate.right_entity_id == right_entity_id,
-        )
-        existing = self._session.execute(stmt).scalar_one_or_none()
+        by_pair = self._project_candidates(project_id)
+        existing = by_pair.get((left_entity_id, right_entity_id))
         if existing is not None:
             existing.match_score = match_score
             existing.signal_breakdown_json = signal_breakdown_json
@@ -403,6 +510,7 @@ class EntityRepository:
             return existing
 
         cand = IdentityResolutionCandidate(
+            id=uuid.uuid4(),
             organisation_id=organisation_id,
             project_id=project_id,
             left_entity_id=left_entity_id,
@@ -410,10 +518,11 @@ class EntityRepository:
             match_score=match_score,
             signal_breakdown_json=signal_breakdown_json,
             policy_band=policy_band,
+            decision_status=IdentityCandidateStatus.PENDING.value,
             is_synthetic=is_synthetic,
         )
         self._session.add(cand)
-        self._session.flush()
+        by_pair[(left_entity_id, right_entity_id)] = cand
         return cand
 
     def list_identity_candidates(
@@ -424,6 +533,7 @@ class EntityRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[IdentityResolutionCandidate], int]:
+        _flush_if_pending(self._session)
         filters: list[Any] = [IdentityResolutionCandidate.project_id == project_id]
         if decision_status:
             filters.append(IdentityResolutionCandidate.decision_status == decision_status)
@@ -447,6 +557,7 @@ class EntityRepository:
         *,
         project_id: uuid.UUID | None = None,
     ) -> IdentityResolutionCandidate | None:
+        _flush_if_pending(self._session)
         stmt = select(IdentityResolutionCandidate).where(
             IdentityResolutionCandidate.id == candidate_id
         )
@@ -551,6 +662,56 @@ class RelationshipRepository:
         raw = f"{project_id}:{source_entity_id}:{relationship_type.strip().lower()}:{target_entity_id}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+    def _project_relationships(
+        self, project_id: uuid.UUID
+    ) -> dict[str, KnowledgeRelationship]:
+        cache = _get_project_session_cache(self._session)
+        key = ("relationships", project_id)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached  # type: ignore[no-any-return]
+        rows = list(
+            self._session.execute(
+                select(KnowledgeRelationship).where(
+                    KnowledgeRelationship.project_id == project_id
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_fp: dict[str, KnowledgeRelationship] = {r.fingerprint: r for r in rows}
+        cache[key] = by_fp
+        return by_fp
+
+    def _project_evidence_links(
+        self, project_id: uuid.UUID
+    ) -> tuple[
+        dict[tuple[uuid.UUID, uuid.UUID, uuid.UUID | None], RelationshipEvidenceLink],
+        dict[tuple[uuid.UUID, uuid.UUID], RelationshipEvidenceLink],
+    ]:
+        cache = _get_project_session_cache(self._session)
+        key = ("rel_evidence_links", project_id)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached  # type: ignore[no-any-return]
+        rows = list(
+            self._session.execute(
+                select(RelationshipEvidenceLink).where(
+                    RelationshipEvidenceLink.project_id == project_id
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_exact: dict[tuple[uuid.UUID, uuid.UUID, uuid.UUID | None], RelationshipEvidenceLink] = {}
+        by_rel_ev: dict[tuple[uuid.UUID, uuid.UUID], RelationshipEvidenceLink] = {}
+        for r in rows:
+            by_exact[(r.relationship_id, r.evidence_id, r.evidence_chunk_id)] = r
+            by_rel_ev.setdefault((r.relationship_id, r.evidence_id), r)
+        pair = (by_exact, by_rel_ev)
+        cache[key] = pair
+        return pair
+
     def create_or_get_relationship(
         self,
         *,
@@ -573,21 +734,20 @@ class RelationshipRepository:
         fingerprint = self.compute_fingerprint(
             project_id, source_entity_id, relationship_type, target_entity_id
         )
-        stmt = select(KnowledgeRelationship).where(
-            KnowledgeRelationship.project_id == project_id,
-            KnowledgeRelationship.fingerprint == fingerprint,
-        )
-        existing = self._session.execute(stmt).scalar_one_or_none()
+        by_fp = self._project_relationships(project_id)
+        existing = by_fp.get(fingerprint)
         if existing is not None:
             if float(existing.confidence_score) < confidence_score:
                 existing.confidence_score = confidence_score
-            if last_observed_at and (
-                not existing.last_observed_at or last_observed_at > existing.last_observed_at
-            ):
-                existing.last_observed_at = last_observed_at
+            if last_observed_at is not None:
+                cand_last = _as_utc(last_observed_at)
+                cur_last = _as_utc(existing.last_observed_at)
+                if cur_last is None or (cand_last is not None and cand_last > cur_last):
+                    existing.last_observed_at = cand_last
             return existing
 
         rel = KnowledgeRelationship(
+            id=uuid.uuid4(),
             organisation_id=organisation_id,
             project_id=project_id,
             source_entity_id=source_entity_id,
@@ -595,6 +755,7 @@ class RelationshipRepository:
             relationship_type=relationship_type,
             relationship_basis=relationship_basis,
             verification_status=verification_status,
+            is_stale=False,
             confidence_score=confidence_score,
             confidence_components_json=confidence_components_json or {},
             discovery_method=discovery_method,
@@ -606,7 +767,7 @@ class RelationshipRepository:
             is_synthetic=is_synthetic,
         )
         self._session.add(rel)
-        self._session.flush()
+        by_fp[fingerprint] = rel
         return rel
 
     def add_evidence_link(
@@ -623,17 +784,17 @@ class RelationshipRepository:
         source_location_json: dict[str, Any] | None = None,
         is_synthetic: bool = False,
     ) -> RelationshipEvidenceLink:
-        stmt = select(RelationshipEvidenceLink).where(
-            RelationshipEvidenceLink.relationship_id == relationship_id,
-            RelationshipEvidenceLink.evidence_id == evidence_id,
+        by_exact, by_rel_ev = self._project_evidence_links(project_id)
+        existing = (
+            by_exact.get((relationship_id, evidence_id, evidence_chunk_id))
+            if evidence_chunk_id is not None
+            else by_rel_ev.get((relationship_id, evidence_id))
         )
-        if evidence_chunk_id is not None:
-            stmt = stmt.where(RelationshipEvidenceLink.evidence_chunk_id == evidence_chunk_id)
-        existing = self._session.execute(stmt).scalar_one_or_none()
         if existing is not None:
             return existing
 
         link = RelationshipEvidenceLink(
+            id=uuid.uuid4(),
             relationship_id=relationship_id,
             organisation_id=organisation_id,
             project_id=project_id,
@@ -646,7 +807,8 @@ class RelationshipRepository:
             is_synthetic=is_synthetic,
         )
         self._session.add(link)
-        self._session.flush()
+        by_exact[(relationship_id, evidence_id, evidence_chunk_id)] = link
+        by_rel_ev.setdefault((relationship_id, evidence_id), link)
         return link
 
     def get_relationship_by_id(
@@ -655,11 +817,12 @@ class RelationshipRepository:
         *,
         project_id: uuid.UUID | None = None,
     ) -> KnowledgeRelationship | None:
+        _flush_if_pending(self._session)
         stmt = (
             select(KnowledgeRelationship)
             .options(
-                joinedload(KnowledgeRelationship.source_entity),
-                joinedload(KnowledgeRelationship.target_entity),
+                selectinload(KnowledgeRelationship.source_entity),
+                selectinload(KnowledgeRelationship.target_entity),
                 selectinload(KnowledgeRelationship.evidence_links),
             )
             .where(KnowledgeRelationship.id == relationship_id)
@@ -719,6 +882,7 @@ class RelationshipRepository:
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[KnowledgeRelationship], int]:
+        _flush_if_pending(self._session)
         filters: list[Any] = [KnowledgeRelationship.project_id == project_id]
         if relationship_type:
             filters.append(KnowledgeRelationship.relationship_type == relationship_type)
@@ -759,8 +923,8 @@ class RelationshipRepository:
         data_stmt = (
             select(KnowledgeRelationship)
             .options(
-                joinedload(KnowledgeRelationship.source_entity),
-                joinedload(KnowledgeRelationship.target_entity),
+                selectinload(KnowledgeRelationship.source_entity),
+                selectinload(KnowledgeRelationship.target_entity),
                 selectinload(KnowledgeRelationship.evidence_links),
             )
             .where(and_(*filters))
@@ -834,6 +998,29 @@ class TraceabilityRepository:
 
         self._access_policy = SourceAccessPolicyService()
 
+    def _project_chains(
+        self, project_id: uuid.UUID
+    ) -> dict[uuid.UUID, DecisionTraceabilityChain]:
+        cache = _get_project_session_cache(self._session)
+        key = ("trace_chains", project_id)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached  # type: ignore[no-any-return]
+        rows = list(
+            self._session.execute(
+                select(DecisionTraceabilityChain).where(
+                    DecisionTraceabilityChain.project_id == project_id
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_dec: dict[uuid.UUID, DecisionTraceabilityChain] = {
+            r.decision_entity_id: r for r in rows
+        }
+        cache[key] = by_dec
+        return by_dec
+
     def create_or_update_chain(
         self,
         *,
@@ -853,11 +1040,8 @@ class TraceabilityRepository:
         latest_event_at: datetime | None = None,
         is_synthetic: bool = False,
     ) -> DecisionTraceabilityChain:
-        stmt = select(DecisionTraceabilityChain).where(
-            DecisionTraceabilityChain.project_id == project_id,
-            DecisionTraceabilityChain.decision_entity_id == decision_entity_id,
-        )
-        existing = self._session.execute(stmt).scalar_one_or_none()
+        by_dec = self._project_chains(project_id)
+        existing = by_dec.get(decision_entity_id)
         if existing is not None:
             existing.completeness_status = completeness_status
             existing.work_item_ids_json = work_item_ids_json
@@ -873,6 +1057,7 @@ class TraceabilityRepository:
             return existing
 
         chain = DecisionTraceabilityChain(
+            id=uuid.uuid4(),
             organisation_id=organisation_id,
             project_id=project_id,
             decision_entity_id=decision_entity_id,
@@ -890,7 +1075,7 @@ class TraceabilityRepository:
             is_synthetic=is_synthetic,
         )
         self._session.add(chain)
-        self._session.flush()
+        by_dec[decision_entity_id] = chain
         return chain
 
     def get_chain_by_decision(
@@ -899,6 +1084,7 @@ class TraceabilityRepository:
         project_id: uuid.UUID,
         decision_entity_id: uuid.UUID,
     ) -> DecisionTraceabilityChain | None:
+        _flush_if_pending(self._session)
         stmt = select(DecisionTraceabilityChain).where(
             DecisionTraceabilityChain.project_id == project_id,
             DecisionTraceabilityChain.decision_entity_id == decision_entity_id,
@@ -915,6 +1101,7 @@ class TraceabilityRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[DecisionTraceabilityChain], int]:
+        _flush_if_pending(self._session)
         filters: list[Any] = [DecisionTraceabilityChain.project_id == project_id]
         if completeness_status:
             filters.append(DecisionTraceabilityChain.completeness_status == completeness_status)
@@ -985,6 +1172,27 @@ class TimelineRepository:
         raw = f"{project_id}:{entity_id}:{event_type}:{ts}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+    def _project_events(
+        self, project_id: uuid.UUID
+    ) -> dict[str, KnowledgeTimelineEvent]:
+        cache = _get_project_session_cache(self._session)
+        key = ("timeline_events", project_id)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached  # type: ignore[no-any-return]
+        rows = list(
+            self._session.execute(
+                select(KnowledgeTimelineEvent).where(
+                    KnowledgeTimelineEvent.project_id == project_id
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_fp: dict[str, KnowledgeTimelineEvent] = {r.event_fingerprint: r for r in rows}
+        cache[key] = by_fp
+        return by_fp
+
     def create_event(
         self,
         *,
@@ -1003,15 +1211,13 @@ class TimelineRepository:
         is_synthetic: bool = False,
     ) -> KnowledgeTimelineEvent:
         fingerprint = self.compute_event_fingerprint(project_id, entity_id, event_type, occurred_at)
-        stmt = select(KnowledgeTimelineEvent).where(
-            KnowledgeTimelineEvent.project_id == project_id,
-            KnowledgeTimelineEvent.event_fingerprint == fingerprint,
-        )
-        existing = self._session.execute(stmt).scalar_one_or_none()
+        by_fp = self._project_events(project_id)
+        existing = by_fp.get(fingerprint)
         if existing is not None:
             return existing
 
         evt = KnowledgeTimelineEvent(
+            id=uuid.uuid4(),
             organisation_id=organisation_id,
             project_id=project_id,
             entity_id=entity_id,
@@ -1028,7 +1234,7 @@ class TimelineRepository:
             is_synthetic=is_synthetic,
         )
         self._session.add(evt)
-        self._session.flush()
+        by_fp[fingerprint] = evt
         return evt
 
     def list_accessible_events(
@@ -1042,6 +1248,7 @@ class TimelineRepository:
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[KnowledgeTimelineEvent], int]:
+        _flush_if_pending(self._session)
         filters: list[Any] = [KnowledgeTimelineEvent.project_id == project_id]
         if entity_id:
             filters.append(

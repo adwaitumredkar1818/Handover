@@ -225,6 +225,26 @@ class IdentityMatchMethod(StrEnum):
     UNMATCHED = "unmatched"
 
 
+class ContributorType(StrEnum):
+    """Classification of contributor identity relative to project team."""
+
+    CONFIRMED_MEMBER = "confirmed_member"
+    EXTERNAL_CONTRIBUTOR = "external_contributor"
+    UNIDENTIFIED = "unidentified"
+    BOT = "bot"
+
+
+class ContributorReviewStatus(StrEnum):
+    """Human review lifecycle for contributor identity attributions."""
+
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    MARKED_EXTERNAL = "marked_external"
+    MARKED_BOT = "marked_bot"
+    REJECTED = "rejected"
+    REVERTED = "reverted"
+
+
 class EvidenceProcessingStatus(StrEnum):
     """Processing lifecycle states tracking raw ingestion through extraction."""
 
@@ -502,7 +522,7 @@ class ConfidenceLevel(StrEnum):
 class EntityType(StrEnum):
     """Canonical project-scoped entity types for the knowledge graph."""
 
-    # 19 Canonical Entities
+    # 19 Canonical Entities + Phase 2026 Graph Extensions
     PROJECT = "project"
     PERSON = "person"
     ORGANISATION = "organisation"
@@ -512,6 +532,13 @@ class EntityType(StrEnum):
     FEATURE = "feature"
     TECHNICAL_COMPONENT = "technical_component"
     ARCHITECTURE_COMPONENT = "architecture_component"
+    TECHNOLOGY = "technology"
+    WORK_CLUSTER = "work_cluster"
+    SERVICE = "service"
+    API = "api"
+    DATABASE = "database"
+    FRAMEWORK = "framework"
+    LIBRARY = "library"
     REPOSITORY = "repository"
     PULL_REQUEST = "pull_request"
     COMMIT = "commit"
@@ -644,6 +671,26 @@ class RelationshipType(StrEnum):
     CONFLICTS_WITH = "conflicts_with"
     BELONGS_TO = "belongs_to"
     COMPLETED_IN = "completed_in"
+
+    # Technology Stack, Architecture, Features & Work Grouping Extensions
+    USES_TECHNOLOGY = "USES_TECHNOLOGY"
+    CONFIGURED_IN = "CONFIGURED_IN"
+    CALLS = "CALLS"
+    READS_FROM = "READS_FROM"
+    WRITES_TO = "WRITES_TO"
+    STORES_IN = "STORES_IN"
+    AUTHENTICATES_WITH = "AUTHENTICATES_WITH"
+    USES_MODEL = "USES_MODEL"
+    HAS_REQUIREMENT = "HAS_REQUIREMENT"
+    TRACKED_BY = "TRACKED_BY"
+    USES_COMPONENT = "USES_COMPONENT"
+    HAS_WORKFLOW_STEP = "HAS_WORKFLOW_STEP"
+    TESTED_BY = "TESTED_BY"
+    BELONGS_TO_WORK_CLUSTER = "BELONGS_TO_WORK_CLUSTER"
+    CONTRIBUTED_TO = "CONTRIBUTED_TO"
+    MODIFIED = "MODIFIED"
+    CONTAINS_COMMIT = "CONTAINS_COMMIT"
+    RESPONSIBLE_FOR = "RESPONSIBLE_FOR"
 
 
 class RelationshipBasis(StrEnum):

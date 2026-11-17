@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { AlertOctagon, AlertTriangle, ArrowRight, ExternalLink, Flag, Lock, MessageSquare, Send, ShieldCheck, Sparkles, Link2 } from 'lucide-react'
 import { useFigmaStore } from '../../lib/figmaStore'
 import { useLiveApp } from '../../context/LiveAppContext'
+import { api } from '../../lib/api'
 import {
   decisions, dependencies, evidence, personById, risks, tasks, ROLE_LABEL, ME,
   type FindingBase, type Verification, type Project, type Handover, type EvidenceType,
@@ -395,195 +396,9 @@ export function useCanonicalFindings(pid: string): AnyFinding[] {
       })
     }
 
-    // 2. Check static mock store
-    const mock = allFindings(pid)
-    if (mock.length > 0) return mock
-
-    // 3. Grounded canonical reconstruction from real ingested evidence
-    const gitEvidence = (evidenceList || []).filter((e) => e.provider === 'github')
-    const docEvidence = (evidenceList || []).filter(
-      (e) => e.provider === 'upload' || e.category?.includes('doc') || e.category?.includes('pdf')
-    )
-    const ownerName = members?.[0]?.user_full_name || members?.[0]?.full_name || 'Shubham Pokale'
-    const docId = docEvidence[0]?.id || evidenceList?.[0]?.id || ''
-    const gitId1 = gitEvidence[0]?.id || evidenceList?.[0]?.id || ''
-    const gitId2 = gitEvidence[1]?.id || gitEvidence[0]?.id || ''
-
-    return [
-        {
-          id: `dec-${pid}-1`,
-          projectId: pid,
-          title: 'Platform Identity: Argon2id Hashing & HttpOnly Session Rotation',
-          summary: 'Platform authentication uses Argon2id for password verification with short-lived JWT access tokens and HttpOnly refresh session cookies, strictly decoupled from external OAuth connectors.',
-          confidence: 96,
-          verification: 'verified',
-          ownerId: ownerName,
-          date: '2026-10-17',
-          evidenceIds: gitId1 ? [gitId1] : [],
-          kind: 'Decision',
-          reasoning: 'Platform authentication must never delegate identity authority to external SaaS; Argon2id ensures password hashing security while HttpOnly cookies mitigate token exfiltration.',
-          discussions: ['Architecture Review RFC 101', 'Session storage evaluated against Redis and PostgreSQL'],
-        },
-        {
-          id: `dec-${pid}-2`,
-          projectId: pid,
-          title: 'Dual-Provider Encrypted Storage Architecture',
-          summary: 'Dual storage provider abstraction (local encrypted storage default and Supabase private storage) with application-layer AES-256-GCM envelope encryption and streaming proxy downloads.',
-          confidence: 95,
-          verification: 'verified',
-          ownerId: ownerName,
-          date: '2026-10-17',
-          evidenceIds: docId ? [docId] : [],
-          kind: 'Decision',
-          reasoning: 'Application-layer AES-256-GCM envelope encryption ensures data privacy regardless of whether stored on local disk or Supabase S3 bucket.',
-          discussions: ['RFC 104 Storage Isolation', 'Zero unencrypted files stored at rest'],
-        },
-        {
-          id: `dec-${pid}-3`,
-          projectId: pid,
-          title: 'Skill Passport Verification & Growth Lens Engine',
-          summary: 'Automated skill profile reconstruction linking real project commits, PRs, and uploaded specifications into verified candidate credentials with provenance.',
-          confidence: 93,
-          verification: 'verified',
-          ownerId: ownerName,
-          date: '2026-10-17',
-          evidenceIds: docId ? [docId] : [],
-          kind: 'Decision',
-          reasoning: 'Demonstrable real-world work items from verified GitHub repositories provide unforgeable proof of candidate competency.',
-          discussions: ['Skillpassport Product Spec', 'Skill extraction and verification criteria'],
-        },
-        {
-          id: `task-${pid}-1`,
-          projectId: pid,
-          title: 'Deploy TCP Keepalives & Statement Prepare Tuning for Supabase WAN Pooler',
-          summary: 'Optimized PostgreSQL connection pool with keepalives and prepare_threshold tuning to eliminate connection starvation across Australia WAN.',
-          confidence: 98,
-          verification: 'verified',
-          ownerId: ownerName,
-          date: '2026-10-17',
-          evidenceIds: gitId2 ? [gitId2] : [],
-          kind: 'Task',
-          priority: 'Critical',
-          status: 'Done',
-          due: '2026-10-25',
-          history: [{ personId: ownerName, date: '2026-10-17', note: 'Configured pool_pre_ping and keepalives in session.py.' }],
-        },
-        {
-          id: `task-${pid}-2`,
-          projectId: pid,
-          title: 'Evidence Chunking & Extraction Lifecycle for DOCX/PDF Uploads',
-          summary: 'Implemented structural text extraction, token-aware chunking, and metadata attribution for uploaded architecture records and runbooks.',
-          confidence: 94,
-          verification: 'verified',
-          ownerId: ownerName,
-          date: '2026-10-17',
-          evidenceIds: docId ? [docId] : [],
-          kind: 'Task',
-          priority: 'High',
-          status: 'Done',
-          due: '2026-10-28',
-          history: [{ personId: ownerName, date: '2026-10-17', note: 'Added PyMuPDF and python-docx extraction pipelines.' }],
-        },
-        {
-          id: `risk-${pid}-1`,
-          projectId: pid,
-          title: 'RTX 4050 6GB VRAM Contention between Qwen3 8B and GLM OCR',
-          summary: 'Concurrent execution of GLM OCR and Qwen3 8B risks VRAM exhaustion. Controlled single-concurrency scheduler mitigates out-of-memory errors.',
-          confidence: 94,
-          verification: 'verified',
-          ownerId: ownerName,
-          date: '2026-10-17',
-          evidenceIds: gitId1 ? [gitId1] : [],
-          kind: 'Risk',
-          severity: 'Critical',
-          impact: 'Out of memory crashes if multiple AI inference models load simultaneously into 6GB VRAM.',
-          component: 'Ollama Local AI Runtime',
-          mitigation: ['OLLAMA_MAX_CONCURRENT_AI_JOBS=1 constraint in inference scheduler', 'Queue background jobs in PostgreSQL'],
-          resolution: 'Mitigating',
-        },
-        {
-          id: `risk-${pid}-2`,
-          projectId: pid,
-          title: 'Cross-Region Australia WAN Database Round-Trip Latency',
-          summary: 'Geographic distance to Supabase Australia pooler creates latency on unbatched round-trips. Mitigated via selectinload eager joins and synchronous auth hydration.',
-          confidence: 92,
-          verification: 'verified',
-          ownerId: ownerName,
-          date: '2026-10-17',
-          evidenceIds: gitId2 ? [gitId2] : [],
-          kind: 'Risk',
-          severity: 'High',
-          impact: 'Sequential round-trips add latency overhead to REST API responses.',
-          component: 'Database Connection Pool',
-          mitigation: ['Eager batching with selectinload', 'FastAPI short-lived JWT verification without DB lookups'],
-          resolution: 'Mitigating',
-        },
-        {
-          id: `dep-${pid}-1`,
-          projectId: pid,
-          title: 'Next.js Frontend depends on FastAPI Modular Backend',
-          summary: 'The React 19 Next.js frontend strictly communicates through authenticated FastAPI REST endpoints; no direct browser Supabase access.',
-          confidence: 100,
-          verification: 'verified',
-          ownerId: ownerName,
-          date: '2026-10-17',
-          evidenceIds: gitId1 ? [gitId1] : [],
-          kind: 'Dependency',
-          depType: 'Technical',
-          from: 'Next.js Frontend',
-          to: 'FastAPI Backend API',
-          blocking: true,
-        },
-        {
-          id: `dep-${pid}-2`,
-          projectId: pid,
-          title: 'FastAPI Backend depends on Supabase PostgreSQL Database',
-          summary: 'Canonical data store, ACLs, provenance, audit logs, and knowledge relationships are permanently housed in PostgreSQL.',
-          confidence: 100,
-          verification: 'verified',
-          ownerId: ownerName,
-          date: '2026-10-17',
-          evidenceIds: gitId2 ? [gitId2] : [],
-          kind: 'Dependency',
-          depType: 'Technical',
-          from: 'FastAPI Backend',
-          to: 'PostgreSQL Database',
-          blocking: false,
-        },
-        {
-          id: `dep-${pid}-3`,
-          projectId: pid,
-          title: 'Document Extraction depends on PyMuPDF and GLM OCR Service',
-          summary: 'Digital documents extract via PyMuPDF; scanned pages route through local Ollama GLM OCR service.',
-          confidence: 95,
-          verification: 'verified',
-          ownerId: ownerName,
-          date: '2026-10-17',
-          evidenceIds: docId ? [docId] : [],
-          kind: 'Dependency',
-          depType: 'External',
-          from: 'Extraction Pipeline',
-          to: 'GLM OCR Service (Ollama)',
-          blocking: false,
-        },
-        {
-          id: `dep-${pid}-4`,
-          projectId: pid,
-          title: 'Skill Assessment Pipeline depends on Verified Evidence Commits',
-          summary: 'Skill Passport evaluation pipeline correlates candidate skills against verified repository pull requests and commit diffs.',
-          confidence: 96,
-          verification: 'verified',
-          ownerId: ownerName,
-          date: '2026-10-17',
-          evidenceIds: gitId1 ? [gitId1] : [],
-          kind: 'Dependency',
-          depType: 'Task',
-          from: 'Skill Passport Model',
-          to: 'GitHub Commit Ingestion',
-          blocking: false,
-        },
-      ] as unknown as AnyFinding[]
-    }, [liveFindings, evidenceList, members, pid])
+    // 2. Live project routes must never fabricate fallback findings
+    return []
+    }, [liveFindings, members])
 }
 
 export function useCanonicalProjectFindings(pid: string) {
@@ -672,20 +487,55 @@ export function useVerification(id: string): Verification {
 
 export function FindingDrawer({ finding, onClose, extra }: { finding?: AnyFinding; onClose: () => void; extra?: ReactNode }) {
   const s = useFigmaStore()
+  const { refreshFindings, refreshVerification } = useLiveApp()
   const [text, setText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
   if (!finding) return null
-  const status = s.verif[finding.id] ?? finding.verification
+  const status = finding.verification
   const role = s.projectRole(finding.projectId)
   const canVerify = role !== 'incoming'
-  const set = (v: Verification) => { s.setVerif((m) => ({ ...m, [finding.id]: v })); s.toast(`Marked as ${VERIF[v].label.toLowerCase()}`, finding.title) }
+
+  const handleBackendVerify = async (action: 'verified' | 'conflicting' | 'rejected') => {
+    setSubmitting(true)
+    setActionError(null)
+    try {
+      let queue = await api.verification.getQueue(finding.projectId, undefined, 1)
+      let matchedCase = queue.items.find((c) => c.target_id === finding.id)
+      if (!matchedCase) {
+        await api.verification.assessAll(finding.projectId)
+        queue = await api.verification.getQueue(finding.projectId, undefined, 1)
+        matchedCase = queue.items.find((c) => c.target_id === finding.id)
+      }
+      if (!matchedCase) {
+        setActionError('No verification case exists yet for this finding. Open Verification Center to review.')
+        return
+      }
+      if (action === 'verified') {
+        await api.verification.approveCase(finding.projectId, matchedCase.id, 'Approved via Knowledge Intelligence drawer')
+      } else if (action === 'conflicting') {
+        await api.verification.markUnresolved(finding.projectId, matchedCase.id, 'Flagged for further review via Knowledge Intelligence drawer')
+      } else {
+        await api.verification.rejectCase(finding.projectId, matchedCase.id, 'Rejected via Knowledge Intelligence drawer')
+      }
+      s.toast(`Verification updated`, finding.title)
+      await Promise.all([refreshFindings(), refreshVerification()])
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to update verification status.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   return (
     <Drawer open onClose={onClose} width="max-w-xl" title={<span className="flex items-center gap-2"><Badge tone="indigo">{finding.kind}</Badge><span className="truncate">{finding.title}</span></span>}
       footer={canVerify ? <>
-        <Button variant="success" icon={ShieldCheck} className="flex-1" onClick={() => set('verified')}>Verify</Button>
-        <Button variant="secondary" className="flex-1" onClick={() => set('conflicting')}>Flag conflict</Button>
-        <Button variant="secondary" className="flex-1 text-red-600" onClick={() => set('rejected')}>Reject</Button>
+        <Button variant="success" icon={ShieldCheck} className="flex-1" disabled={submitting} onClick={() => handleBackendVerify('verified')}>Verify</Button>
+        <Button variant="secondary" className="flex-1" disabled={submitting} onClick={() => handleBackendVerify('conflicting')}>Flag</Button>
+        <Button variant="secondary" className="flex-1 text-red-600" disabled={submitting} onClick={() => handleBackendVerify('rejected')}>Reject</Button>
       </> : <p className="flex items-center gap-2 text-xs text-muted"><Lock className="size-3.5" />Incoming members can read verified knowledge but cannot change verification.</p>}>
       <div className="space-y-5">
+        {actionError && <Callout tone="amber" title="Verification error">{actionError}</Callout>}
         <div className="grid grid-cols-2 gap-3">
           <div className="rounded-xl border border-dashed border-indigo-200 bg-indigo-50/40 p-3"><p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-indigo-500">AI confidence</p><Confidence value={finding.confidence} /></div>
           <div className="rounded-xl border border-line p-3"><p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-slate-400">Human verification</p><VerificationBadge status={status} /></div>

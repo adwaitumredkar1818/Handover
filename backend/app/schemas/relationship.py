@@ -363,3 +363,117 @@ class ReconstructionTriggerRequest(BaseModel):
     force_rebuild: bool = Field(
         default=False, description="Re-evaluate all existing entities and relationships"
     )
+
+
+# ------------------------------------------------------------------------------
+# People-Centric Contributor Graph, Identity Review & Work Cluster Schemas
+# ------------------------------------------------------------------------------
+
+
+class ContributorIdentitySummaryResponse(BaseModel):
+    """Aggregated contributor identity record for Contributor Identity Review & People Graph."""
+
+    contributor_key: str
+    display_name: str
+    github_login: str | None = None
+    github_numeric_id: str | None = None
+    git_author_name: str | None = None
+    git_author_email: str | None = None
+    contributor_type: str
+    review_status: str
+    match_method: str | None = None
+    match_confidence: float | None = None
+    matched_project_membership_id: str | None = None
+    matched_member_name: str | None = None
+    suggested_project_membership_id: str | None = None
+    suggested_member_name: str | None = None
+    declared_responsibility: str | None = None
+    contribution_count: int = 0
+    commits_count: int = 0
+    prs_count: int = 0
+    issues_count: int = 0
+    repositories: list[str] = Field(default_factory=list)
+    work_areas: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    review_history: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ContributorIdentityReviewRequest(BaseModel):
+    """Human review decision for a contributor identity."""
+
+    action: str = Field(
+        description=(
+            "'match_member', 'mark_external', 'mark_bot', "
+            "'leave_unidentified', 'reject_match', or 'revert'"
+        )
+    )
+    project_membership_id: uuid.UUID | None = None
+    roster_member_id: uuid.UUID | None = None
+    notes: str | None = None
+
+
+class ContributorIdentityReviewResponse(BaseModel):
+    """Result of a contributor identity review decision."""
+
+    contributor_key: str
+    contributor_type: str
+    review_status: str
+    updated_records: int
+
+
+class ContributorGraphNode(BaseModel):
+    """Node in the people-centric Relationship Explorer graph."""
+
+    id: str
+    node_kind: str
+    label: str
+    contributor_key: str | None = None
+    contributor_type: str
+    review_status: str
+    verification_status: str
+    contribution_count: int = 0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContributorGraphEdge(BaseModel):
+    """Edge in the people-centric Relationship Explorer graph."""
+
+    id: str
+    source: str
+    target: str
+    relationship_type: str
+    label: str
+    evidence_basis: str
+
+
+class ContributorGraphResponse(BaseModel):
+    """People-centric contributor & work cluster graph projection."""
+
+    project_id: str
+    nodes: list[ContributorGraphNode] = Field(default_factory=list)
+    edges: list[ContributorGraphEdge] = Field(default_factory=list)
+    summary: dict[str, int] = Field(default_factory=dict)
+
+
+class WorkClusterResponse(BaseModel):
+    """Evidence-based technical work group response."""
+
+    cluster_id: str
+    name: str
+    classification_method: str
+    contribution_count: int
+    contributor_count: int
+    contributors: list[dict[str, Any]] = Field(default_factory=list)
+    contributions: list[dict[str, Any]] = Field(default_factory=list)
+    changed_paths: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class WorkClusterRebuildResponse(BaseModel):
+    """Telemetry from rebuilding evidence-based work clusters."""
+
+    run_id: str
+    algorithm_version: str
+    clusters_count: int
+    relationships_created: int
+    completed_at: str

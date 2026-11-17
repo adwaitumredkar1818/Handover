@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError, create_model
 
 from app.models.enums import (
     ConfidenceLevel,
@@ -58,6 +58,19 @@ _CANDIDATE_MODEL_BY_CATEGORY: dict[KnowledgeCategory, type[Any]] = {
     KnowledgeCategory.DEPENDENCIES_RELATIONSHIPS: DependencyCandidate,
     KnowledgeCategory.RISKS_BLOCKERS_QUESTIONS: RiskBlockerCandidate,
 }
+
+
+def get_category_response_json_schema(category: KnowledgeCategory) -> dict[str, Any]:
+    """Return a Pydantic-generated JSON schema envelope for structured LLM extraction."""
+    candidate_cls = _CANDIDATE_MODEL_BY_CATEGORY.get(category)
+    if candidate_cls is None:
+        return {"type": "object", "properties": {"items": {"type": "array"}}}
+    envelope_model = create_model(
+        f"{candidate_cls.__name__}BatchEnvelope",
+        items=(list[candidate_cls], ...),  # type: ignore[valid-type]
+        __base__=BaseModel,
+    )
+    return envelope_model.model_json_schema()
 
 
 @dataclass(frozen=True, slots=True)

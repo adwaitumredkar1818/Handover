@@ -313,6 +313,26 @@ class KnowledgeRepository:
         self._session.add(item)
         self._session.flush()
 
+        # Link any prior stale un-superseded items with the same fingerprint/category
+        stale_candidates = list(
+            self._session.execute(
+                select(KnowledgeItem).where(
+                    KnowledgeItem.project_id == project_id,
+                    KnowledgeItem.category == draft.category.value,
+                    KnowledgeItem.fingerprint == draft.fingerprint,
+                    KnowledgeItem.is_deleted.is_(False),
+                    KnowledgeItem.is_stale.is_(True),
+                    KnowledgeItem.superseded_by_id.is_(None),
+                    KnowledgeItem.id != item.id,
+                    KnowledgeItem.epistemic_status != EpistemicStatus.HUMAN_VERIFIED.value,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for stale_item in stale_candidates:
+            stale_item.superseded_by_id = item.id
+
         for link_draft in draft.evidence_links:
             link = KnowledgeEvidenceLink(
                 organisation_id=organisation_id,

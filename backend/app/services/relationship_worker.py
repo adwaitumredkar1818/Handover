@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.security import utc_now
 from app.models.enums import BackgroundJobStatus, BackgroundJobType
-from app.repositories.job import BackgroundJobRepository
+from app.repositories.job import BackgroundJobRepository, job_lease_heartbeat
 from app.services.llm import StructuredLLMClient
 from app.services.relationship_coordinator import RelationshipCoordinatorService
 
@@ -46,7 +46,7 @@ class RelationshipWorkerService:
             job_repo = BackgroundJobRepository(session)
             job = job_repo.claim_next_job(
                 worker_id=self.worker_id,
-                lease_seconds=300,
+                lease_seconds=1800,
                 now=now,
                 job_types=[BackgroundJobType.RELATIONSHIP_RECONSTRUCTION.value],
             )
@@ -64,17 +64,29 @@ class RelationshipWorkerService:
             include_llm = bool(payload.get("include_llm_suggestions", False))
 
             try:
-                coordinator = RelationshipCoordinatorService(session, llm_client=self.llm_client)
-                run = coordinator.run_reconstruction(
-                    organisation_id=job.organisation_id,
-                    project_id=job.project_id,
-                    run_id=run_id,
-                    include_llm_suggestions=include_llm,
-                )
+                with job_lease_heartbeat(
+                    session_factory=self.session_factory,
+                    job_id=job.id,
+                    lease_seconds=1800,
+                ):
+                    coordinator = RelationshipCoordinatorService(
+                        session,
+                        llm_client=self.llm_client,
+                    )
+                    run = coordinator.run_reconstruction(
+                        organisation_id=job.organisation_id,
+                        project_id=job.project_id,
+                        run_id=run_id,
+                        include_llm_suggestions=include_llm,
+                    )
 
                 job.status = BackgroundJobStatus.SUCCEEDED.value
                 job.completed_at = utc_now()
-                job.result_summary_json = {
+                job.locked_by = None
+                job.lease_expires_at = None
+                job.error_code = None
+                job.error_message = None
+                job.result_json = {
                     "run_id": str(run.id),
                     "entities_count": run.entities_discovered_count,
                     "relationships_count": run.relationships_discovered_count,
@@ -88,6 +100,9 @@ class RelationshipWorkerService:
                 logger.exception("Failed relationship reconstruction job %s: %s", job.id, exc)
                 job.status = BackgroundJobStatus.FAILED.value
                 job.completed_at = utc_now()
+                job.locked_by = None
+                job.lease_expires_at = None
+                job.error_code = "RELATIONSHIP_RECONSTRUCTION_FAILED"
                 job.error_message = str(exc)[:500]
                 session.commit()
                 return True

@@ -85,12 +85,38 @@ export function ConnectedSourcesView() {
                 </div>
 
                 <div className="flex items-center gap-3">
-                  <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                    {conn.status}
-                  </span>
-                  <span className="text-[11px] text-[#69778D] font-mono">
-                    AES-256 Protected
-                  </span>
+                  {conn.status === "reauth_required" || conn.status === "error" || conn.last_error_code ? (
+                    <div className="flex items-center gap-2">
+                      <span
+                        title={conn.last_error_summary || conn.last_error_code || "Re-authorisation required"}
+                        className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200 inline-flex items-center gap-1"
+                      >
+                        <AlertCircle className="w-3 h-3 text-amber-600" />
+                        {conn.last_error_code === "GITHUB_REPO_ACCESS_REVOKED"
+                          ? "Access Revoked"
+                          : conn.status === "reauth_required"
+                            ? "Re-auth Required"
+                            : conn.status}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setIsAddSourceModalOpen(true)}
+                        className="px-2.5 py-1 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold inline-flex items-center gap-1"
+                      >
+                        <KeyRound className="w-3 h-3" />
+                        Reconnect {conn.provider === "github" ? "GitHub" : conn.provider}
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                        {conn.status}
+                      </span>
+                      <span className="text-[11px] text-[#69778D] font-mono">
+                        AES-256 Protected
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
             ))}

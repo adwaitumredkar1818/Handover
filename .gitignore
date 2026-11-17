@@ -49,6 +49,7 @@ backend/storage/
 uploads/
 logs/
 tmp/
+scratch/
 !frontend/src/features/prototype/data/
 
 # IDE, assistant tooling & OS artefacts

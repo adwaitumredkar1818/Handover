@@ -57,6 +57,7 @@ from app.schemas.verification import (
     VerificationReviewEventResponse,
     VerificationSummaryResponse,
 )
+from app.core.cache.local_cache import local_response_cache
 from app.services.conflict_detection import ConflictDetectionEngine
 from app.services.handover_eligibility import (
     HandoverEligibilityService,
@@ -71,6 +72,15 @@ from app.services.verification_review import (
 )
 
 router = APIRouter(tags=["Verification Center"])
+
+
+def _invalidate_project_caches(project_id: uuid.UUID) -> None:
+    """Clear short-lived L1 response caches on verification mutations."""
+    local_response_cache.invalidate_prefix(f"ki_graph:{project_id}:")
+    local_response_cache.invalidate_prefix(f"ki_domains:{project_id}:")
+    local_response_cache.invalidate_prefix(f"ki_summary:{project_id}:")
+    local_response_cache.invalidate_prefix(f"rel_graph:{project_id}:")
+    local_response_cache.invalidate_prefix(f"contrib_graph:{project_id}:")
 
 
 def _str_val(val: Any) -> str:
@@ -552,6 +562,7 @@ def approve_case(
             review_notes=notes,
         )
         db_session.commit()
+        _invalidate_project_caches(project_ctx.project.id)
     except ConcurrencyConflictError as exc:
         db_session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -603,6 +614,7 @@ def reject_case(
             review_notes=notes,
         )
         db_session.commit()
+        _invalidate_project_caches(project_ctx.project.id)
     except ConcurrencyConflictError as exc:
         db_session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -653,6 +665,7 @@ def edit_case_finding(
             reason=reason,
         )
         db_session.commit()
+        _invalidate_project_caches(project_ctx.project.id)
     except ConcurrencyConflictError as exc:
         db_session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -703,6 +716,7 @@ def request_case_context(
             expected_version=version,
         )
         db_session.commit()
+        _invalidate_project_caches(project_ctx.project.id)
     except ConcurrencyConflictError as exc:
         db_session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -744,6 +758,7 @@ def mark_case_unresolved(
             explanation=explanation,
         )
         db_session.commit()
+        _invalidate_project_caches(project_ctx.project.id)
     except ConcurrencyConflictError as exc:
         db_session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -780,6 +795,7 @@ def assign_case_reviewer(
             expected_version=payload.expected_version,
         )
         db_session.commit()
+        _invalidate_project_caches(project_ctx.project.id)
     except ConcurrencyConflictError as exc:
         db_session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

@@ -73,6 +73,8 @@ class IdentityResolutionService:
         semantic_similarity: float = 0.0,
     ) -> IdentityMatchSignal:
         """Compute the weighted 5-signal identity match score between two entities."""
+        if self._session.new or self._session.dirty or self._session.deleted:
+            self._session.flush()
         # 1. Exact / Fuzzy Canonical Name Score (weight 0.40)
         norm_left = (left.canonical_name or "").strip().lower()
         norm_right = (right.canonical_name or "").strip().lower()

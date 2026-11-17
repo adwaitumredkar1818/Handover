@@ -8,16 +8,23 @@ from dataclasses import dataclass, field
 from datetime import UTC
 from typing import Any
 
+from sqlalchemy import select
+
 from app.core.config import Settings
 from app.core.security import utc_now
 from app.models.enums import (
     ConnectorExtractionMethod,
+    ContributorReviewStatus,
+    ContributorType,
     EvidenceCategory,
     EvidenceSourceType,
     PageExtractionOutcome,
     SourcePermissionVerificationStatus,
 )
+from app.models.evidence import EvidenceItem
 from app.models.integration import ProjectSourceMapping, SourceAccessPolicy
+from app.models.notification import NotificationItem
+from app.models.team_roster import ContributionAttribution
 from app.repositories.integration import IntegrationRepository
 from app.services.document_extraction import ExtractedPageData
 from app.services.integrations.access_policy import SourceAccessPolicyService
@@ -28,6 +35,42 @@ from app.services.integrations.evidence_ingestor import (
 )
 from app.services.integrations.github_client import GitHubClient
 from app.services.integrations.http_utils import parse_provider_datetime
+from app.services.technology_manifest_parser import is_manifest_path
+
+_BOT_NAME_PATTERNS = (
+    "[bot]",
+    "dependabot",
+    "renovate",
+    "github-actions",
+    "codecov",
+    "snyk-bot",
+    "greenkeeper",
+)
+
+
+def is_bot_identity(
+    *,
+    login: str | None = None,
+    name: str | None = None,
+    email: str | None = None,
+    provider_type: str | None = None,
+) -> tuple[bool, str | None]:
+    """Detect automated bot accounts using provider account type first, then naming patterns."""
+    if provider_type and provider_type.strip().lower() == "bot":
+        return True, "provider_account_type"
+    # Never override an explicit provider 'User' account unless login explicitly carries '[bot]'
+    explicit_user = bool(provider_type and provider_type.strip().lower() == "user")
+    for candidate in (login, name, email):
+        if not candidate:
+            continue
+        low = candidate.strip().lower()
+        if "[bot]" in low:
+            return True, "bot_naming_pattern"
+        if not explicit_user and (
+            any(pat in low for pat in _BOT_NAME_PATTERNS) or low.endswith("-bot")
+        ):
+            return True, "bot_naming_pattern"
+    return False, None
 
 _ISSUE_REF_RE = re.compile(
     r"(?:(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+)?#(\d+)",
@@ -443,6 +486,21 @@ class GitHubSyncOrchestrator:
             for sha, commit in unique_commits.items():
                 if report.items_discovered >= max_items:
                     break
+                # Retrieve commit detail for changed_files metadata when absent
+                if not isinstance(commit.get("files"), list) and hasattr(
+                    self._client, "fetch_commit_detail"
+                ):
+                    try:
+                        detail = self._client.fetch_commit_detail(
+                            access_token=access_token,
+                            owner=owner,
+                            repo=repo_name,
+                            sha=sha,
+                        )
+                        if isinstance(detail, dict) and isinstance(detail.get("files"), list):
+                            commit = {**commit, "files": detail["files"]}
+                    except Exception:
+                        pass
                 record = self._normalize_commit(
                     repo_id=repo_id,
                     owner_repo=owner_repo,
@@ -460,6 +518,16 @@ class GitHubSyncOrchestrator:
                     seen_external_ids=seen_external_ids,
                     record=record,
                 )
+
+            # Bounded resumable backfill of historical commits missing changed_files metadata
+            self._backfill_commit_changed_files(
+                mapping=mapping,
+                owner=owner,
+                repo_name=repo_name,
+                access_token=access_token,
+                new_cursor=new_cursor,
+                limit=15,
+            )
 
             # Supplementary Contributor Statistics
             try:
@@ -569,7 +637,154 @@ class GitHubSyncOrchestrator:
         new_cursor["last_updated_since"] = checkpoint_dt.astimezone(UTC).isoformat()
         new_cursor["last_completed_at"] = now.astimezone(UTC).isoformat()
         report.new_cursor = new_cursor
+        self._notify_pending_contributor_reviews(mapping=mapping, actor_user_id=actor_user_id)
         return report
+
+    def _backfill_commit_changed_files(
+        self,
+        *,
+        mapping: ProjectSourceMapping,
+        owner: str,
+        repo_name: str,
+        access_token: str,
+        new_cursor: dict[str, Any],
+        limit: int = 15,
+    ) -> int:
+        """Backfill `changed_files` metadata for historical commits in bounded batches."""
+        if new_cursor.get("changed_files_backfill_done"):
+            return 0
+        session = getattr(self._ingestor, "_session", None)
+        if session is None or not hasattr(self._client, "fetch_commit_detail"):
+            return 0
+        try:
+            existing_commits = (
+                session.execute(
+                    select(EvidenceItem)
+                    .where(
+                        EvidenceItem.project_id == mapping.project_id,
+                        EvidenceItem.source_type == EvidenceSourceType.GITHUB.value,
+                        EvidenceItem.category == EvidenceCategory.COMMIT.value,
+                        EvidenceItem.deleted_at.is_(None),
+                    )
+                    .order_by(EvidenceItem.source_created_at.desc().nullslast())
+                )
+                .scalars()
+                .all()
+            )
+            missing: list[tuple[EvidenceItem, str]] = []
+            for ev in existing_commits:
+                meta = dict(ev.metadata_json or {})
+                if str(meta.get("mapping_id") or "") not in {"", str(mapping.id)}:
+                    continue
+                sha = str(meta.get("sha") or "")
+                files = meta.get("changed_files")
+                if sha and not (isinstance(files, list) and len(files) > 0):
+                    missing.append((ev, sha))
+                    if len(missing) >= limit:
+                        break
+            if not missing:
+                new_cursor["changed_files_backfill_done"] = True
+                return 0
+
+            updated = 0
+            for ev, sha in missing:
+                detail = self._client.fetch_commit_detail(
+                    access_token=access_token,
+                    owner=owner,
+                    repo=repo_name,
+                    sha=sha,
+                )
+                raw_files = detail.get("files") if isinstance(detail, dict) else None
+                if isinstance(raw_files, list):
+                    meta = dict(ev.metadata_json or {})
+                    meta["changed_files"] = [
+                        {
+                            "filename": f.get("filename"),
+                            "status": f.get("status"),
+                            "additions": f.get("additions"),
+                            "deletions": f.get("deletions"),
+                            "changes": f.get("changes"),
+                        }
+                        for f in raw_files[:100]
+                        if isinstance(f, dict) and f.get("filename")
+                    ]
+                    ev.metadata_json = meta
+                    updated += 1
+            return updated
+        except Exception:
+            return 0
+
+    def _notify_pending_contributor_reviews(
+        self,
+        *,
+        mapping: ProjectSourceMapping,
+        actor_user_id: uuid.UUID,
+    ) -> None:
+        """Create an unread project notification if unmatched GitHub identities require review."""
+        session = getattr(self._ingestor, "_session", None)
+        if session is None:
+            return
+        try:
+            from app.services.work_grouping import WorkGroupingService
+
+            WorkGroupingService(session).rebuild_work_clusters(
+                organisation_id=mapping.organisation_id,
+                project_id=mapping.project_id,
+                triggered_by_user_id=actor_user_id,
+            )
+        except Exception:
+            pass
+        try:
+            unmatched_count = (
+                session.execute(
+                    select(ContributionAttribution.id).where(
+                        ContributionAttribution.project_id == mapping.project_id,
+                        ContributionAttribution.contributor_type
+                        == ContributorType.UNIDENTIFIED.value,
+                        ContributionAttribution.review_status
+                        == ContributorReviewStatus.PENDING.value,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not unmatched_count:
+                return
+            existing = (
+                session.execute(
+                    select(NotificationItem).where(
+                        NotificationItem.project_id == mapping.project_id,
+                        NotificationItem.notification_type == "contributor_identity_review",
+                        NotificationItem.is_read.is_(False),
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is not None:
+                return
+            session.add(
+                NotificationItem(
+                    organisation_id=mapping.organisation_id,
+                    project_id=mapping.project_id,
+                    user_id=actor_user_id,
+                    notification_type="contributor_identity_review",
+                    title="Contributor identities require review.",
+                    body=(
+                        f"{len(unmatched_count)} GitHub contribution record(s) have "
+                        "unmatched contributor identities awaiting human review."
+                    ),
+                    severity="warning",
+                    metadata_json={
+                        "mapping_id": str(mapping.id),
+                        "unmatched_count": len(unmatched_count),
+                        "target_route": f"/projects/{mapping.project_id}/relationships?tab=identity_review",
+                    },
+                )
+            )
+            session.flush()
+        except Exception:
+            pass
 
     def _record_upsert(
         self,
@@ -723,6 +938,9 @@ class GitHubSyncOrchestrator:
         raw_user = merged_source.get("user")
         user_obj: dict[str, Any] = raw_user if isinstance(raw_user, dict) else {}
         author = str(user_obj.get("login")) if user_obj.get("login") else None
+        author_id = user_obj.get("id")
+        author_type = str(user_obj.get("type") or "") or None
+        is_bot, bot_basis = is_bot_identity(login=author, provider_type=author_type)
         merged = bool(merged_source.get("merged") or merged_source.get("merged_at"))
         merged_at = merged_source.get("merged_at")
         state = "merged" if merged else str(merged_source.get("state") or "open")
@@ -846,6 +1064,11 @@ class GitHubSyncOrchestrator:
                 "changed_files": changed_files_meta[:100],
                 "referenced_issue_numbers": referenced,
                 "associated_commit_shas": associated_commits or [],
+                "github_author_login": author,
+                "github_author_id": author_id,
+                "github_author_type": author_type,
+                "is_bot": is_bot,
+                "bot_basis": bot_basis,
                 "source_item_state": "active",
             },
         )
@@ -886,6 +1109,27 @@ class GitHubSyncOrchestrator:
         git_author_email = str(author_inner.get("email") or "") or None
         github_author_login = str(gh_author.get("login") or "") or None
         github_author_id = gh_author.get("id")
+        github_author_type = str(gh_author.get("type") or "") or None
+        is_bot, bot_basis = is_bot_identity(
+            login=github_author_login,
+            name=git_author_name,
+            email=git_author_email,
+            provider_type=github_author_type,
+        )
+
+        raw_files = commit.get("files") if isinstance(commit.get("files"), list) else []
+        changed_files_meta = [
+            {
+                "filename": str(f.get("filename") or ""),
+                "status": str(f.get("status") or "modified"),
+                "additions": int(f.get("additions") or 0),
+                "deletions": int(f.get("deletions") or 0),
+                "changes": int(f.get("changes") or 0),
+                **({"previous_filename": str(f["previous_filename"])} if f.get("previous_filename") else {}),
+            }
+            for f in raw_files[:100]
+            if isinstance(f, dict) and f.get("filename")
+        ]
 
         git_committer_name = str(committer_inner.get("name") or "") or None
         git_committer_email = str(committer_inner.get("email") or "") or None
@@ -966,6 +1210,10 @@ class GitHubSyncOrchestrator:
                 "git_author_email": git_author_email,
                 "github_author_login": github_author_login,
                 "github_author_id": github_author_id,
+                "github_author_type": github_author_type,
+                "is_bot": is_bot,
+                "bot_basis": bot_basis,
+                "changed_files": changed_files_meta,
                 "git_committer_name": git_committer_name,
                 "git_committer_email": git_committer_email,
                 "github_committer_login": github_committer_login,
@@ -995,10 +1243,11 @@ class GitHubSyncOrchestrator:
     ) -> NormalizedSourceEvidence:
         path = str(doc["path"])
         text = str(doc.get("text") or "").strip()
-        is_code = path.lower().endswith(
+        is_manifest = is_manifest_path(path)
+        is_code = is_manifest or path.lower().endswith(
             (".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml", ".toml", ".sql", ".sh", ".html", ".css", ".go", ".rs", ".java")
         )
-        item_type = "code" if is_code else "documentation"
+        item_type = "manifest" if is_manifest else ("code" if is_code else "documentation")
         doc_category = EvidenceCategory.SOURCE_CODE.value if is_code else EvidenceCategory.DESIGN_DOCUMENT.value
         return NormalizedSourceEvidence(
             source_type=EvidenceSourceType.GITHUB.value,
@@ -1019,6 +1268,8 @@ class GitHubSyncOrchestrator:
             metadata_json={
                 "mapping_id": str(mapping_id),
                 "github_item_type": item_type,
+                "is_manifest": is_manifest,
+                "document_category": "manifest" if is_manifest else None,
                 "repository": owner_repo,
                 "path": path,
                 "git_blob_sha": doc.get("sha"),

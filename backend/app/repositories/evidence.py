@@ -16,6 +16,7 @@ from app.models.enums import (
 )
 from app.models.evidence import EvidenceContent, EvidenceItem, EvidencePageContent
 from app.models.integration import SourceAccessPolicy
+from app.models.job import BackgroundJob
 from app.services.document_extraction import ExtractedPageData
 
 
@@ -272,7 +273,7 @@ class EvidenceRepository:
         items = list(
             self._session.execute(
                 select(EvidenceItem)
-                .options(selectinload(EvidenceItem.jobs))
+                .options(selectinload(EvidenceItem.jobs).defer(BackgroundJob.payload_json))
                 .where(*filters)
                 .order_by(EvidenceItem.created_at.desc(), EvidenceItem.id.desc())
                 .limit(limit)

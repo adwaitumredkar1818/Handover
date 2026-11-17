@@ -155,6 +155,8 @@ export interface SourceConnection {
   account_identifier?: string;
   status: string;
   last_synced_at: string | null;
+  last_error_code?: string | null;
+  last_error_summary?: string | null;
 }
 
 export interface ProjectSourceMapping {
@@ -170,6 +172,7 @@ export interface ProjectSourceMapping {
   status: string;
   last_synced_at: string | null;
   last_sync_status: string | null;
+  last_error_code?: string | null;
   last_error_summary: string | null;
 }
 
