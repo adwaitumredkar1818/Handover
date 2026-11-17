@@ -127,6 +127,26 @@ def to_evidence_summary_response(item: EvidenceItem) -> EvidenceSummaryResponse:
             canonical_provider = "upload"
     else:
         canonical_provider = item.source_provider or item.source_type
+    meta = dict(item.metadata_json or {})
+    stage = meta.get("lifecycle_stage")
+    if not stage:
+        if item.processing_status == "failed" or item.indexing_status == "failed":
+            stage = "failed"
+        elif item.indexing_status == "processing":
+            stage = "indexing"
+        elif item.indexing_status in ("indexed", "partially_indexed"):
+            if meta.get("knowledge_count", 0) > 0:
+                stage = "graph_updated"
+            else:
+                stage = "indexed"
+        elif item.processing_status == "extracted":
+            stage = "imported"
+        else:
+            stage = "discovered"
+
+    semantic_status = meta.get("semantic_status")
+    k_count = int(meta.get("knowledge_count", 0))
+
     return EvidenceSummaryResponse(
         id=item.id,
         organisation_id=item.organisation_id,
@@ -165,7 +185,10 @@ def to_evidence_summary_response(item: EvidenceItem) -> EvidenceSummaryResponse:
         index_version=item.index_version,
         index_error_code=item.index_error_code,
         index_error_message=item.index_error_message,
-        metadata_json=dict(item.metadata_json or {}),
+        lifecycle_stage=stage,
+        semantic_status=semantic_status,
+        knowledge_count=k_count,
+        metadata_json=meta,
         latest_job=latest_job,
         latest_indexing_job=latest_indexing_job,
         created_at=item.created_at,
@@ -173,7 +196,10 @@ def to_evidence_summary_response(item: EvidenceItem) -> EvidenceSummaryResponse:
     )
 
 
-def to_evidence_detail_response(item: EvidenceItem) -> EvidenceDetailResponse:
+def to_evidence_detail_response(
+    item: EvidenceItem,
+    session: Session | None = None,
+) -> EvidenceDetailResponse:
     """Map detailed EvidenceItem with separated extracted text & pages."""
     summary = to_evidence_summary_response(item)
     extracted_content: EvidenceExtractedContentResponse | None = None
@@ -236,6 +262,52 @@ def to_evidence_detail_response(item: EvidenceItem) -> EvidenceDetailResponse:
         for c in (item.chunks or [])
     ]
 
+    linked_k_items: list[dict[str, Any]] = []
+    linked_entities: list[dict[str, Any]] = []
+    linked_rel: list[dict[str, Any]] = []
+    if session is not None:
+        try:
+            from app.models.knowledge import KnowledgeItem, KnowledgeEvidenceLink
+            from app.models.relationship import KnowledgeEntity, KnowledgeRelationship
+            from sqlalchemy import select
+
+            k_rows = session.execute(
+                select(KnowledgeItem)
+                .join(KnowledgeEvidenceLink, KnowledgeEvidenceLink.knowledge_item_id == KnowledgeItem.id)
+                .where(
+                    KnowledgeEvidenceLink.evidence_id == item.id,
+                    KnowledgeItem.is_deleted == False,
+                )
+                .limit(50)
+            ).scalars().all()
+            for k in k_rows:
+                linked_k_items.append({
+                    "id": str(k.id),
+                    "category": k.category,
+                    "title": k.title,
+                    "summary": k.structured_summary,
+                    "confidence": k.confidence_score,
+                    "epistemic_status": k.epistemic_status,
+                })
+
+            ent_rows = session.execute(
+                select(KnowledgeEntity)
+                .where(
+                    KnowledgeEntity.project_id == item.project_id,
+                    (KnowledgeEntity.name.ilike(f"%{item.title[:60]}%") | (KnowledgeEntity.source_evidence_id == item.id)),
+                )
+                .limit(20)
+            ).scalars().all()
+            for e in ent_rows:
+                linked_entities.append({
+                    "id": str(e.id),
+                    "name": e.name,
+                    "entity_type": e.entity_type,
+                    "category": e.category,
+                })
+        except Exception as exc:
+            logger.debug("Could not populate linked knowledge items: %s", exc)
+
     return EvidenceDetailResponse(
         **summary.model_dump(),
         extracted_content=extracted_content,
@@ -243,6 +315,9 @@ def to_evidence_detail_response(item: EvidenceItem) -> EvidenceDetailResponse:
         can_download=can_download,
         download_url=download_url,
         chunks=chunks_list,
+        linked_knowledge_items=linked_k_items,
+        linked_entities=linked_entities,
+        linked_relationships=linked_rel,
     )
 
 
@@ -917,7 +992,7 @@ class EvidenceService:
                 self._session.rollback()
                 logger.warning("On-demand text chunking skipped: %s", exc)
 
-        return to_evidence_detail_response(evidence)
+        return to_evidence_detail_response(evidence, session=self._session)
 
     def delete_evidence(
         self,

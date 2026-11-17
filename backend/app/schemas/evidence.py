@@ -95,6 +95,9 @@ class EvidenceSummaryResponse(BaseSchema):
     index_version: str | None = None
     index_error_code: str | None = None
     index_error_message: str | None = None
+    lifecycle_stage: str = "imported"
+    semantic_status: str | None = None
+    knowledge_count: int = 0
     metadata_json: dict[str, Any]
     latest_job: BackgroundJobResponse | None = None
     latest_indexing_job: BackgroundJobResponse | None = None
@@ -151,6 +154,9 @@ class EvidenceDetailResponse(EvidenceSummaryResponse):
     can_download: bool = False
     download_url: str | None = None
     chunks: list[EvidenceChunkDetailResponse] = Field(default_factory=list)
+    linked_knowledge_items: list[dict[str, Any]] = Field(default_factory=list)
+    linked_entities: list[dict[str, Any]] = Field(default_factory=list)
+    linked_relationships: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class EvidenceListResponse(BaseSchema):

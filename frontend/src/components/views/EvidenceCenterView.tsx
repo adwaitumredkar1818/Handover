@@ -22,8 +22,36 @@ import {
   Check,
   Lock,
   ChevronDown,
+  Sparkles,
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
+import { useProjectProcessingStatus } from "../../hooks/useProjectProcessingStatus";
+
+function getLifecycleBadge(stage?: string) {
+  const s = (stage || "imported").toLowerCase();
+  switch (s) {
+    case "discovered":
+      return { label: "Discovered", bg: "bg-slate-100 text-slate-700 border-slate-200", isSpinning: false };
+    case "imported":
+      return { label: "Imported", bg: "bg-blue-50 text-blue-700 border-blue-200", isSpinning: false };
+    case "indexing":
+      return { label: "Indexing", bg: "bg-amber-50 text-amber-700 border-amber-200", isSpinning: true };
+    case "indexed":
+      return { label: "Indexed", bg: "bg-cyan-50 text-cyan-800 border-cyan-200", isSpinning: false };
+    case "extracting":
+      return { label: "Extracting", bg: "bg-purple-50 text-purple-700 border-purple-200", isSpinning: true };
+    case "knowledge_ready":
+      return { label: "Knowledge Ready", bg: "bg-emerald-50 text-emerald-800 border-emerald-300", isSpinning: false };
+    case "graph_updated":
+      return { label: "Graph Updated", bg: "bg-emerald-100 text-emerald-800 border-emerald-400 font-bold", isSpinning: false };
+    case "failed":
+      return { label: "Failed", bg: "bg-rose-50 text-rose-700 border-rose-200", isSpinning: false };
+    case "not_applicable":
+      return { label: "Not Applicable", bg: "bg-slate-100 text-slate-600 border-slate-200", isSpinning: false };
+    default:
+      return { label: stage || "Imported", bg: "bg-slate-100 text-slate-700 border-slate-200", isSpinning: false };
+  }
+}
 
 // Helper to render category badges consistently
 function getCategoryBadge(category?: string, sourceType?: string) {
@@ -102,7 +130,8 @@ export function EvidenceCenterView() {
     addToast,
   } = useLiveApp();
 
-  const [activeTab, setActiveTab] = useState<"chunks" | "metadata">("chunks");
+  const { status: projectStatus } = useProjectProcessingStatus(activeProject?.id || "");
+  const [activeTab, setActiveTab] = useState<"chunks" | "knowledge" | "metadata">("chunks");
   const [copiedHash, setCopiedHash] = useState(false);
   const [copiedChunkId, setCopiedChunkId] = useState<string | null>(null);
   const [copiedMetadataKey, setCopiedMetadataKey] = useState<string | null>(null);
@@ -225,10 +254,29 @@ export function EvidenceCenterView() {
         </div>
 
         <div className="flex items-center gap-4 text-xs font-medium text-[#69778D]">
-          <span>
-            Total Evidence:{" "}
-            <strong className="text-[#25334B]">{evidenceMetrics?.total_items ?? evidenceList.length}</strong>
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-xs text-[#25334B]">
+              {projectStatus && projectStatus.total_evidence_count > 0 ? (
+                <>
+                  <span className="text-[#249E91] font-bold">{projectStatus.processed_evidence_count}</span>
+                  {" of "}
+                  <span>{projectStatus.total_evidence_count}</span>
+                  {" evidence items processed"}
+                </>
+              ) : (
+                <>
+                  Total Evidence:{" "}
+                  <strong className="text-[#25334B]">{evidenceMetrics?.total_items ?? evidenceList.length}</strong>
+                </>
+              )}
+            </span>
+            {projectStatus?.is_processing && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300 flex items-center gap-1 animate-pulse">
+                <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                <span>{projectStatus.stage_label || "Processing live"}</span>
+              </span>
+            )}
+          </div>
           <span className="hidden sm:inline">|</span>
           <span className="hidden sm:inline">
             Active Mappings:{" "}
@@ -499,6 +547,20 @@ export function EvidenceCenterView() {
                         <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${catBadge.bg}`}>
                           {catBadge.label}
                         </span>
+                        {(() => {
+                          const stageBadge = getLifecycleBadge(item.lifecycle_stage);
+                          return (
+                            <span className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded border flex items-center gap-1 ${stageBadge.bg}`}>
+                              {stageBadge.isSpinning && <RefreshCw className="w-2.5 h-2.5 animate-spin" />}
+                              <span>{stageBadge.label}</span>
+                            </span>
+                          );
+                        })()}
+                        {item.knowledge_count != null && item.knowledge_count > 0 && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-300">
+                            +{item.knowledge_count} items
+                          </span>
+                        )}
                         <span className="text-[10px] text-[#69778D] font-mono">
                           {item.content_hash.slice(0, 8)}...
                         </span>
@@ -633,7 +695,7 @@ export function EvidenceCenterView() {
                 </div>
               </div>
 
-              {/* Tabs: Chunks vs Metadata */}
+              {/* Tabs: Chunks vs Extracted Knowledge vs Metadata */}
               <div className="flex border-b border-[#DCE3EB] text-xs font-semibold">
                 <button
                   type="button"
@@ -645,6 +707,20 @@ export function EvidenceCenterView() {
                   }`}
                 >
                   Extracted Text Chunks ({selectedEvidence.chunks?.length || 0})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("knowledge")}
+                  className={`pb-2 px-3 transition-colors flex items-center gap-1 ${
+                    activeTab === "knowledge"
+                      ? "border-b-2 border-[#249E91] text-[#249E91]"
+                      : "text-[#69778D] hover:text-[#25334B]"
+                  }`}
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-[#249E91]" />
+                  <span>
+                    Extracted Knowledge ({selectedEvidence.linked_knowledge_items?.length || selectedEvidence.knowledge_count || 0})
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -763,6 +839,48 @@ export function EvidenceCenterView() {
                         </div>
                       );
                     })
+                  )}
+                </div>
+              ) : activeTab === "knowledge" ? (
+                <div className="space-y-3">
+                  {!selectedEvidence.linked_knowledge_items || selectedEvidence.linked_knowledge_items.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-[#69778D] bg-[#F4F6F9] rounded-xl border border-[#DCE3EB] flex flex-col items-center justify-center gap-2">
+                      <Sparkles className="w-8 h-8 text-[#249E91]/40" />
+                      <div className="font-semibold text-[#25334B]">No Knowledge Items Extracted Yet</div>
+                      <p className="text-[11px] max-w-xs text-[#69778D]">
+                        {selectedEvidence.semantic_status === "running"
+                          ? "Ollama Qwen3 8B semantic extraction is currently active on this document."
+                          : selectedEvidence.semantic_status === "not_applicable"
+                          ? "This evidence item has explicit metadata and is represented directly in Relationship Explorer without LLM reasoning."
+                          : "Knowledge items extracted deterministically or via Ollama will appear here with full provenance."}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {selectedEvidence.linked_knowledge_items.map((k) => (
+                        <div
+                          key={k.id}
+                          className="p-3 rounded-lg border border-[#DCE3EB] bg-white shadow-2xs space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
+                              {k.category.replace(/_/g, " ")}
+                            </span>
+                            {k.confidence != null && (
+                              <span className="text-[10px] font-mono text-slate-500">
+                                Confidence: {Math.round(k.confidence * 100)}%
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs font-bold text-[#25334B]">{k.title}</div>
+                          <p className="text-[11px] text-slate-600 leading-relaxed">{k.summary}</p>
+                          <div className="pt-1 border-t border-[#EBF0F5] flex items-center justify-between text-[10px] text-slate-400">
+                            <span>Status: {k.epistemic_status || "extracted"}</span>
+                            <span>ID: {k.id.slice(0, 8)}...</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               ) : (
