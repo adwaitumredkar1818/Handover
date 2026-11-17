@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from typing import Any
 
 import httpx
 from fastapi import FastAPI
@@ -22,6 +24,16 @@ from app.core.rate_limit import InMemorySlidingWindowRateLimiter
 from app.db.session import create_db_engine, create_session_factory, verify_database_connection
 
 logger = logging.getLogger(__name__)
+
+_worker_wake_event = threading.Event()
+_worker_stop_event = threading.Event()
+_worker_thread: threading.Thread | None = None
+_worker_engine: Any | None = None
+
+
+def signal_worker_activity() -> None:
+    """Notify in-process background worker thread that new jobs are queued."""
+    _worker_wake_event.set()
 
 
 def _build_lifespan(
@@ -51,6 +63,15 @@ def _build_lifespan(
         try:
             latency_ms = verify_database_connection(engine)
             logger.info("PostgreSQL startup check succeeded (%.2f ms)", latency_ms)
+            # Pre-warm extra pool connections so concurrent queries don't incur 4-5s SSL handshakes
+            warm_conns = []
+            try:
+                for _ in range(3):
+                    warm_conns.append(engine.connect())
+            finally:
+                for conn in warm_conns:
+                    conn.close()
+            logger.info("PostgreSQL connection pool pre-warmed (4 total connections ready)")
         except Exception as exc:
             # Allow process boot cleanly in dev/health checks while /health/ready reports 503.
             logger.warning(
@@ -58,9 +79,67 @@ def _build_lifespan(
                 type(exc).__name__,
             )
 
+        # Launch lightweight background worker in a daemon thread (except isolated test suites)
+        global _worker_thread, _worker_engine
+        if settings.app_env != "test":
+            try:
+                from app.repositories.job import BackgroundJobRepository
+                with session_factory() as startup_session:
+                    try:
+                        recovered = BackgroundJobRepository(startup_session).recover_orphaned_jobs()
+                        startup_session.commit()
+                        if recovered > 0:
+                            logger.info("Recovered %d orphaned running jobs on startup.", recovered)
+                    except Exception as rec_exc:
+                        logger.warning("Could not recover orphaned jobs on startup: %s", rec_exc)
+
+                from app.worker import build_worker_service
+
+                composite_worker, _worker_engine = build_worker_service(settings)
+
+                def _worker_runner() -> None:
+                    logger.info(
+                        "In-process background worker thread active (worker_id=%s)",
+                        composite_worker.worker_id,
+                    )
+                    poll_interval = max(1.0, float(settings.ingestion.worker_poll_interval_seconds))
+                    while not _worker_stop_event.is_set():
+                        try:
+                            did_work = composite_worker.process_next_job()
+                            if did_work:
+                                continue
+                        except Exception as loop_exc:
+                            logger.warning("Background worker transient loop error: %s", loop_exc)
+                        _worker_wake_event.wait(timeout=poll_interval)
+                        _worker_wake_event.clear()
+                    logger.info("In-process background worker thread stopped.")
+
+                _worker_thread = threading.Thread(
+                    target=_worker_runner,
+                    name="IPKRHBackgroundWorker",
+                    daemon=True,
+                )
+                _worker_thread.start()
+                app.state.worker_thread = _worker_thread
+                logger.info("IPKRH in-process background worker thread launched successfully.")
+            except Exception as worker_init_exc:
+                logger.warning(
+                    "Could not initialize in-process background worker thread: %s",
+                    worker_init_exc,
+                )
+
         try:
             yield
         finally:
+            _worker_stop_event.set()
+            _worker_wake_event.set()
+            if _worker_thread is not None and _worker_thread.is_alive():
+                _worker_thread.join(timeout=2.0)
+            if _worker_engine is not None:
+                try:
+                    _worker_engine.dispose()
+                except Exception:
+                    pass
             sync_http_client.close()
             await http_client.aclose()
             redis_mgr.close()
