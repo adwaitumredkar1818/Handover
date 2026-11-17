@@ -2079,6 +2079,29 @@ export const api = {
         }
       );
     },
+    async getInvestigation(
+      projectId: string,
+      investigationId: string
+    ): Promise<{
+      investigation_id: string;
+      status: string;
+      answer_status: string;
+      raw_answer: string;
+      claims: Array<{ claim_text: string; citation_labels: string[] }>;
+      conflicts: string[];
+      uncertainty: string;
+      missing_information: string[];
+      suggested_followups: string[];
+      response_mode: AssistantResponseMode;
+      validated_citations: Array<{
+        citation_label: string;
+        source_title: string;
+        source_provider: string;
+        excerpt?: string;
+      }>;
+    }> {
+      return request(`/projects/${projectId}/assistant/investigations/${investigationId}`);
+    },
     async deleteConversation(projectId: string, conversationId: string): Promise<void> {
       return request(`/projects/${projectId}/assistant/conversations/${conversationId}`, {
         method: "DELETE",

@@ -12,6 +12,7 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Annotated
 
@@ -318,8 +319,24 @@ async def stream_investigation_events(
 
     async def event_generator():
         since_seq = 0
-        if last_event_id and last_event_id.isdigit():
-            since_seq = int(last_event_id)
+        all_historical = registry.get_event_history(investigation_id, since_sequence=0)
+        latest_seq = max((h.sequence_number for h in all_historical), default=0)
+
+        # Robust cursor validation: distinguish valid, missing, malformed, and future cursors
+        if last_event_id is not None:
+            if not last_event_id.isdigit():
+                # Malformed cursor: emit explicit cursor_reset event and replay from beginning
+                yield f"event: cursor_reset\ndata: {{\"error\": \"Malformed Last-Event-ID: {last_event_id}\", \"expected\": \"integer\", \"replaying_from\": 0}}\n\n"
+                since_seq = 0
+            else:
+                parsed_seq = int(last_event_id)
+                if parsed_seq > latest_seq and latest_seq > 0:
+                    # Future cursor: client claims cursor beyond server state.
+                    # Send explicit cursor_error and reset to latest state to prevent silent drop
+                    yield f"event: cursor_error\ndata: {{\"error\": \"Cursor {parsed_seq} exceeds latest server sequence {latest_seq}\", \"action\": \"resync\", \"latest_sequence\": {latest_seq}}}\n\n"
+                    since_seq = latest_seq
+                else:
+                    since_seq = parsed_seq
 
         # 1. Replay historical events
         historical = registry.get_event_history(investigation_id, since_sequence=since_seq)

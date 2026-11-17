@@ -100,6 +100,9 @@ export function AssistantWorkspaceView() {
   const [loadingConversations, setLoadingConversations] = useState<boolean>(true);
   const [loadingMessages, setLoadingMessages] = useState<boolean>(false);
   const [asking, setAsking] = useState<boolean>(false);
+  const [liveInvestigationStage, setLiveInvestigationStage] = useState<string | null>(null);
+  const [liveInvestigationEvents, setLiveInvestigationEvents] = useState<string[]>([]);
+  const [liveStreamingAnswer, setLiveStreamingAnswer] = useState<string>("");
 
   // Form input
   const [inputValue, setInputValue] = useState<string>("");
@@ -280,9 +283,152 @@ export function AssistantWorkspaceView() {
     };
     setMessages((prev) => [...prev, tempUserMsg]);
     setAsking(true);
+    setLiveInvestigationStage("initiating");
+    setLiveInvestigationEvents(["Initializing investigation session..."]);
+    setLiveStreamingAnswer("");
 
     try {
       const domainsFilter = selectedDomain === "all" ? undefined : [selectedDomain];
+      
+      // 1. Start live investigation session
+      let invId: string | null = null;
+      try {
+        const invStart = await api.assistant.startInvestigation(activeProject.id, targetConvId, {
+          question: q,
+          mode: retrievalMode,
+          response_mode: responseMode,
+          include_domains: domainsFilter,
+        });
+        invId = invStart.investigation_id;
+      } catch (startErr) {
+        console.warn("Live investigation start failed, falling back to sync askQuestion:", startErr);
+      }
+
+      // 2. If investigation ID returned, listen to live SSE event stream
+      if (invId) {
+        const token = localStorage.getItem("access_token");
+        const sseUrl = `${process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"}/api/v1/projects/${activeProject.id}/assistant/investigations/${invId}/events`;
+        
+        let lastEventId = 0;
+        let eventStreamClosed = false;
+
+        const processSseLine = (line: string) => {
+          if (line.startsWith("event: ")) {
+            const ev = line.slice(7).trim();
+            if (ev === "node_started" || ev === "plan_created") {
+              setLiveInvestigationStage("planning");
+              setLiveInvestigationEvents((p) => [...p, "Formulating plan & expanding subqueries..."]);
+            } else if (ev === "retrieval_started" || ev === "retrieval_progress") {
+              setLiveInvestigationStage("retrieving");
+              setLiveInvestigationEvents((p) => [...p, "Querying ChromaDB vector index & PostgreSQL full-text search..."]);
+            } else if (ev === "agent_selected" || ev === "agent_started") {
+              setLiveInvestigationStage("delegating");
+              setLiveInvestigationEvents((p) => [...p, "Delegating subtask to specialized dynamic agent worker..."]);
+            } else if (ev === "synthesis_started") {
+              setLiveInvestigationStage("synthesizing");
+              setLiveInvestigationEvents((p) => [...p, "Synthesizing evidence with Ollama Qwen3 8B..."]);
+            } else if (ev === "token_delta") {
+              setLiveInvestigationStage("streaming");
+            } else if (ev === "investigation_completed") {
+              eventStreamClosed = true;
+            }
+          } else if (line.startsWith("id: ")) {
+            const parsedId = parseInt(line.slice(4).trim(), 10);
+            if (!isNaN(parsedId)) lastEventId = parsedId;
+          } else if (line.startsWith("data: ")) {
+            try {
+              const dataObj = JSON.parse(line.slice(6).trim());
+              if (dataObj.payload?.chunk) {
+                setLiveStreamingAnswer((prev) => prev + dataObj.payload.chunk);
+              }
+            } catch {
+              // Non-JSON SSE payload
+            }
+          }
+        };
+
+        try {
+          const sseResp = await fetch(sseUrl, {
+            headers: {
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              "Last-Event-ID": String(lastEventId),
+            },
+          });
+
+          if (sseResp.ok && sseResp.body) {
+            const reader = sseResp.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = "";
+
+            while (!eventStreamClosed) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              buf += decoder.decode(value, { stream: true });
+              const lines = buf.split("\n");
+              buf = lines.pop() || "";
+              for (const l of lines) {
+                processSseLine(l);
+              }
+            }
+          }
+        } catch (sseErr) {
+          console.warn("SSE stream interrupted, fetching finalized state:", sseErr);
+        }
+
+        // Fetch finalized investigation state
+        try {
+          const finalState = await api.assistant.getInvestigation(activeProject.id, invId);
+          if (finalState && finalState.raw_answer) {
+            const mappedClaims = (finalState.claims || []).map((c) => ({
+              claim_text: c.claim_text,
+              citation_labels: c.citation_labels,
+              confidence: 0.95,
+            }));
+
+            const mappedCitations = (finalState.validated_citations || []).map((vc, idx) => ({
+              id: `cit-${idx}`,
+              message_id: `inv-msg-${invId}`,
+              citation_label: vc.citation_label,
+              citation_order: idx + 1,
+              evidence_id: `ev-${idx}`,
+              source_title: vc.source_title,
+              source_provider: vc.source_provider,
+              excerpt: vc.excerpt || "",
+              is_verified: true,
+            }));
+
+            const assistantMsg: AssistantMessage = {
+              id: `inv-msg-${invId}`,
+              conversation_id: targetConvId,
+              sender_type: "assistant",
+              content: finalState.raw_answer,
+              answer_status: (finalState.answer_status as AssistantAnswerStatus) || "answered",
+              response_mode: finalState.response_mode || responseMode,
+              structured_payload_json: {
+                claims: mappedClaims,
+                conflicts: finalState.conflicts || [],
+                uncertainty: finalState.uncertainty || "",
+                missing_information: finalState.missing_information || [],
+                suggested_followup_questions: finalState.suggested_followups || [],
+                response_mode: finalState.response_mode || responseMode,
+              },
+              citations: mappedCitations,
+              model_name: "qwen3:8b",
+              created_at: new Date().toISOString(),
+            };
+
+            setMessages((prev) => [...prev, assistantMsg]);
+            if (mappedCitations.length > 0 && mappedCitations[0]) {
+              setActiveCitationLabel(mappedCitations[0].citation_label);
+            }
+            return;
+          }
+        } catch (stateErr) {
+          console.warn("Failed to retrieve final investigation state directly, falling back to askQuestion:", stateErr);
+        }
+      }
+
+      // Synchronous fallback if SSE/Investigation did not yield terminal message
       const maxCits = responseMode === "deep_research" ? 14 : responseMode === "deep_think" ? 12 : 8;
       const answerRes = await api.assistant.askQuestion(activeProject.id, targetConvId, {
         question: q,
@@ -1276,18 +1422,51 @@ export function AssistantWorkspaceView() {
               })
             )}
 
-            {/* In-flight loading turn */}
+            {/* In-flight loading turn with live SSE progress & agent indicator */}
             {asking && (
-              <div className="flex flex-col items-start w-full animate-pulse">
+              <div className="flex flex-col items-start w-full animate-fade-in space-y-2">
                 <div className="flex items-center gap-1.5 text-[10px] text-slate-500 uppercase font-semibold mb-1 ml-1">
                   <Bot className="size-3 text-teal-600 animate-spin" />
-                  <span className="text-teal-900 font-bold">REASONING &amp; RETRIEVING...</span>
-                </div>
-                <div className="w-full bg-white border border-teal-200 rounded-2xl rounded-tl-xs p-4 text-xs text-slate-500 shadow-xs flex items-center gap-3">
-                  <Sparkles className="size-4 text-teal-600 animate-bounce" />
-                  <span>
-                    Querying hybrid retrieval (ChromaDB + PostgreSQL) and synthesising with Ollama Qwen3 8B...
+                  <span className="text-teal-900 font-bold">
+                    {liveInvestigationStage === "initiating" && "INITIATING INVESTIGATION..."}
+                    {liveInvestigationStage === "planning" && "QUERY PLANNING & SUBQUERY EXPANSION..."}
+                    {liveInvestigationStage === "retrieving" && "HYBRID RETRIEVAL (CHROMADB + POSTGRESQL)..."}
+                    {liveInvestigationStage === "delegating" && "DYNAMIC SPECIALIZED AGENT DELEGATION..."}
+                    {liveInvestigationStage === "synthesizing" && "EVIDENCE SYNTHESIS (OLLAMA QWEN3 8B)..."}
+                    {liveInvestigationStage === "streaming" && "STREAMING REAL-TIME ANSWER..."}
+                    {!liveInvestigationStage && "REASONING & RETRIEVING..."}
                   </span>
+                </div>
+                <div className="w-full bg-white border border-teal-200 rounded-2xl rounded-tl-xs p-4 text-xs text-slate-600 shadow-xs flex flex-col gap-2.5">
+                  <div className="flex items-center gap-2 text-teal-800 font-medium">
+                    <Sparkles className="size-4 text-teal-600 animate-bounce shrink-0" />
+                    <span>
+                      {liveInvestigationEvents[liveInvestigationEvents.length - 1] ||
+                        "Querying hybrid retrieval (ChromaDB + PostgreSQL) and synthesising with Ollama Qwen3 8B..."}
+                    </span>
+                  </div>
+
+                  {/* Real-time streaming answer preview if available */}
+                  {liveStreamingAnswer && (
+                    <div className="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 font-mono text-[11px] leading-relaxed max-h-40 overflow-y-auto whitespace-pre-wrap">
+                      {liveStreamingAnswer}
+                    </div>
+                  )}
+
+                  {/* Investigation activity breadcrumb stream */}
+                  {liveInvestigationEvents.length > 1 && (
+                    <div className="flex flex-wrap gap-1 mt-1 pt-2 border-t border-slate-100">
+                      {liveInvestigationEvents.slice(-4).map((ev, i) => (
+                        <span
+                          key={i}
+                          className="px-2 py-0.5 text-[10px] bg-slate-100 text-slate-600 rounded-md border border-slate-200 flex items-center gap-1"
+                        >
+                          <CheckCircle2 className="size-2.5 text-teal-600" />
+                          {ev}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
