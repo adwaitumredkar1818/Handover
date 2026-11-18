@@ -2658,7 +2658,12 @@ export function KnowledgeExplorer({ projectId }: { projectId: string }) {
   const [showEv, setShowEv] = useState(true)
   const [showPeople, setShowPeople] = useState(true)
   const [q, setQ] = useState('')
-  const [view, setView] = useState<'graph' | 'list'>(() => (typeof window !== 'undefined' && window.innerWidth < 1024 ? 'list' : 'graph'))
+  const [view, setView] = useState<'graph' | 'list'>('graph')
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+      setView('list')
+    }
+  }, [])
   const [focus, setFocus] = useState(false)
   const first = [...nodes.values()].find((n) => n.kind === 'Decision')?.id ?? [...nodes.keys()][0]
   const [sel, setSel] = useState<string>(first || '')
@@ -2968,8 +2973,6 @@ function KnowledgePageInner({
     params?.id ||
     activeProject?.id ||
     s.currentProject?.id ||
-    (projects.length > 0 ? projects[0]?.id : undefined) ||
-    (s.projects.length > 0 ? s.projects[0]?.id : undefined) ||
     ''
   const sid = sourceId || params?.sourceId || 'src-github-atlas'
   const eid = evidenceId || params?.evidenceId || 'e-settle-adr'
