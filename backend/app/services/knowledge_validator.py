@@ -43,6 +43,28 @@ _EXPLICIT_SEVERITY_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+_RAG_EXPLICIT_WORD_RE = re.compile(
+    r"\brag\b|retrieval[-_ ]augmented",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_technology_grounded(tech_name: str, combined_text: str) -> bool:
+    """Verify technology name appears as an actual token in evidence (never substring 'rag' in 'storage')."""
+    lower = tech_name.strip().lower()
+    if not lower:
+        return False
+    if lower in {"rag", "rag pipeline", "retrieval augmented generation", "retrieval-augmented generation"}:
+        return bool(_RAG_EXPLICIT_WORD_RE.search(combined_text))
+    if len(lower) <= 4 and lower.isalnum():
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(lower)}(?![a-z0-9])", combined_text))
+    if lower in combined_text:
+        return True
+    first_tok = lower.split()[0]
+    if len(first_tok) >= 3 and re.search(rf"(?<![a-z0-9]){re.escape(first_tok)}(?![a-z0-9])", combined_text):
+        return True
+    return False
+
 _CANDIDATE_MODEL_BY_CATEGORY: dict[KnowledgeCategory, type[Any]] = {
     KnowledgeCategory.PROJECT_OVERVIEW_CONTEXT: ProjectOverviewCandidate,
     KnowledgeCategory.DECISIONS_RATIONALE: DecisionCandidate,
@@ -609,15 +631,12 @@ def _validate_and_normalize_graph_payload(
     td = payload.get("technology_details")
     if isinstance(td, dict):
         tech_name = str(td.get("technology_name") or "").strip()
-        if not tech_name or tech_name.lower() not in combined_text:
-            # Check short token match (e.g. "PostgreSQL 16" -> "postgresql")
-            first_tok = tech_name.split()[0].lower() if tech_name else ""
-            if not first_tok or len(first_tok) < 2 or first_tok not in combined_text:
-                payload.pop("technology_details", None)
-                graphs = [g for g in graphs if g != "TECHNOLOGY_STACK"]
-                if had_only_tech:
-                    return False, "ungrounded_technology_name"
-                td = None
+        if not _is_technology_grounded(tech_name, combined_text):
+            payload.pop("technology_details", None)
+            graphs = [g for g in graphs if g != "TECHNOLOGY_STACK"]
+            if had_only_tech:
+                return False, "ungrounded_technology_name"
+            td = None
 
         if isinstance(td, dict):
             raw_ver = str(td.get("version") or "").strip()

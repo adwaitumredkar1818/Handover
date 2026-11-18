@@ -350,6 +350,7 @@ GRAPH CLASSIFICATION DEFINITIONS ("graph_classifications" array, 0 or more):
     - "version": exact version if stated in evidence (or null — NEVER invent)
     - "usage_status": "DECLARED_DEPENDENCY" | "DIRECTLY_EVIDENCED_USE" | "DOCUMENTED_PLANNED" | "DEPRECATED_OR_REMOVED" | "MENTIONED_ONLY" | "UNKNOWN"
     - "associated_component": component/service using it if stated (or null)
+  * STRICT RAG RULE: Only emit "RAG" if the evidence explicitly declares or implements Retrieval-Augmented Generation (e.g. explicit "RAG" or "retrieval-augmented"). Mere mention of AI, LLM, Ollama, Chatbot, vector database, embeddings, or document search does NOT prove RAG.
 - SYSTEM_ARCHITECTURE (HOW THE SYSTEM IS STRUCTURED & INTERACTS): Deployed frontend apps, backend services, APIs, DB services, auth services, workers, queues, pipelines, storage layers, external integrations, and data-flow links.
   * Provide "architecture_details" when SYSTEM_ARCHITECTURE applies:
     - "component_name", "component_type" (e.g. "frontend_app", "backend_service", "api", "database_service", "worker", "queue", "storage", "external_service"), "component_responsibility", "implementation_status" ("implemented" | "planned" | "mentioned" | "unknown"), "associated_technologies" (array), "relationship_type" ("calls" | "reads_from" | "writes_to" | "depends_on" | "sends_events_to" | "processes" | "authenticates_through" | "integrates_with" | "deploys_to" | null), "source_component", "target_component"

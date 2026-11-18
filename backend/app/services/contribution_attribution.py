@@ -30,13 +30,25 @@ from app.services.llm import LLMGenerationRequest, StructuredLLMClient
 
 logger = logging.getLogger("app.services.contribution_attribution")
 
+_RAG_EXPLICIT_RE = re.compile(
+    r"(?:^|[/\\._\-\s])rag(?:$|[/\\._\-\s])|retrieval[-_ ]augmented|rag[-_ ]pipeline|rag[-_ ]chain|hybrid[-_ ]rag",
+    re.IGNORECASE,
+)
+
+
+def is_explicit_rag_evidence(text: str) -> bool:
+    """Return True only when text explicitly evidences Retrieval-Augmented Generation (RAG),
+    never matching 'rag' as a substring of unrelated words like 'storage' or 'coverage'.
+    """
+    return bool(text and _RAG_EXPLICIT_RE.search(text))
+
+
 _PATH_DOMAIN_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("Database", ("migrations/", "alembic/", "/models/", ".sql", "schema", "database")),
+    ("Database", ("migrations/", "alembic/", "/models/", ".sql", "schema", "database", "vector_store", "chroma")),
     ("Authentication", ("/auth", "jwt", "oauth", "rbac", "supabase_verifier", "password", "session")),
     ("Security", ("security", "token_encryption", "access_policy", "rls", "crypto")),
-    ("RAG", ("embedding", "vector_store", "retrieval", "chunking", "chroma", "rag")),
     ("OCR", ("/ocr", "document_extraction", "pymupdf", "docx")),
-    ("AI/ML", ("/llm", "extraction_prompts", "knowledge_validator", "reconstruction_worker", "ollama", "qwen")),
+    ("AI/ML", ("/llm", "extraction_prompts", "knowledge_validator", "reconstruction_worker", "ollama", "qwen", "embedding")),
     ("Integration", ("integrations/", "github_", "jira_", "slack_", "webhook")),
     ("API", ("/api/", "routes/", "endpoints", "schemas/", "openapi")),
     ("Frontend", ("frontend/", "src/app/", "src/components/", ".tsx", ".jsx", ".css", "tailwind")),
@@ -48,14 +60,13 @@ _PATH_DOMAIN_RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 _DOMAIN_KEYWORDS: list[tuple[ContributionCategory, list[str]]] = [
-    (ContributionCategory.DATABASE_ENGINEERING, ["migration", "alembic", "sql", "postgres", "schema", "database", "table", "index", "foreign key"]),
+    (ContributionCategory.DATABASE_ENGINEERING, ["migration", "alembic", "sql", "postgres", "schema", "database", "table", "index", "foreign key", "chroma", "vector_store"]),
     (ContributionCategory.AUTHENTICATION, ["auth", "jwt", "login", "session", "password", "oauth", "token", "rbac", "permission", "credential"]),
     (ContributionCategory.SECURITY, ["security", "encryption", "aes-256", "secret", "ssrf", "sanitize", "vulnerability"]),
-    (ContributionCategory.AI_ML, ["ollama", "qwen", "glm", "llm", "inference", "prompt", "ai/ml"]),
-    (ContributionCategory.RAG_AND_RETRIEVAL, ["rag", "retrieval", "embedding", "nomic", "chroma", "vector", "chunk"]),
+    (ContributionCategory.AI_ML, ["ollama", "qwen", "glm", "llm", "inference", "prompt", "ai/ml", "embedding"]),
     (ContributionCategory.OCR_AND_DOCUMENT_PROCESSING, ["ocr", "pymupdf", "docx", "pdf", "extraction"]),
     (ContributionCategory.DEVOPS, ["ci/cd", "github actions", "pipeline", "dockerfile", "docker-compose", "deploy", "workflow"]),
-    (ContributionCategory.INFRASTRUCTURE, ["infrastructure", "docker", "env", "port", "config", "server"]),
+    (ContributionCategory.INFRASTRUCTURE, ["infrastructure", "docker", "env", "port", "config"]),
     (ContributionCategory.TESTING, ["test", "pytest", "vitest", "unit test", "integration test", "mock", "assert", "coverage"]),
     (ContributionCategory.BUG_FIXING, ["fix", "bug", "patch", "hotfix", "resolve", "error", "crash"]),
     (ContributionCategory.DOCUMENTATION, ["doc", "readme", "specification", "architecture", "handover", "guide", "changelog"]),
@@ -127,6 +138,8 @@ def classify_contribution_domains(
                         _add(area, f"custom_path:{prefix}->{path}")
 
         for path in norm_paths:
+            if is_explicit_rag_evidence(path):
+                _add("RAG", f"path:{path}")
             for area, tokens in _PATH_DOMAIN_RULES:
                 if any(tok in path for tok in tokens):
                     _add(area, f"path:{path}")
@@ -139,10 +152,13 @@ def classify_contribution_domains(
         [title_or_message or "", *(labels or []), *norm_paths]
     ).lower()
 
+    if is_explicit_rag_evidence(combined):
+        _add("RAG", "keyword:rag_explicit")
+
     short_by_enum = {v: k for k, v in _CANONICAL_CATEGORY_MAP.items()}
     for category, keywords in _DOMAIN_KEYWORDS:
         for kw in keywords:
-            if kw in combined:
+            if re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])", combined):
                 area = short_by_enum.get(category.value, category.value)
                 _add(area, f"keyword:{kw}")
                 break
@@ -706,6 +722,17 @@ class ContributionAttributionService:
             if entry is None:
                 raw_email = meta.get("git_author_email")
                 matched_pm = pm_by_id.get(row.matched_project_membership_id) if row.matched_project_membership_id else None
+                effective_pm_id = str(matched_pm.id) if matched_pm is not None else None
+                effective_ctype = (
+                    row.contributor_type
+                    if (row.contributor_type != ContributorType.CONFIRMED_MEMBER.value or matched_pm is not None)
+                    else ContributorType.UNIDENTIFIED.value
+                )
+                effective_rstatus = (
+                    row.review_status
+                    if (row.contributor_type != ContributorType.CONFIRMED_MEMBER.value or matched_pm is not None)
+                    else ContributorReviewStatus.PENDING.value
+                )
                 suggested_pm_id = meta.get("suggested_project_membership_id")
                 suggested_pm = pm_by_id.get(uuid.UUID(suggested_pm_id)) if suggested_pm_id else None
                 entry = {
@@ -719,13 +746,14 @@ class ContributionAttributionService:
                     "github_numeric_id": meta.get("github_author_id"),
                     "git_author_name": meta.get("git_author_name"),
                     "git_author_email": raw_email if has_project_manage else mask_email(raw_email),
-                    "contributor_type": row.contributor_type,
-                    "review_status": row.review_status,
-                    "match_method": row.match_method,
+                    "_raw_git_email": raw_email,
+                    "contributor_type": effective_ctype,
+                    "review_status": effective_rstatus,
+                    "match_method": row.match_method if matched_pm is not None or row.contributor_type != ContributorType.CONFIRMED_MEMBER.value else "member_removed",
                     "match_confidence": row.match_confidence,
-                    "matched_project_membership_id": str(row.matched_project_membership_id) if row.matched_project_membership_id else None,
+                    "matched_project_membership_id": effective_pm_id,
                     "matched_member_name": matched_pm.user.full_name if matched_pm and matched_pm.user else None,
-                    "suggested_project_membership_id": suggested_pm_id,
+                    "suggested_project_membership_id": str(suggested_pm.id) if suggested_pm else None,
                     "suggested_member_name": suggested_pm.user.full_name if suggested_pm and suggested_pm.user else None,
                     "declared_responsibility": matched_pm.responsibility_description if matched_pm else None,
                     "contribution_count": 0,
@@ -751,7 +779,13 @@ class ContributionAttributionService:
                 entry["repositories"].add(str(meta["repository"]))
             for wa in meta.get("work_areas") or ([row.contribution_category] if row.contribution_category else []):
                 if wa:
-                    entry["work_areas"].add(str(wa))
+                    wa_str = str(wa)
+                    # Filter out historical substring false-positive RAG labels unless explicit RAG evidence exists
+                    if wa_str in ("RAG", ContributionCategory.RAG_AND_RETRIEVAL.value):
+                        ev_title = row.evidence_item.title if row.evidence_item else ""
+                        if not is_explicit_rag_evidence(ev_title) and meta.get("classification_method") in ("deterministic_path", "deterministic_keyword", None):
+                            continue
+                    entry["work_areas"].add(wa_str)
             entry["evidence_ids"].append(str(row.evidence_item_id))
 
             if row.contributor_type == ContributorType.BOT.value or is_bot_identity(
@@ -773,9 +807,6 @@ class ContributionAttributionService:
 
         # Tier A — Confirmed project members must always be represented even with 0 direct commits
         matched_pm_ids: set[uuid.UUID] = set()
-        for row in rows:
-            if row.matched_project_membership_id is not None:
-                matched_pm_ids.add(row.matched_project_membership_id)
         for entry in grouped.values():
             mid = entry.get("matched_project_membership_id")
             if mid:
@@ -797,6 +828,24 @@ class ContributionAttributionService:
             .all()
         ) if user_ids else []
         user_to_gh = {a.user_id: a.external_username.strip() for a in auth_rows if a.external_username}
+
+        # Offer genuine candidate suggestions for unmatched contributors using exact GitHub login or verified email
+        for entry in grouped.values():
+            if entry.get("matched_project_membership_id") or entry.get("suggested_project_membership_id"):
+                continue
+            if entry.get("contributor_type") == ContributorType.BOT.value:
+                continue
+            c_login = (entry.get("github_login") or "").strip().lower()
+            c_email = (entry.get("_raw_git_email") or "").strip().lower()
+            for pm in memberships:
+                pm_gh = (user_to_gh.get(pm.user_id) or "").strip().lower()
+                pm_email = (pm.user.email or "").strip().lower() if pm.user and pm.user.email else ""
+                if (c_login and pm_gh and c_login == pm_gh) or (
+                    c_email and pm_email and "noreply.github.com" not in c_email and c_email == pm_email
+                ):
+                    entry["suggested_project_membership_id"] = str(pm.id)
+                    entry["suggested_member_name"] = pm.user.full_name if pm.user else None
+                    break
 
         # Collect assisted / directed work for confirmed members ONLY from tool-associated / bot commits
         directed_stats_by_pm: dict[uuid.UUID, dict[str, Any]] = defaultdict(lambda: {
@@ -847,9 +896,9 @@ class ContributionAttributionService:
                         "git_author_name": None,
                         "git_author_email": raw_email if has_project_manage else mask_email(raw_email),
                         "contributor_type": ContributorType.CONFIRMED_MEMBER.value,
-                        "review_status": ContributorReviewStatus.CONFIRMED.value,
-                        "match_method": "direct_membership",
-                        "match_confidence": 1.0,
+                        "review_status": ContributorReviewStatus.CONFIRMED.value if gh_handle else ContributorReviewStatus.PENDING.value,
+                        "match_method": "direct_membership" if gh_handle else "pending_identity",
+                        "match_confidence": 1.0 if gh_handle else 0.0,
                         "matched_project_membership_id": str(pm.id),
                         "matched_member_name": pm.user.full_name if pm.user else None,
                         "suggested_project_membership_id": None,
@@ -886,6 +935,7 @@ class ContributionAttributionService:
 
         results: list[dict[str, Any]] = []
         for entry in grouped.values():
+            entry.pop("_raw_git_email", None)
             if contributor_type_filter and entry["contributor_type"] != contributor_type_filter:
                 continue
             if review_status_filter and entry["review_status"] != review_status_filter:
