@@ -36,6 +36,67 @@ import {
 
 import { useLiveApp } from '../../context/LiveAppContext'
 import { api } from '../../lib/api'
+import type {
+  HandoverPackageVersionSummary,
+  HandoverReadinessIntelligenceResponse,
+  HandoverVersionSectionsResponse,
+} from '../../lib/types'
+import {
+  CanonicalEvidenceTable,
+  CanonicalSectionPanel,
+  TAB_TO_SECTION_TYPE,
+} from '../handover/CanonicalSectionView'
+import { ReadinessIntelligencePanel } from '../handover/ReadinessIntelligencePanel'
+import { TransitionChecklistsPanel } from '../handover/TransitionChecklistsPanel'
+import { ResponsibilityTransferPanel } from '../handover/ResponsibilityTransferPanel'
+import { SignoffApprovalPanel } from '../handover/SignoffApprovalPanel'
+
+export const isUUID = (val?: string | null): boolean =>
+  Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(val))
+
+export function getMemberDisplayName(
+  id?: string | null,
+  members?: Array<any>,
+  currentUser?: { id?: string; full_name?: string | null; email?: string } | null
+): string {
+  if (!id) return 'Unassigned'
+  if (currentUser && currentUser.id === id) {
+    return currentUser.full_name || currentUser.email?.split('@')[0] || 'Current User'
+  }
+  if (members && members.length > 0) {
+    const m = members.find((x) => x.user_id === id || x.id === id)
+    if (m) {
+      return m.full_name || (m.email ? m.email.split('@')[0] : 'Project Member')
+    }
+  }
+  const p = personById(id)
+  if (p && p.id === id && p.name !== 'Maya Chen' && p.name !== 'Project Member') {
+    return p.name
+  }
+  if (isUUID(id)) {
+    return 'Project Member'
+  }
+  return p?.name || 'Project Member'
+}
+
+export function getMemberDisplayRole(
+  id?: string | null,
+  members?: Array<any>,
+  currentUser?: { id?: string; role?: string; roles?: string[] } | null
+): string {
+  if (!id) return 'None'
+  if (currentUser && currentUser.id === id) {
+    return currentUser.role || currentUser.roles?.[0] || 'Project Member'
+  }
+  if (members && members.length > 0) {
+    const m = members.find((x) => x.user_id === id || x.id === id)
+    if (m) {
+      return m.role_name || m.transition_role || 'Project Member'
+    }
+  }
+  const p = personById(id)
+  return p?.title || 'Project Member'
+}
 
 export function mapCaseToHandover(hc: any, fallbackProjectId: string): Handover {
   let uiStatus: HandoverStatus = 'in_progress'
@@ -53,8 +114,8 @@ export function mapCaseToHandover(hc: any, fallbackProjectId: string): Handover 
     id: hc.id,
     code: `HO-${hc.version || String(hc.id).slice(0, 4)}`,
     projectId: hc.project_id || fallbackProjectId,
-    outgoingId: hc.departing_member_id || 'shubham-id',
-    incomingId: hc.successor_id || 'shubham-pokale-id',
+    outgoingId: hc.departing_member_id || '',
+    incomingId: hc.successor_id || '',
     created: hc.created_at ? new Date(hc.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : 'Recently',
     updated: hc.updated_at ? new Date(hc.updated_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : 'Just now',
     status: uiStatus,
@@ -92,19 +153,39 @@ export function Link({
 export function useHandover(id: string) {
   const s = useStore()
   const { handoverCases, activeProject, projects } = useLiveApp()
+  const [fetchedCase, setFetchedCase] = useState<any>(null)
 
-  let h = s.handovers.find((x) => x.id === id)
-  if (!h && handoverCases.length > 0) {
+  useEffect(() => {
+    let active = true
+    if (isUUID(id) && activeProject?.id && !handoverCases.some((c) => c.id === id)) {
+      api.handover.getCase(activeProject.id, id)
+        .then((data) => {
+          if (active) setFetchedCase(data)
+        })
+        .catch((err) => console.warn('Could not fetch handover case:', err))
+    }
+    return () => { active = false }
+  }, [id, activeProject?.id, handoverCases])
+
+  let h: Handover | undefined = undefined
+  if (handoverCases.length > 0) {
     const foundCase = handoverCases.find((c) => c.id === id)
     if (foundCase) {
       h = mapCaseToHandover(foundCase, activeProject?.id || '')
     }
   }
+  if (!h && fetchedCase) {
+    h = mapCaseToHandover(fetchedCase, activeProject?.id || '')
+  }
+  if (!h && !isUUID(id)) {
+    h = s.handovers.find((x) => x.id === id)
+  }
 
   const project =
-    (h && s.allProjects.find((p) => p.id === h.projectId)) ||
     (h && projects.find((p) => p.id === h.projectId)) ||
+    (activeProject?.id === h?.projectId ? activeProject : null) ||
     activeProject ||
+    (h && s.allProjects.find((p) => p.id === h.projectId)) ||
     s.allProjects[0]
 
   useEffect(() => {
@@ -148,7 +229,7 @@ const FILTERS: ('all' | HandoverStatus)[] = ['all', 'draft', 'in_progress', 'pen
 export function AllHandovers({ defaultProjectId }: { defaultProjectId?: string }) {
   const s = useStore()
   const router = useRouter()
-  const { activeProject, projects, user, handoverCases, refreshHandovers, isLoadingHandovers } = useLiveApp()
+  const { activeProject, projects, user, members, handoverCases, refreshHandovers, isLoadingHandovers } = useLiveApp()
   const [f, setF] = useState<'all' | HandoverStatus>('all')
   const [q, setQ] = useState('')
   const [proj, setProj] = useState(defaultProjectId || activeProject?.id || 'all')
@@ -165,36 +246,23 @@ export function AllHandovers({ defaultProjectId }: { defaultProjectId?: string }
 
   // Sync backend cases into s.handovers whenever handoverCases updates
   useEffect(() => {
-    if (handoverCases.length > 0) {
-      const liveItems = handoverCases.map((hc) => mapCaseToHandover(hc, activeProject?.id || ''))
-      s.setHandovers((prev) => {
-        const existingIds = new Set(prev.map((x) => x.id))
-        const newOnes = liveItems.filter((x) => !existingIds.has(x.id))
-        if (!newOnes.length) {
-          return prev.map((item) => {
-            const match = liveItems.find((l) => l.id === item.id)
-            return match ? { ...item, ...match } : item
-          })
-        }
-        return [...liveItems, ...prev.filter((p) => !liveItems.some((l) => l.id === p.id))]
-      })
-    }
+    const liveItems = (handoverCases || []).map((hc) => mapCaseToHandover(hc, activeProject?.id || ''))
+    s.setHandovers(liveItems)
   }, [handoverCases, activeProject?.id])
 
   const allHandoversList = useMemo(() => {
-    const liveItems = handoverCases.map((hc) => mapCaseToHandover(hc, activeProject?.id || ''))
-    const seen = new Set(liveItems.map((m) => m.id))
-    return [...liveItems, ...s.handovers.filter((h) => !seen.has(h.id))]
-  }, [handoverCases, s.handovers, activeProject?.id])
+    return (handoverCases || []).map((hc) => mapCaseToHandover(hc, activeProject?.id || ''))
+  }, [handoverCases, activeProject?.id])
 
-  const list = allHandoversList.filter(
-    (h) =>
+  const list = allHandoversList.filter((h) => {
+    const outName = getMemberDisplayName(h.outgoingId, members, user)
+    const incName = getMemberDisplayName(h.incomingId, members, user)
+    return (
       (f === 'all' || h.status === f) &&
       (proj === 'all' || h.projectId === proj) &&
-      `${h.code} ${personById(h.outgoingId).name} ${personById(h.incomingId).name} ${h.scope}`
-        .toLowerCase()
-        .includes(q.toLowerCase())
-  )
+      `${h.code} ${outName} ${incName} ${h.scope}`.toLowerCase().includes(q.toLowerCase())
+    )
+  })
   const canCreate = Boolean(user && (activeProject || projects.length > 0))
 
   return (
@@ -241,7 +309,7 @@ export function AllHandovers({ defaultProjectId }: { defaultProjectId?: string }
           />
           <Select value={proj} onChange={(e) => setProj(e.target.value)} className="sm:w-56">
             <option value="all">All projects</option>
-            {(projects.length ? projects : s.projects).map((p) => (
+            {(projects.length ? projects : (activeProject ? [activeProject] : [])).map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
               </option>
@@ -258,7 +326,12 @@ export function AllHandovers({ defaultProjectId }: { defaultProjectId?: string }
             />
           </div>
         </div>
-        {view === 'table' ? (
+        {isLoadingHandovers && allHandoversList.length === 0 ? (
+          <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted">
+            <Loader2 className="size-4 animate-spin text-brand" />
+            <span>Loading handovers…</span>
+          </div>
+        ) : view === 'table' ? (
           <HandoverTable
             items={list}
             empty={
@@ -300,7 +373,10 @@ export function AllHandovers({ defaultProjectId }: { defaultProjectId?: string }
 
 function HandoverCard({ h, footer }: { h: Handover; footer?: ReactNode }) {
   const s = useStore()
-  const p = s.allProjects.find((x) => x.id === h.projectId)
+  const { projects, activeProject, members, user } = useLiveApp()
+  const p = projects.find((x) => x.id === h.projectId) || (activeProject?.id === h.projectId ? activeProject : s.allProjects.find((x) => x.id === h.projectId))
+  const outName = getMemberDisplayName(h.outgoingId, members, user)
+  const incName = getMemberDisplayName(h.incomingId, members, user)
   return (
     <Card interactive className="flex flex-col p-5">
       <div className="flex items-center justify-between">
@@ -308,19 +384,19 @@ function HandoverCard({ h, footer }: { h: Handover; footer?: ReactNode }) {
         <StatusBadge status={h.status} />
       </div>
       <Link to={`/handovers/${h.id}`} className="mt-2 text-[15px] font-semibold text-navy hover:text-brand">
-        {p?.name}
+        {p?.name || activeProject?.name || 'Project'}
       </Link>
       <p className="mt-0.5 line-clamp-1 text-[13px] text-muted">{h.scope}</p>
       <div className="mt-4 flex items-center gap-2">
-        <Avatar id={h.outgoingId} size={28} />
+        <Avatar id={h.outgoingId} name={outName} size={28} />
         <div className="h-px flex-1 border-t border-dashed border-slate-300" />
         <ArrowRight className="size-3.5 text-brand" />
         <div className="h-px flex-1 border-t border-dashed border-slate-300" />
-        <Avatar id={h.incomingId} size={28} />
+        <Avatar id={h.incomingId} name={incName} size={28} />
       </div>
       <div className="mt-1 flex justify-between text-xs text-muted">
-        <span>{personById(h.outgoingId).name}</span>
-        <span>{personById(h.incomingId).name}</span>
+        <span>{outName}</span>
+        <span>{incName}</span>
       </div>
       <div className="mt-4">
         <div className="mb-1 flex justify-between text-xs">
@@ -349,9 +425,6 @@ const RECON_STAGES = [
   'Drafting handover document'
 ]
 
-const isUUID = (val?: string | null): boolean =>
-  Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(val))
-
 export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string }) {
   const s = useStore()
   const router = useRouter()
@@ -359,13 +432,13 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
   const projectParam = searchParams?.get('project') || defaultProjectId
   const { activeProject, projects, user, members: liveMembers, sourceMappings, refreshHandovers, addToast } = useLiveApp()
 
-  const availableProjects = projects.length > 0 ? projects : s.projects
+  const availableProjects = projects.length > 0 ? projects : (activeProject ? [activeProject] : [])
   const [step, setStep] = useState(0)
   const [maxStep, setMaxStep] = useState(0)
   const [pid, setPid] = useState(
     projectParam && availableProjects.some((p) => p.id === projectParam)
       ? projectParam
-      : activeProject?.id || availableProjects[0]?.id || 'ed33c53a-7678-4d5b-8212-64c233897142'
+      : activeProject?.id || availableProjects[0]?.id || ''
   )
 
   useEffect(() => {
@@ -383,13 +456,16 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
         email: m.email || '',
       }))
     }
-    return s.members.filter((m) => m.projectId === pid).map((m) => ({
-      personId: m.personId,
-      name: personById(m.personId).name,
-      role: m.role,
-      email: personById(m.personId).title,
-    }))
-  }, [liveMembers, s.members, pid])
+    if (user) {
+      return [{
+        personId: user.id,
+        name: user.full_name || (user.email ? user.email.split('@')[0] : 'Member'),
+        role: user.roles?.[0] || 'project_manager',
+        email: user.email || '',
+      }]
+    }
+    return []
+  }, [liveMembers, user])
 
   const [out, setOut] = useState('')
   const [inc, setInc] = useState('')
@@ -406,28 +482,8 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
         type: sm.provider?.toLowerCase()?.includes('git') ? ('github' as const) : ('jira' as const)
       }))
     }
-    const storeSrcs = s.sources.filter((x) => x.projectId === pid && x.status !== 'disconnected')
-    return storeSrcs.length > 0 ? storeSrcs : [
-      {
-        id: 'src-gh',
-        name: 'GitHub Repository: HackMatrix-5.0-MISCo2',
-        account: 'shubham392007-sketch',
-        records: 147,
-        scope: ['Commits', 'Issues', 'PRs', 'Codebase'],
-        status: 'active' as const,
-        type: 'github' as const
-      },
-      {
-        id: 'src-doc',
-        name: 'Project Specification Document (DOCX)',
-        account: 'GrowthLens - Skill Passport System Spec.docx',
-        records: 84,
-        scope: ['Decisions', 'Architecture', 'Requirements'],
-        status: 'active' as const,
-        type: 'document' as const
-      }
-    ]
-  }, [sourceMappings, s.sources, pid])
+    return []
+  }, [sourceMappings])
 
   const [srcSel, setSrcSel] = useState<string[]>([])
   const [scope, setScope] = useState({
@@ -449,30 +505,32 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
 
   useEffect(() => {
     if (projectMembers.length > 0) {
-      const departing =
-        projectMembers.find((m) => (m.name || '').toLowerCase().includes('shubham') && !(m.name || '').toLowerCase().includes('pokale')) ||
-        projectMembers[0]
-      const successor =
-        projectMembers.find((m) => (m.name || '').toLowerCase().includes('pokale') || m.personId !== departing?.personId) ||
-        projectMembers[1] ||
-        projectMembers[0]
-      if (departing) setOut(departing.personId)
-      if (successor && successor.personId !== departing?.personId) setInc(successor.personId)
+      const userMember = projectMembers.find((m) => m.personId === user?.id)
+      const departing = userMember || projectMembers[0]
+      if (departing && !out) {
+        setOut(departing.personId)
+      }
     }
     setSrcSel(projectSources.filter((x) => x.status !== 'error').map((x) => x.id))
-  }, [pid, projectMembers, projectSources])
+  }, [pid, projectMembers, projectSources, user?.id, out])
 
   const startReconstruction = async () => {
     setIsGenerating(true)
     setGenPct(15)
     try {
-      const targetPid = (isUUID(pid) ? pid : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
-      const targetOut = (isUUID(out) ? out : user?.id) || '977051df-2ea5-492e-b6a9-83bc8ef55711'
+      const targetPid = isUUID(pid) ? pid : activeProject?.id
+      if (!targetPid || !isUUID(targetPid)) {
+        throw new Error('Please select a valid project workspace.')
+      }
+      const targetOut = isUUID(out) ? out : user?.id
+      if (!targetOut || !isUUID(targetOut)) {
+        throw new Error('Please select a valid departing team member.')
+      }
       const targetInc = isUUID(inc) && inc !== targetOut ? inc : undefined
 
       // 1. Create Case in PostgreSQL
       const caseRes = await api.handover.createCase(targetPid, {
-        title: `Handover: ${project?.name || activeProject?.name || 'Skillpassport'} Transfer`,
+        title: `Handover: ${project?.name || activeProject?.name || 'Skill Passport'} Transfer`,
         description: scope.notes || 'Knowledge reconstruction for departing team member',
         departing_member_id: targetOut,
         successor_id: targetInc,
@@ -555,9 +613,9 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
   const all = allFindings(pid)
   const projGaps = gaps.filter((g) => g.projectId === pid)
   const valid = Boolean([
-    !!pid,
-    !!out && !!inc && out !== inc,
-    srcSel.length > 0,
+    !!pid && isUUID(pid),
+    Boolean(out && isUUID(out) && (!inc || (isUUID(inc) && inc !== out))),
+    projectSources.length === 0 || srcSel.length > 0,
     scope.areas.length > 0 && scope.from < scope.to,
     true,
     genPct >= 100,
@@ -566,8 +624,12 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
   ][step])
 
   const submit = async () => {
-    const finalId = createdCaseId || `ho-${1045 + s.handovers.length}`
-    const targetPid = (isUUID(pid) ? pid : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
+    const targetPid = isUUID(pid) ? pid : activeProject?.id
+    if (!targetPid || !isUUID(targetPid)) {
+      addToast({ type: 'error', title: 'Error', message: 'No valid project selected' })
+      return
+    }
+    const finalId = createdCaseId
     if (createdCaseId && isUUID(createdCaseId)) {
       try {
         if (submitMode === 'verify') {
@@ -586,9 +648,9 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
     addToast({
       type: 'success',
       title: submitMode === 'verify' ? 'Sent for Verification' : 'Submitted for Approval',
-      message: `Handover case ${finalId} is now ready in Handover Workspace.`,
+      message: `Handover case is now ready in Handover Workspace.`,
     })
-    router.push(`/handovers/${finalId}`)
+    router.push(finalId ? `/handovers/${finalId}` : '/handovers')
   }
 
   return (
@@ -670,7 +732,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
           {step === 1 && (
             <>
               <h2 className="mt-1 text-lg font-semibold text-navy">Select outgoing and incoming members</h2>
-              <p className="mt-1 text-sm text-muted">The outgoing member verifies findings; the incoming member receives the published handover.</p>
+              <p className="mt-1 text-sm text-muted">The outgoing member verifies findings; the incoming member receives the published handover (optional at creation).</p>
               <div className="mt-6 grid items-end gap-4 sm:grid-cols-[1fr_auto_1fr]">
                 <Field label="Outgoing member">
                   <Select value={out} onChange={(e) => setOut(e.target.value)}>
@@ -683,10 +745,10 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
                   </Select>
                 </Field>
                 <ArrowRight className="mx-auto mb-3 hidden size-5 text-brand sm:block" />
-                <Field label="Incoming member">
+                <Field label="Incoming member (optional)">
                   <Select value={inc} onChange={(e) => setInc(e.target.value)}>
-                    <option value="">Select…</option>
-                    {projectMembers.map((m) => (
+                    <option value="">(Optional) Leave unassigned for now</option>
+                    {projectMembers.filter((m) => m.personId !== out).map((m) => (
                       <option key={m.personId} value={m.personId}>
                         {m.name} · {m.role} ({m.email})
                       </option>
@@ -697,13 +759,20 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
               {out && inc && out === inc && (
                 <p className="mt-3 text-[13px] text-bad">Outgoing and incoming members must be different people.</p>
               )}
-              {out && inc && out !== inc && (
+              {out && (!inc || out !== inc) && (
                 <div className="mt-6 flex items-center gap-4 rounded-xl bg-slate-50 p-4">
                   <div className="flex-1 text-center">
-                    <Avatar id={out} size={44} className="mx-auto" />
-                    <p className="mt-2 text-sm font-semibold text-navy">{projectMembers.find((m) => m.personId === out)?.name || personById(out).name}</p>
+                    <Avatar
+                      id={out}
+                      name={projectMembers.find((m) => m.personId === out)?.name || getMemberDisplayName(out, liveMembers, user)}
+                      size={44}
+                      className="mx-auto"
+                    />
+                    <p className="mt-2 text-sm font-semibold text-navy">
+                      {projectMembers.find((m) => m.personId === out)?.name || getMemberDisplayName(out, liveMembers, user)}
+                    </p>
                     <p className="text-xs text-muted">
-                      {projectMembers.find((m) => m.personId === out)?.role || personById(out).title}
+                      {projectMembers.find((m) => m.personId === out)?.role || getMemberDisplayRole(out, liveMembers, user)}
                     </p>
                   </div>
                   <div className="flex flex-col items-center text-brand">
@@ -711,9 +780,30 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
                     <span className="mt-1 text-[11px] font-medium">hands over to</span>
                   </div>
                   <div className="flex-1 text-center">
-                    <Avatar id={inc} size={44} className="mx-auto" />
-                    <p className="mt-2 text-sm font-semibold text-navy">{projectMembers.find((m) => m.personId === inc)?.name || personById(inc).name}</p>
-                    <p className="text-xs text-muted">{projectMembers.find((m) => m.personId === inc)?.role || personById(inc).title}</p>
+                    {inc ? (
+                      <>
+                        <Avatar
+                          id={inc}
+                          name={projectMembers.find((m) => m.personId === inc)?.name || getMemberDisplayName(inc, liveMembers, user)}
+                          size={44}
+                          className="mx-auto"
+                        />
+                        <p className="mt-2 text-sm font-semibold text-navy">
+                          {projectMembers.find((m) => m.personId === inc)?.name || getMemberDisplayName(inc, liveMembers, user)}
+                        </p>
+                        <p className="text-xs text-muted">
+                          {projectMembers.find((m) => m.personId === inc)?.role || getMemberDisplayRole(inc, liveMembers, user)}
+                        </p>
+                      </>
+                    ) : (
+                      <div className="py-1">
+                        <div className="mx-auto flex size-11 items-center justify-center rounded-full border-2 border-dashed border-slate-300 text-xs font-medium text-slate-400">
+                          ?
+                        </div>
+                        <p className="mt-2 text-sm font-medium text-slate-500">To be assigned</p>
+                        <p className="text-xs text-muted">Successor can be assigned later</p>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -754,12 +844,20 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
                   </div>
                 ))}
                 {!projectSources.length && (
-                  <EmptyState
-                    icon={Database}
-                    title="No connected sources"
-                    body="Connect at least one source on this project first."
-                    action={<Button onClick={() => router.push(`/projects/${pid}/sources`)}>Connect sources</Button>}
-                  />
+                  <div className="rounded-xl border border-line bg-slate-50/70 p-5">
+                    <div className="flex items-start gap-3">
+                      <Database className="mt-0.5 size-5 shrink-0 text-brand" />
+                      <div>
+                        <p className="text-sm font-semibold text-navy">Project Documents & Canonical Evidence</p>
+                        <p className="mt-1 text-[13px] leading-relaxed text-muted">
+                          No external source integrations (GitHub, Jira, Slack) are active for this project. Handover reconstruction will automatically assemble knowledge from all uploaded project documents and verified evidence records.
+                        </p>
+                        <p className="mt-2 flex items-center gap-1.5 text-xs font-medium text-ok">
+                          <Check className="size-3.5" /> Ready to assemble with project evidence
+                        </p>
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
             </>
@@ -799,7 +897,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
               <div className="mt-5 flex items-center justify-between rounded-xl border border-line p-4">
                 <div>
                   <p className="text-[13px] font-medium text-navy">
-                    Only evidence authored by or involving {personById(out).name}
+                    Only evidence authored by or involving {getMemberDisplayName(out, liveMembers, user)}
                   </p>
                   <p className="text-xs text-muted">
                     Recommended. Reduces noise and keeps the handover personal to their responsibilities.
@@ -826,8 +924,8 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
               <dl className="mt-5 divide-y divide-line rounded-xl border border-line">
                 {[
                   ['Project', project?.name, 0],
-                  ['Members', `${projectMembers.find((m) => m.personId === out)?.name || personById(out).name} → ${projectMembers.find((m) => m.personId === inc)?.name || personById(inc).name}`, 1],
-                  ['Sources', projectSources.filter((x) => srcSel.includes(x.id)).map((x) => x.name).join(', '), 2],
+                  ['Members', `${getMemberDisplayName(out, liveMembers, user)} → ${inc ? getMemberDisplayName(inc, liveMembers, user) : 'Unassigned'}`, 1],
+                  ['Sources', projectSources.length ? projectSources.filter((x) => srcSel.includes(x.id)).map((x) => x.name).join(', ') : 'Project Documents & Evidence', 2],
                   ['Date range', `${scope.from} → ${scope.to}`, 3],
                   ['Focus areas', scope.areas.join(', '), 3],
                   ['Due', scope.due, 3]
@@ -856,7 +954,9 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
                 <div className="mt-6 flex flex-col items-center rounded-2xl border border-dashed border-[#D9E1F0] bg-tint/30 py-8 text-center">
                   <SphereVisual variant="empty" emptyKind="sources" interactive={false} className="size-40" />
                   <p className="mt-2 text-sm font-semibold text-navy">
-                    Ready to reconstruct {projectSources.filter((x) => srcSel.includes(x.id)).reduce((a, b) => a + b.records, 0).toLocaleString()} records
+                    {projectSources.length
+                      ? `Ready to reconstruct ${projectSources.filter((x) => srcSel.includes(x.id)).reduce((a, b) => a + b.records, 0).toLocaleString()} records`
+                      : 'Ready to reconstruct project knowledge'}
                   </p>
                   <p className="mt-1 max-w-sm text-xs text-muted">
                     Scattered source records will be linked into the project’s Organic Knowledge Sphere.
@@ -901,7 +1001,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
           {step === 6 && (
             <>
               <h2 className="mt-1 text-lg font-semibold text-navy">Review generated handover</h2>
-              <p className="mt-1 text-sm text-muted">This is an AI draft. Verified knowledge is compiled with cryptographic integrity; {projectMembers.find((m) => m.personId === out)?.name || personById(out).name} will confirm each finding.</p>
+              <p className="mt-1 text-sm text-muted">This is an AI draft. Verified knowledge is compiled with cryptographic integrity; {getMemberDisplayName(out, liveMembers, user)} will confirm each finding.</p>
               <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {[
                   ['Verified items', assembledStats?.eligibleItems ?? f.decisions.length, Lightbulb],
@@ -947,7 +1047,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
                   <Radio
                     checked={submitMode === 'verify'}
                     onChange={() => setSubmitMode('verify')}
-                    label={<span className="font-medium">Send to {personById(out).name} for verification <Badge tone="blue" className="ml-1">Recommended</Badge></span>}
+                    label={<span className="font-medium">Send to {getMemberDisplayName(out, liveMembers, user)} for verification <Badge tone="blue" className="ml-1">Recommended</Badge></span>}
                     description="They review findings, answer gaps, then submit for your approval."
                   />
                 </div>
@@ -961,7 +1061,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
                 </div>
               </div>
               <p className="mt-4 flex items-center gap-1.5 text-xs text-muted">
-                <Lock className="size-3" />{personById(out).name} and approvers will be notified. Nothing is visible to {personById(inc).name} until you publish.
+                <Lock className="size-3" />{getMemberDisplayName(out, liveMembers, user)} and approvers will be notified. Nothing is visible to {inc ? getMemberDisplayName(inc, liveMembers, user) : 'unassigned incoming member'} until you publish.
               </p>
             </>
           )}
@@ -991,9 +1091,56 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
 }
 
 /* ---------- 24. Handover layout + workspace ---------- */
-export const H_TABS = ['overview', 'knowledge', 'responsibilities', 'decisions', 'tasks', 'risks', 'dependencies', 'evidence', 'review', 'report'] as const
-export type HTab = (typeof H_TABS)[number]
+export const H_TABS = [
+  'overview',
+  'readiness',
+  'checklists',
+  'decisions',
+  'architecture',
+  'tasks',
+  'responsibilities',
+  'dependencies',
+  'risks',
+  'operations',
+  'evidence',
+  'review',
+  'report'
+] as const
+export type HTab = (typeof H_TABS)[number] | 'knowledge'
+const TAB_LABELS: Record<string, string> = {
+  overview: 'Overview',
+  readiness: 'Readiness',
+  checklists: 'Checklists',
+  decisions: 'Decisions',
+  architecture: 'Architecture',
+  tasks: 'Tasks & Work',
+  responsibilities: 'Ownership',
+  dependencies: 'Dependencies',
+  risks: 'Risks & Issues',
+  operations: 'Operations',
+  evidence: 'Evidence',
+  review: 'Sign-Off & Approval',
+  report: 'Report',
+}
 const STAGE_LABELS = [['draft', 'Draft'], ['in_progress', 'Verification'], ['pending_review', 'Manager review'], ['approved', 'Approved'], ['published', 'Published'], ['completed', 'Acknowledged']] as const
+
+export interface HandoverSectionsContext {
+  versions: HandoverPackageVersionSummary[]
+  selectedVersionId: string | null
+  setSelectedVersionId: (versionId: string) => void
+  sectionsData: HandoverVersionSectionsResponse | null
+  isLoadingVersions: boolean
+  isLoadingSections: boolean
+  sectionsError: string | null
+  retryLoadSections: () => void
+  readinessData: HandoverReadinessIntelligenceResponse | null
+  isLoadingReadiness: boolean
+  isReassessingReadiness: boolean
+  readinessError: string | null
+  readinessNotAssessed: boolean
+  retryLoadReadiness: () => void
+  reassessReadiness: (notes?: string) => Promise<void>
+}
 
 export function HandoverLayout({
   id,
@@ -1002,59 +1149,274 @@ export function HandoverLayout({
 }: {
   id: string
   tab: HTab
-  children: (h: Handover, role: ProjectRole) => ReactNode
+  children: (h: Handover, role: ProjectRole, sectionsCtx: HandoverSectionsContext) => ReactNode
 }) {
   const s = useStore()
   const router = useRouter()
-  const { activeProject, handoverCases, refreshHandovers } = useLiveApp()
+  const searchParams = useSearchParams()
+  const versionParam = searchParams?.get('version')
+  const { activeProject, members, user, refreshHandovers } = useLiveApp()
   const { h, project, role } = useHandover(id)
-  const [dlg, setDlg] = useState<null | 'submit' | 'approve' | 'publish' | 'changes' | 'start'>(null)
-  const [note, setNote] = useState('')
+
+  // Canonical package version & eight-domain sections state
+  const [versions, setVersions] = useState<HandoverPackageVersionSummary[]>([])
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null)
+  const [sectionsData, setSectionsData] = useState<HandoverVersionSectionsResponse | null>(null)
+  const [isLoadingVersions, setIsLoadingVersions] = useState(false)
+  const [isLoadingSections, setIsLoadingSections] = useState(false)
+  const [sectionsError, setSectionsError] = useState<string | null>(null)
+  const [retryNonce, setRetryNonce] = useState(0)
+
+  // Stage 4: Live Readiness Intelligence state
+  const [readinessData, setReadinessData] = useState<HandoverReadinessIntelligenceResponse | null>(null)
+  const [isLoadingReadiness, setIsLoadingReadiness] = useState(false)
+  const [isReassessingReadiness, setIsReassessingReadiness] = useState(false)
+  const [readinessError, setReadinessError] = useState<string | null>(null)
+  const [readinessNotAssessed, setReadinessNotAssessed] = useState(false)
+  const [readinessNonce, setReadinessNonce] = useState(0)
+
+  const resolvedProjectId = (h?.projectId && isUUID(h.projectId) ? h.projectId : activeProject?.id) || ''
+
+  // Reset and load versions whenever handover case or project changes (prevents cross-case leakage)
+  useEffect(() => {
+    let active = true
+    setVersions([])
+    setSelectedVersionId(null)
+    setSectionsData(null)
+    setSectionsError(null)
+    setReadinessData(null)
+    setReadinessError(null)
+    setReadinessNotAssessed(false)
+
+    if (!id || !isUUID(id) || !resolvedProjectId || !isUUID(resolvedProjectId)) {
+      return
+    }
+
+    setIsLoadingVersions(true)
+    api.handover
+      .getVersions(resolvedProjectId, id)
+      .then((res) => {
+        if (!active) return
+        const list = Array.isArray(res) ? res : []
+        setVersions(list)
+        if (list.length > 0) {
+          const fromParam = versionParam && list.find((v) => v.id === versionParam)
+          const current = list.find((v) => v.is_current)
+          setSelectedVersionId((fromParam || current || list[0])!.id)
+        }
+      })
+      .catch((err: unknown) => {
+        if (!active) return
+        const msg = err instanceof Error ? err.message : 'Failed to load package versions.'
+        setSectionsError(msg)
+      })
+      .finally(() => {
+        if (active) setIsLoadingVersions(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [id, resolvedProjectId, versionParam])
+
+  // Load canonical eight-domain sections for the selected version
+  useEffect(() => {
+    let active = true
+    if (!id || !isUUID(id) || !resolvedProjectId || !isUUID(resolvedProjectId) || !selectedVersionId) {
+      setSectionsData(null)
+      return
+    }
+
+    setIsLoadingSections(true)
+    setSectionsError(null)
+    api.handover
+      .getVersionSections(resolvedProjectId, id, selectedVersionId)
+      .then((res) => {
+        if (!active) return
+        // Guard against stale cross-case / cross-version responses
+        if (res.case_id === id && res.version?.id === selectedVersionId) {
+          setSectionsData(res)
+        }
+      })
+      .catch((err: unknown) => {
+        if (!active) return
+        const msg = err instanceof Error ? err.message : 'Failed to retrieve canonical handover sections.'
+        setSectionsError(msg)
+        setSectionsData(null)
+      })
+      .finally(() => {
+        if (active) setIsLoadingSections(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [id, resolvedProjectId, selectedVersionId, retryNonce])
+
+  const retryLoadSections = () => setRetryNonce((n) => n + 1)
+  const retryLoadReadiness = () => setReadinessNonce((n) => n + 1)
+
+  // Stage 4: Load persisted live Readiness Intelligence for selected package version
+  useEffect(() => {
+    let active = true
+    if (!id || !isUUID(id) || !resolvedProjectId || !isUUID(resolvedProjectId) || !selectedVersionId) {
+      setReadinessData(null)
+      setReadinessNotAssessed(false)
+      return
+    }
+
+    setIsLoadingReadiness(true)
+    setReadinessError(null)
+    setReadinessNotAssessed(false)
+    api.handover
+      .getReadiness(resolvedProjectId, id, selectedVersionId)
+      .then((res) => {
+        if (!active) return
+        if (res.version_id === selectedVersionId && (!res.case_id || res.case_id === id)) {
+          setReadinessData(res)
+          setReadinessNotAssessed(false)
+        }
+      })
+      .catch((err: unknown) => {
+        if (!active) return
+        const status = (err as { status?: number })?.status
+        const msg = err instanceof Error ? err.message : 'Failed to load readiness intelligence.'
+        if (status === 404 || /no readiness assessment found/i.test(msg)) {
+          setReadinessData(null)
+          setReadinessNotAssessed(true)
+          setReadinessError(null)
+        } else {
+          setReadinessError(msg)
+        }
+      })
+      .finally(() => {
+        if (active) setIsLoadingReadiness(false)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [id, resolvedProjectId, selectedVersionId, readinessNonce])
+
+  const reassessReadiness = async (notes?: string) => {
+    if (
+      isReassessingReadiness ||
+      !id ||
+      !isUUID(id) ||
+      !resolvedProjectId ||
+      !isUUID(resolvedProjectId) ||
+      !selectedVersionId
+    ) {
+      return
+    }
+    setIsReassessingReadiness(true)
+    setReadinessError(null)
+    try {
+      const updated = await api.handover.assessReadiness(
+        resolvedProjectId,
+        id,
+        selectedVersionId,
+        notes || 'Live readiness reassessment'
+      )
+      setReadinessData(updated)
+      setReadinessNotAssessed(false)
+      s.toast(
+        'Readiness reassessed',
+        `Score ${updated.overall_score}/100 · ${updated.blocker_count} active blocker(s)`,
+        updated.blocker_count === 0 ? 'success' : 'info'
+      )
+      await refreshHandovers()
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to reassess handover readiness.'
+      setReadinessError(msg)
+      s.toast('Reassessment failed', msg, 'error')
+    } finally {
+      setIsReassessingReadiness(false)
+    }
+  }
 
   if (!h || !project) return <HandoverNotFound />
-  const st = handoverStats(h, s.verif)
+
+  const sectionsCtx: HandoverSectionsContext = {
+    versions,
+    selectedVersionId,
+    setSelectedVersionId,
+    sectionsData,
+    isLoadingVersions,
+    isLoadingSections,
+    sectionsError,
+    retryLoadSections,
+    readinessData,
+    isLoadingReadiness,
+    isReassessingReadiness,
+    readinessError,
+    readinessNotAssessed,
+    retryLoadReadiness,
+    reassessReadiness,
+  }
+
+  const verifiedCount = sectionsData?.epistemic_summary.human_verified_included ?? 0
+  const pendingCount = sectionsData?.epistemic_summary.pending_verification ?? 0
+  const totalCandidates = verifiedCount + pendingCount
   const idx = STAGE_LABELS.findIndex(([k]) => k === h.status)
 
-  const notify = (title: string, body: string, link: string) =>
-    s.setNotifications((ns) => [
-      { id: `n${Date.now()}`, type: 'approval', title, body, time: 'Just now', read: false, link, group: 'Today' },
-      ...ns
-    ])
-
   const actions: ReactNode[] = []
-  if (role === 'outgoing' && (h.status === 'in_progress' || h.status === 'draft')) {
-    actions.push(<Button key="s" icon={Send} onClick={() => setDlg('submit')}>Submit for approval</Button>)
-  }
-  if (role === 'manager' && h.status === 'draft') {
-    actions.push(<Button key="st" icon={Sparkles} onClick={() => setDlg('start')}>Start verification</Button>)
-  }
-  if (role === 'manager' && h.status === 'pending_review') {
+  if (tab !== 'review') {
     actions.push(
-      <Button key="c" variant="secondary" icon={Undo2} onClick={() => setDlg('changes')}>Request changes</Button>,
-      <Button key="a" variant="success" icon={ShieldCheck} onClick={() => setDlg('approve')}>Approve</Button>
-    )
-  }
-  if (role === 'manager' && h.status === 'approved') {
-    actions.push(
-      <Button key="p" icon={Send} onClick={() => setDlg('publish')}>
-        Publish to {personById(h.incomingId).name.split(' ')[0] ?? personById(h.incomingId).name}
+      <Button
+        key="signoff"
+        icon={ShieldCheck}
+        onClick={() => router.push(`/handovers/${h.id}/review`)}
+      >
+        Sign-Off &amp; Approval
       </Button>
     )
   }
-  if (role === 'incoming' && (h.status === 'published' || h.status === 'completed')) {
+  if (h.status === 'published' || h.status === 'completed') {
     actions.push(
-      <Button key="r" icon={BookOpen} onClick={() => router.push(`/handovers/${h.id}/recipient`)}>Open recipient view</Button>
+      <Button
+        key="recipient"
+        variant="secondary"
+        icon={BookOpen}
+        onClick={() => router.push(`/handovers/${h.id}/recipient`)}
+      >
+        Recipient View
+      </Button>
     )
   }
 
-  const tabs = H_TABS.filter((t) => role !== 'incoming' || t !== 'review')
-  const counts: Partial<Record<HTab, number>> = {
-    decisions: projectFindings(h.projectId).decisions.length,
-    tasks: projectFindings(h.projectId).tasks.length,
-    risks: projectFindings(h.projectId).risks.length,
-    dependencies: projectFindings(h.projectId).dependencies.length,
-    evidence: projectFindings(h.projectId).evidence.length
+  // Real tab badge counts derived strictly from canonical backend sections (never mock stores)
+  const sectionByType = new Map((sectionsData?.sections || []).map((sec) => [sec.section_type, sec]))
+  const uniqueEvidenceIds = new Set<string>()
+  for (const sec of sectionsData?.sections || []) {
+    for (const ki of sec.knowledge_items) {
+      for (const ev of ki.provenance) uniqueEvidenceIds.add(ev.evidence_id)
+    }
+    for (const rel of sec.relationships) {
+      for (const ev of rel.provenance) uniqueEvidenceIds.add(ev.evidence_id)
+    }
   }
+
+  const tabs = [...H_TABS]
+  const counts: Partial<Record<string, number>> = {
+    readiness: readinessData?.blocker_count,
+    checklists: readinessData?.checklist_summary?.mandatory_outstanding,
+    decisions: sectionByType.get('decisions_rationale')?.knowledge_items.length ?? 0,
+    architecture: sectionByType.get('technical_architecture')?.knowledge_items.length ?? 0,
+    tasks: sectionByType.get('work_progress')?.knowledge_items.length ?? 0,
+    responsibilities: sectionByType.get('responsibilities_ownership')?.knowledge_items.length ?? 0,
+    dependencies:
+      (sectionByType.get('dependencies_relationships')?.knowledge_items.length ?? 0) +
+      (sectionByType.get('dependencies_relationships')?.relationships.length ?? 0),
+    risks:
+      (sectionByType.get('bugs_blockers_risks')?.knowledge_items.length ?? 0) +
+      (sectionByType.get('bugs_blockers_risks')?.unresolved_conflicts.length ?? 0),
+    operations: sectionByType.get('operational_historical')?.knowledge_items.length ?? 0,
+    evidence: uniqueEvidenceIds.size,
+  }
+
+  const selectedVersion = versions.find((v) => v.id === selectedVersionId) || sectionsData?.version || null
+  const activeTabValue = tab === 'knowledge' ? 'overview' : tab
 
   return (
     <>
@@ -1069,23 +1431,56 @@ export function HandoverLayout({
                   <Tooltip content="Your perspective on this handover, based on your role in the project.">
                     <span><RoleBadge role={role} /></span>
                   </Tooltip>
+                  {selectedVersion && (
+                    <Badge tone={selectedVersion.is_current ? 'blue' : 'amber'}>
+                      Package v{selectedVersion.version_number}
+                      {selectedVersion.is_current ? ' (Current)' : ' (Historical)'}
+                    </Badge>
+                  )}
+                  {readinessData && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        router.push(
+                          selectedVersionId
+                            ? `/handovers/${h.id}?tab=readiness&version=${selectedVersionId}`
+                            : `/handovers/${h.id}?tab=readiness`
+                        )
+                      }
+                      className="inline-flex items-center gap-1.5 rounded-full border border-line bg-slate-50 px-2.5 py-0.5 text-[11px] font-semibold text-navy transition hover:border-brand/40 hover:bg-tint/40"
+                    >
+                      <span>Readiness {readinessData.overall_score}/100</span>
+                      <span
+                        className={cn(
+                          'size-1.5 rounded-full',
+                          readinessData.overall_level === 'ready'
+                            ? 'bg-emerald-500'
+                            : readinessData.overall_level === 'ready_with_warnings'
+                            ? 'bg-blue-500'
+                            : readinessData.overall_level === 'partially_ready'
+                            ? 'bg-amber-500'
+                            : 'bg-red-500'
+                        )}
+                      />
+                    </button>
+                  )}
                 </div>
                 <h1 className="mt-2 text-[22px] font-semibold tracking-tight text-navy">{project.name}</h1>
                 <p className="mt-0.5 text-[13px] text-muted">{h.scope}</p>
                 <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-3 text-[13px]">
                   <span className="flex items-center gap-2">
-                    <Avatar id={h.outgoingId} size={28} />
+                    <Avatar id={h.outgoingId} name={getMemberDisplayName(h.outgoingId, members, user)} size={28} />
                     <span>
                       <span className="block text-[11px] text-muted">Outgoing</span>
-                      <span className="font-medium text-navy">{personById(h.outgoingId).name}</span>
+                      <span className="font-medium text-navy">{getMemberDisplayName(h.outgoingId, members, user)}</span>
                     </span>
                   </span>
                   <ArrowRight className="size-4 text-brand" />
                   <span className="flex items-center gap-2">
-                    <Avatar id={h.incomingId} size={28} />
+                    <Avatar id={h.incomingId} name={getMemberDisplayName(h.incomingId, members, user)} size={28} />
                     <span>
                       <span className="block text-[11px] text-muted">Incoming</span>
-                      <span className="font-medium text-navy">{personById(h.incomingId).name}</span>
+                      <span className="font-medium text-navy">{getMemberDisplayName(h.incomingId, members, user)}</span>
                     </span>
                   </span>
                   <span className="hidden h-8 w-px bg-line sm:block" />
@@ -1101,10 +1496,12 @@ export function HandoverLayout({
               </div>
               <div className="flex shrink-0 flex-col items-start gap-3 lg:items-end">
                 <div className="flex items-center gap-3">
-                  <Ring value={h.progress} size={56} />
+                  <Ring value={totalCandidates > 0 ? Math.round((verifiedCount / totalCandidates) * 100) : 0} size={56} />
                   <div>
-                    <p className="text-[11px] text-muted">Completion</p>
-                    <p className="text-[13px] font-medium text-navy">{st.reviewed}/{st.all.length} reviewed</p>
+                    <p className="text-[11px] text-muted">Verified Knowledge</p>
+                    <p className="text-[13px] font-medium text-navy">
+                      {isLoadingSections ? 'Loading…' : `${verifiedCount} verified · ${pendingCount} pending`}
+                    </p>
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -1126,22 +1523,56 @@ export function HandoverLayout({
               ))}
             </ol>
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line bg-slate-50/60 px-5 py-2 text-xs text-muted">
-            <span className="flex items-center gap-1.5"><Eye className="size-3.5" />Prototype: preview this handover as</span>
-            <Segmented
-              value={role}
-              onChange={(v) => s.setPerspective((m) => ({ ...m, [h.id]: v }))}
-              options={(['manager', 'outgoing', 'incoming'] as const).map((r) => ({
-                id: r,
-                label: ROLE_LABEL[r].replace(' Member', '').replace('Project ', '')
-              }))}
-            />
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-slate-50/60 px-5 py-2.5 text-xs text-muted">
+            <div className="flex flex-wrap items-center gap-3">
+              {versions.length > 0 ? (
+                <label className="flex items-center gap-2">
+                  <span className="font-medium text-navy">Package Version:</span>
+                  <select
+                    aria-label="Package Version"
+                    value={selectedVersionId || ''}
+                    onChange={(e) => setSelectedVersionId(e.target.value)}
+                    className="rounded-lg border border-line bg-white px-2.5 py-1 text-xs font-medium text-navy focus:border-brand focus:outline-none"
+                  >
+                    {versions.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        v{v.version_number}
+                        {v.is_current ? ' (Current)' : ' (Historical)'}
+                        {v.assembled_at ? ` · ${new Date(v.assembled_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <span>{isLoadingVersions ? 'Loading package versions…' : 'No package versions assembled yet'}</span>
+              )}
+              {selectedVersion?.content_hash && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-md border border-line bg-white px-2 py-0.5 font-mono text-[11px] text-slate-600"
+                  title={`Immutable Package SHA-256: ${selectedVersion.content_hash}`}
+                >
+                  <ShieldCheck className="size-3 text-ok" />
+                  SHA-256: {selectedVersion.content_hash.slice(0, 12)}…
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="hidden items-center gap-1.5 sm:flex"><Eye className="size-3.5" />View as</span>
+              <Segmented
+                value={role}
+                onChange={(v) => s.setPerspective((m) => ({ ...m, [h.id]: v }))}
+                options={(['manager', 'outgoing', 'incoming'] as const).map((r) => ({
+                  id: r,
+                  label: ROLE_LABEL[r].replace(' Member', '').replace('Project ', '')
+                }))}
+              />
+            </div>
           </div>
         </Card>
         <Tabs
           className="mb-5"
-          tabs={tabs.map((t) => ({ id: t, label: (t[0] ?? '').toUpperCase() + t.slice(1), count: counts[t] }))}
-          value={tab}
+          tabs={tabs.map((t) => ({ id: t, label: TAB_LABELS[t] || t, count: counts[t] }))}
+          value={activeTabValue}
           onChange={(t) =>
             router.push(
               t === 'review'
@@ -1155,159 +1586,7 @@ export function HandoverLayout({
           }
         />
       </div>
-      {children(h, role)}
-      <ConfirmDialog
-        open={dlg === 'submit'}
-        onClose={() => setDlg(null)}
-        title="Submit for manager approval?"
-        confirmLabel="Submit"
-        body={
-          <>
-            {st.all.length - st.reviewed > 0 ? (
-              <span className="mb-2 block rounded-lg bg-amber-50 p-2.5 text-amber-800">
-                {st.all.length - st.reviewed} findings are still unreviewed. They'll be marked “Needs review” in the report.
-              </span>
-            ) : null}
-            Your manager will review the verified findings and your answers before publishing to {personById(h.incomingId).name}.
-          </>
-        }
-        onConfirm={async () => {
-          s.updateHandover(h.id, { status: 'pending_review', progress: Math.max(h.progress, 85), updated: 'Just now' })
-          notify('Approval requested', `${h.code} submitted for review.`, `/handovers/${h.id}/review`)
-          s.toast('Submitted for approval', 'Your manager has been notified.')
-          setDlg(null)
-          try {
-            const liveC = (handoverCases || []).find((c) => c.id === h.id)
-            if (liveC?.current_version_id && isUUID(h.id)) {
-              const targetPid = (isUUID(h.projectId) ? h.projectId : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
-              await api.handover.submitSignoff(targetPid, h.id, {
-                version_id: liveC.current_version_id,
-                signoff_type: 'departing_verification',
-                decision: 'approved',
-                comments: 'Submitted for manager review.'
-              })
-              await refreshHandovers()
-            }
-          } catch (err) {
-            console.error('Signoff error:', err)
-          }
-        }}
-      />
-      <ConfirmDialog
-        open={dlg === 'start'}
-        onClose={() => setDlg(null)}
-        title="Send for verification?"
-        confirmLabel="Send"
-        body={<>{personById(h.outgoingId).name} will be asked to verify the reconstructed findings.</>}
-        onConfirm={() => {
-          s.updateHandover(h.id, { status: 'in_progress', progress: 30, updated: 'Just now' })
-          s.toast('Sent for verification')
-          setDlg(null)
-        }}
-      />
-      <ConfirmDialog
-        open={dlg === 'approve'}
-        onClose={() => setDlg(null)}
-        title="Approve this handover?"
-        confirmLabel="Approve"
-        body={<>{st.verified} of {st.all.length} findings are verified. After approval you can publish the report to {personById(h.incomingId).name}.</>}
-        onConfirm={async () => {
-          s.updateHandover(h.id, { status: 'approved', progress: 100, updated: 'Just now' })
-          s.toast('Handover approved', 'Ready to publish.')
-          setDlg(null)
-          try {
-            const liveC = (handoverCases || []).find((c) => c.id === h.id)
-            if (liveC?.current_version_id && isUUID(h.id)) {
-              const targetPid = (isUUID(h.projectId) ? h.projectId : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
-              await api.handover.submitSignoff(targetPid, h.id, {
-                version_id: liveC.current_version_id,
-                signoff_type: 'reviewer_approval',
-                decision: 'approved',
-                comments: 'Approved by project manager.'
-              })
-              await refreshHandovers()
-            }
-          } catch (err) {
-            console.error('Approve error:', err)
-          }
-        }}
-      />
-      <ConfirmDialog
-        open={dlg === 'publish'}
-        onClose={() => setDlg(null)}
-        title={`Publish to ${personById(h.incomingId).name}?`}
-        confirmLabel="Publish"
-        body={<>They'll get access to the report, verified knowledge, linked evidence and the AI assistant. You can update or revoke access at any time from Published Handovers.</>}
-        onConfirm={async () => {
-          const nowStr = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-          s.updateHandover(h.id, { status: 'published', publishedOn: nowStr, access: 'Active', updated: 'Just now' })
-          notify('Handover published', `${h.code} is now available to ${personById(h.incomingId).name}.`, '/handovers/published')
-          s.toast('Handover published', `${personById(h.incomingId).name} has been notified.`)
-          setDlg(null)
-          try {
-            const liveC = (handoverCases || []).find((c) => c.id === h.id)
-            if (liveC?.current_version_id && isUUID(h.id)) {
-              const targetPid = (isUUID(h.projectId) ? h.projectId : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
-              const targetIncoming = isUUID(h.incomingId) ? [h.incomingId] : []
-              await api.handover.deliverPackage(targetPid, h.id, {
-                version_id: liveC.current_version_id,
-                deliver_to_user_ids: targetIncoming,
-                delivery_method: 'in_app',
-                message: `Handover package ${h.code} published.`
-              })
-              await refreshHandovers()
-            }
-          } catch (err) {
-            console.error('Publish error:', err)
-          }
-        }}
-      />
-      <Modal
-        open={dlg === 'changes'}
-        onClose={() => setDlg(null)}
-        title="Request changes"
-        subtitle={`Return ${h.code} to ${personById(h.outgoingId).name}`}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setDlg(null)}>Cancel</Button>
-            <Button
-              disabled={!note.trim()}
-              onClick={async () => {
-                s.updateHandover(h.id, { status: 'in_progress', updated: 'Just now' })
-                s.toast('Changes requested', personById(h.outgoingId).name + ' has been notified.', 'info')
-                const currNote = note
-                setDlg(null)
-                setNote('')
-                try {
-                  const liveC = (handoverCases || []).find((c) => c.id === h.id)
-                  if (liveC?.current_version_id && isUUID(h.id)) {
-                    const targetPid = (isUUID(h.projectId) ? h.projectId : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
-                    await api.handover.submitSignoff(targetPid, h.id, {
-                      version_id: liveC.current_version_id,
-                      signoff_type: 'reviewer_approval',
-                      decision: 'rejected',
-                      comments: currNote
-                    })
-                    await refreshHandovers()
-                  }
-                } catch (err) {
-                  console.error('Request changes error:', err)
-                }
-              }}
-            >
-              Send request
-            </Button>
-          </>
-        }
-      >
-        <Field label="What needs to change?">
-          <Textarea
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder="e.g. Please resolve the Kafka retention conflict and document the month-end step."
-          />
-        </Field>
-      </Modal>
+      {children(h, role, sectionsCtx)}
     </>
   )
 }
@@ -1345,7 +1624,7 @@ function FindingList({ items, onOpen }: { items: AnyFinding[]; onOpen: (f: AnyFi
 export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?: HTab }) {
   const s = useStore()
   const router = useRouter()
-  const { activeProject } = useLiveApp()
+  const { activeProject, members, user, refreshHandovers } = useLiveApp()
   const searchParams = useSearchParams()
   const queryTab = searchParams?.get('tab') as HTab | null
   const tab = initialTab || queryTab || 'overview'
@@ -1361,7 +1640,8 @@ export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?:
       setIsLoadingChecklists(true)
       try {
         const targetCase = s.handovers.find((x) => x.id === id)
-        const pId = (targetCase?.projectId && isUUID(targetCase.projectId) ? targetCase.projectId : activeProject?.id) || 'ed33c53a-7678-4d5b-8212-64c233897142'
+        const pId = targetCase?.projectId && isUUID(targetCase.projectId) ? targetCase.projectId : activeProject?.id
+        if (!pId || !isUUID(pId)) return
         const res = await api.handover.getChecklists(pId, id)
         if (active) {
           setChecklists(res || [])
@@ -1424,377 +1704,241 @@ export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?:
 
   return (
     <HandoverLayout id={id} tab={tab}>
-      {(h, role) => {
-        const f = projectFindings(h.projectId)
-        const all = allFindings(h.projectId)
-        const st = handoverStats(h, s.verif)
-        const resp = s.members.find((m) => m.projectId === h.projectId && m.personId === h.outgoingId)?.responsibilities ?? []
-        const myTasks = f.tasks.filter((t) => t.ownerId === h.outgoingId)
-        const project = s.allProjects.find((p) => p.id === h.projectId)!
-        const pg = gaps.filter((g) => g.projectId === h.projectId)
-        const nextActions =
-          role === 'manager'
-            ? [
-                h.status === 'pending_review'
-                  ? 'Review verification decisions and approve'
-                  : h.status === 'approved'
-                  ? 'Publish the report to the incoming member'
-                  : 'Monitor verification progress',
-                'Resolve conflicting evidence before approval',
-                'Confirm the incoming member has repository and on-call access'
-              ]
-            : role === 'outgoing'
-            ? [
-                `Verify ${all.length - st.reviewed} remaining findings`,
-                `Answer ${pg.filter((g) => !s.gapAnswers[g.id]).length} knowledge gaps`,
-                'Submit for approval'
-              ]
-            : [
-                'Read the project introduction and architecture',
-                `Pick up “${f.tasks.find((t) => t.status !== 'Done')?.title ?? 'open tasks'}”`,
-                'Ask the assistant about anything unclear'
-              ]
+      {(h, _role, sectionsCtx) => {
+        const resolvedPid = isUUID(h.projectId) ? h.projectId : activeProject?.id || h.projectId
+        const normalizedTab = tab === 'knowledge' ? 'overview' : tab
+        const navigateTab = (nextTab: string) => {
+          const versionSuffix = sectionsCtx.selectedVersionId
+            ? `&version=${sectionsCtx.selectedVersionId}`
+            : ''
+          if (nextTab === 'overview') {
+            router.push(
+              sectionsCtx.selectedVersionId
+                ? `/handovers/${h.id}?version=${sectionsCtx.selectedVersionId}`
+                : `/handovers/${h.id}`
+            )
+          } else if (nextTab === 'review') {
+            router.push(`/handovers/${h.id}/review`)
+          } else if (nextTab === 'recipient') {
+            router.push(`/handovers/${h.id}/recipient`)
+          } else {
+            router.push(`/handovers/${h.id}?tab=${nextTab}${versionSuffix}`)
+          }
+        }
 
-        let body: ReactNode = null
-        if (tab === 'overview') {
-          body = (
-            <div className="grid gap-5 lg:grid-cols-3">
-              <Card className="p-5 lg:col-span-2">
-                <p className="text-[15px] font-semibold text-navy">Project summary</p>
-                <p className="mt-2 text-[13.5px] leading-relaxed text-slate-700">
-                  {project?.description} {personById(h.outgoingId).name} has been responsible for {resp.join(', ').toLowerCase() || 'core project work'}. This handover transfers those responsibilities to {personById(h.incomingId).name}.
+        const checklistsCard = (
+          <Card>
+            <div className="flex flex-col gap-3 border-b border-line p-5 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <ListTodo className="size-5 text-brand" />
+                  <h3 className="text-[15px] font-semibold text-navy">Transition Checklists & Offboarding Verification</h3>
+                </div>
+                <p className="mt-0.5 text-xs text-muted">
+                  Multi-phase checklists required for responsible knowledge transfer and access revocation.
                 </p>
-                <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                  {[
-                    ['Decisions', f.decisions.length],
-                    ['Pending work', f.tasks.filter((t) => t.status !== 'Done').length],
-                    ['Open risks', f.risks.filter((r) => r.resolution !== 'Resolved').length],
-                    ['Dependencies', f.dependencies.length]
-                  ].map(([l, v]) => (
-                    <div key={l as string} className="rounded-xl bg-slate-50 p-3">
-                      <p className="text-xl font-semibold text-navy">{v}</p>
-                      <p className="text-xs text-muted">{l}</p>
-                    </div>
-                  ))}
-                </div>
-              </Card>
-              <Card className="p-5">
-                <p className="text-[15px] font-semibold text-navy">Knowledge completeness</p>
-                <div className="mt-4 flex items-center gap-4">
-                  <Ring value={st.completeness} size={76} color="#299B80" />
-                  <div className="text-[13px]">
-                    <p><span className="font-semibold text-navy">{st.verified}</span> <span className="text-muted">verified</span></p>
-                    <p><span className="font-semibold text-navy">{st.reviewed - st.verified}</span> <span className="text-muted">rejected / flagged</span></p>
-                    <p><span className="font-semibold text-navy">{st.all.length - st.reviewed}</span> <span className="text-muted">awaiting review</span></p>
-                  </div>
-                </div>
-                <p className="mt-4 text-xs text-muted">Completeness counts only human-verified findings, not AI confidence.</p>
-              </Card>
-              <Card>
-                <CardHeader title="Important responsibilities" icon={UserRoundCog} />
-                <ul className="space-y-2 px-5 pb-5">
-                  {resp.map((r) => (
-                    <li key={r} className="flex items-center gap-2 text-[13px] text-navy">
-                      <CheckCircle2 className="size-4 text-ok" />{r}
-                    </li>
-                  ))}
-                  {!resp.length && <li className="text-[13px] text-muted">None recorded.</li>}
-                </ul>
-              </Card>
-              <Card>
-                <CardHeader title="Pending work" icon={ListTodo} />
-                <ul className="space-y-2.5 px-5 pb-5">
-                  {f.tasks.filter((t) => t.status !== 'Done').slice(0, 4).map((t) => (
-                    <li key={t.id} className="flex items-center gap-2">
-                      <span className="flex-1 truncate text-[13px] text-navy">{t.title}</span>
-                      <TaskStatus status={t.status} />
-                    </li>
-                  ))}
-                </ul>
-              </Card>
-              <Card>
-                <CardHeader title="Recommended next actions" icon={Sparkles} />
-                <ol className="space-y-2.5 px-5 pb-5">
-                  {nextActions.map((a, i) => (
-                    <li key={a} className="flex items-start gap-2.5 text-[13px] text-navy">
-                      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-tint text-[11px] font-semibold text-brand">
-                        {i + 1}
-                      </span>
-                      {a}
-                    </li>
-                  ))}
-                </ol>
-              </Card>
-              <Card className="lg:col-span-2">
-                <CardHeader
-                  title="Important decisions"
-                  icon={Lightbulb}
-                  action={
-                    <button className="text-[13px] font-medium text-brand" onClick={() => router.push(`/handovers/${h.id}?tab=decisions`)}>
-                      All
-                    </button>
-                  }
-                />
-                <ul className="divide-y divide-line px-5 pb-3">
-                  {f.decisions.slice(0, 3).map((d) => (
-                    <li key={d.id}>
-                      <button
-                        onClick={() => setOpen({ ...d, kind: 'Decision' })}
-                        className="flex w-full flex-col gap-2 py-3 text-left sm:flex-row sm:items-center"
-                      >
-                        <span className="flex-1 text-[13px] font-medium text-navy">{d.title}</span>
-                        <VerificationBadge status={s.verif[d.id] ?? d.verification} />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </Card>
-              <Card>
-                <CardHeader title="Unresolved risks" icon={AlertTriangle} />
-                <ul className="space-y-2.5 px-5 pb-5">
-                  {f.risks.filter((r) => r.resolution !== 'Resolved').slice(0, 3).map((r) => (
-                    <li key={r.id} className="flex items-start gap-2">
-                      <SeverityBadge level={r.severity} />
-                      <span className="text-[13px] text-navy">{r.title}</span>
-                    </li>
-                  ))}
-                </ul>
-              </Card>
-              <Card className="lg:col-span-3">
-                <CardHeader title="Dependencies" icon={Network} />
-                <div className="grid gap-2 px-5 pb-5 sm:grid-cols-2 lg:grid-cols-3">
-                  {f.dependencies.map((d) => (
-                    <div
-                      key={d.id}
-                      className={cn('rounded-xl border p-3', d.blocking ? 'border-red-200 bg-red-50/30' : 'border-line')}
-                    >
-                      <p className="text-[13px] font-medium text-navy">{d.from} → {d.to}</p>
-                      <p className="mt-1 flex items-center gap-1.5 text-xs text-muted">
-                        <Badge tone={d.depType === 'External' ? 'amber' : d.depType === 'Task' ? 'green' : 'blue'}>
-                          {d.depType}
-                        </Badge>
-                        {d.blocking && <Badge tone="red" icon={Ban}>Blocking</Badge>}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </Card>
-              <Card className="lg:col-span-3">
-                <div className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between border-b border-line">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <ListTodo className="size-5 text-brand" />
-                      <h3 className="text-[15px] font-semibold text-navy">Transition Checklists & Offboarding Verification</h3>
-                    </div>
-                    <p className="mt-0.5 text-xs text-muted">
-                      Multi-phase checklists required for responsible knowledge transfer and access revocation.
-                    </p>
-                  </div>
-                  {!checklists.length && (
-                    <Button
-                      size="sm"
-                      icon={Sparkles}
-                      disabled={isLoadingChecklists}
-                      onClick={() => handleGenerateChecklists(h.projectId)}
-                    >
-                      {isLoadingChecklists ? 'Generating...' : 'Generate checklists'}
-                    </Button>
-                  )}
-                </div>
-                <div className="p-5">
-                  {isLoadingChecklists ? (
-                    <div className="py-6 text-center text-xs text-muted">Loading transition checklists...</div>
-                  ) : !checklists.length ? (
-                    <EmptyState
-                      icon={ListTodo}
-                      title="No transition checklists generated yet"
-                      body="Generate standard offboarding, knowledge walkthrough, and access revocation tasks for this handover case."
-                      action={
-                        <Button icon={Sparkles} onClick={() => handleGenerateChecklists(h.projectId)}>
-                          Generate transition checklists
-                        </Button>
-                      }
-                    />
-                  ) : (
-                    <div className="grid gap-6 md:grid-cols-3">
-                      {checklists.map((chk: any) => {
-                        const items = chk.items || []
-                        const completedCount = items.filter((i: any) => i.status === 'completed').length
-                        const typeLabel = (chk.checklist_type || 'Checklist')
-                          .replace(/_/g, ' ')
-                          .replace(/\b\w/g, (c: string) => c.toUpperCase())
-                        return (
-                          <div key={chk.id} className="flex flex-col rounded-xl border border-line bg-slate-50/50 p-4">
-                            <div className="flex items-center justify-between pb-3 border-b border-line">
-                              <span className="text-[13px] font-semibold text-navy">{typeLabel}</span>
-                              <span className="text-xs font-medium text-muted">{completedCount}/{items.length}</span>
-                            </div>
-                            <ul className="mt-3 space-y-2.5 flex-1">
-                              {items.map((item: any) => {
-                                const isDone = item.status === 'completed'
-                                const isUpdating = updatingItemId === item.id
-                                return (
-                                  <li key={item.id} className="flex items-start gap-2.5 text-xs">
-                                    <input
-                                      type="checkbox"
-                                      checked={isDone}
-                                      disabled={isUpdating}
-                                      onChange={() => toggleItem(h.projectId, item.id, item.status)}
-                                      className="mt-0.5 size-4 rounded border-slate-300 text-brand focus:ring-brand cursor-pointer"
-                                    />
-                                    <div className="flex-1 min-w-0">
-                                      <span className={cn('leading-relaxed', isDone ? 'text-slate-400 line-through' : 'text-slate-800 font-medium')}>
-                                        {item.item_text || item.title}
-                                      </span>
-                                      {item.blocking && (
-                                        <span className="ml-1.5 inline-block text-[10px] font-medium text-red-600 bg-red-50 border border-red-200 rounded px-1">
-                                          blocking
-                                        </span>
-                                      )}
-                                    </div>
-                                  </li>
-                                )
-                              })}
-                            </ul>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              </Card>
+              </div>
+              {!checklists.length && (
+                <Button
+                  size="sm"
+                  icon={Sparkles}
+                  disabled={isLoadingChecklists}
+                  onClick={() => handleGenerateChecklists(resolvedPid)}
+                >
+                  {isLoadingChecklists ? 'Generating...' : 'Generate checklists'}
+                </Button>
+              )}
             </div>
-          )
-        }
-        if (tab === 'knowledge') {
-          body = (
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              {[
-                ['Decisions', f.decisions.length, Lightbulb, 'decisions'],
-                ['Tasks', f.tasks.length, ListTodo, 'tasks'],
-                ['Risks', f.risks.length, AlertTriangle, 'risks'],
-                ['Dependencies', f.dependencies.length, Network, 'dependencies']
-              ].map(([l, v, I, t]) => {
-                const Ic = I as typeof Lightbulb
-                return (
-                  <button
-                    key={l as string}
-                    onClick={() => router.push(`/handovers/${h.id}?tab=${t}`)}
-                    className="tile rounded-[14px] border p-5 text-left"
-                  >
-                    <Ic className="size-5 text-brand" />
-                    <p className="mt-3 text-2xl font-semibold text-navy">{v as number}</p>
-                    <p className="text-[13px] text-muted">{l as string}</p>
-                  </button>
-                )
-              })}
-              <Card className="sm:col-span-2 lg:col-span-4">
+            <div className="p-5">
+              {isLoadingChecklists ? (
+                <div className="py-6 text-center text-xs text-muted">Loading transition checklists...</div>
+              ) : !checklists.length ? (
                 <EmptyState
-                  icon={Network}
-                  title="Explore relationships in the Knowledge Explorer"
-                  body="See how decisions, tasks, risks, people and components connect, with supporting evidence."
+                  icon={ListTodo}
+                  title="No transition checklists generated yet"
+                  body="Generate standard offboarding, knowledge walkthrough, and access revocation tasks for this handover case."
                   action={
-                    <Button icon={Network} onClick={() => router.push(`/projects/${h.projectId}/knowledge`)}>
-                      Open Knowledge Explorer
+                    <Button icon={Sparkles} onClick={() => handleGenerateChecklists(resolvedPid)}>
+                      Generate transition checklists
                     </Button>
                   }
                 />
-              </Card>
+              ) : (
+                <div className="grid gap-6 md:grid-cols-3">
+                  {checklists.map((chk: any) => {
+                    const items = chk.items || []
+                    const completedCount = items.filter((i: any) => i.status === 'completed').length
+                    const typeLabel = (chk.checklist_type || 'Checklist')
+                      .replace(/_/g, ' ')
+                      .replace(/\b\w/g, (c: string) => c.toUpperCase())
+                    return (
+                      <div key={chk.id} className="flex flex-col rounded-xl border border-line bg-slate-50/50 p-4">
+                        <div className="flex items-center justify-between border-b border-line pb-3">
+                          <span className="text-[13px] font-semibold text-navy">{typeLabel}</span>
+                          <span className="text-xs font-medium text-muted">{completedCount}/{items.length}</span>
+                        </div>
+                        <ul className="mt-3 flex-1 space-y-2.5">
+                          {items.map((item: any) => {
+                            const isDone = item.status === 'completed'
+                            const isUpdating = updatingItemId === item.id
+                            return (
+                              <li key={item.id} className="flex items-start gap-2.5 text-xs">
+                                <input
+                                  type="checkbox"
+                                  checked={isDone}
+                                  disabled={isUpdating}
+                                  onChange={() => toggleItem(resolvedPid, item.id, item.status)}
+                                  className="mt-0.5 size-4 cursor-pointer rounded border-slate-300 text-brand focus:ring-brand"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <span className={cn('leading-relaxed', isDone ? 'text-slate-400 line-through' : 'font-medium text-slate-800')}>
+                                    {item.item_text || item.title}
+                                  </span>
+                                  {item.blocking && (
+                                    <span className="ml-1.5 inline-block rounded border border-red-200 bg-red-50 px-1 text-[10px] font-medium text-red-600">
+                                      blocking
+                                    </span>
+                                  )}
+                                </div>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </Card>
+        )
+
+        if (normalizedTab === 'readiness') {
+          const selectedVersionObj =
+            sectionsCtx.versions.find((v) => v.id === sectionsCtx.selectedVersionId) ||
+            sectionsCtx.sectionsData?.version ||
+            null
+          return (
+            <ReadinessIntelligencePanel
+              caseId={h.id}
+              projectId={resolvedPid}
+              selectedVersion={selectedVersionObj}
+              readiness={sectionsCtx.readinessData}
+              isLoading={sectionsCtx.isLoadingVersions || sectionsCtx.isLoadingReadiness}
+              isReassessing={sectionsCtx.isReassessingReadiness}
+              error={sectionsCtx.readinessError}
+              notAssessedYet={sectionsCtx.readinessNotAssessed}
+              onRetry={sectionsCtx.retryLoadReadiness}
+              onReassess={sectionsCtx.reassessReadiness}
+              onNavigateTab={navigateTab}
+              onToggleChecklistItem={async (pId, itemId, curStatus) => {
+                await toggleItem(pId, itemId, curStatus)
+                sectionsCtx.retryLoadReadiness()
+              }}
+              onGenerateChecklists={async (pId) => {
+                await handleGenerateChecklists(pId)
+                sectionsCtx.retryLoadReadiness()
+              }}
+              updatingChecklistItemId={updatingItemId}
+              isGeneratingChecklists={isLoadingChecklists}
+            />
+          )
+        }
+
+        if (normalizedTab === 'checklists') {
+          return (
+            <TransitionChecklistsPanel
+              caseId={h.id}
+              projectId={resolvedPid}
+              currentUserId={user?.id}
+              members={members || []}
+              onDataChanged={() => {
+                sectionsCtx.retryLoadReadiness()
+                if (resolvedPid && isUUID(resolvedPid) && isUUID(id)) {
+                  api.handover.getChecklists(resolvedPid, id).then((r) => setChecklists(r || [])).catch(() => {})
+                }
+              }}
+              onReassessReadiness={() =>
+                sectionsCtx.reassessReadiness('Post-checklist reassessment')
+              }
+              isReassessingReadiness={sectionsCtx.isReassessingReadiness}
+            />
+          )
+        }
+
+        if (normalizedTab === 'responsibilities') {
+          const canManage = _role === 'manager'
+          return (
+            <div className="space-y-6">
+              <ResponsibilityTransferPanel
+                caseId={h.id}
+                projectId={resolvedPid}
+                currentUserId={user?.id}
+                canManageProject={canManage}
+                onDataChanged={() => {
+                  sectionsCtx.retryLoadReadiness()
+                }}
+                onReassessReadiness={() =>
+                  sectionsCtx.reassessReadiness('Post-responsibility-transfer reassessment')
+                }
+                isReassessingReadiness={sectionsCtx.isReassessingReadiness}
+              />
+              <CanonicalSectionPanel
+                sectionType="responsibilities_ownership"
+                data={sectionsCtx.sectionsData}
+                isLoading={sectionsCtx.isLoadingVersions || sectionsCtx.isLoadingSections}
+                error={sectionsCtx.sectionsError}
+                projectId={resolvedPid}
+                handoverId={h.id}
+                onRetry={sectionsCtx.retryLoadSections}
+                onNavigateTab={navigateTab}
+              />
             </div>
           )
         }
-        if (tab === 'responsibilities') {
-          body = (
-            <div className="grid gap-5 lg:grid-cols-2">
-              <Card>
-                <CardHeader
-                  title={`${personById(h.outgoingId).name}'s responsibilities`}
-                  subtitle="Transferring to the incoming member"
-                  icon={UserRoundCog}
-                />
-                <ul className="space-y-2 px-5 pb-5">
-                  {resp.map((r) => (
-                    <li key={r} className="flex items-center gap-3 rounded-xl border border-line p-3">
-                      <Avatar id={h.outgoingId} size={24} />
-                      <span className="flex-1 text-[13px] font-medium text-navy">{r}</span>
-                      <ArrowRight className="size-3.5 text-brand" />
-                      <Avatar id={h.incomingId} size={24} />
-                    </li>
-                  ))}
-                </ul>
-              </Card>
-              <Card>
-                <CardHeader title="Owned tasks" icon={ListTodo} />
-                <ul className="divide-y divide-line px-5 pb-3">
-                  {myTasks.map((t) => (
-                    <li key={t.id} className="flex items-center gap-2 py-3">
-                      <span className="flex-1 text-[13px] text-navy">{t.title}</span>
-                      <TaskStatus status={t.status} />
-                    </li>
-                  ))}
-                  {!myTasks.length && <li className="py-3 text-[13px] text-muted">No tasks owned.</li>}
-                </ul>
-              </Card>
-            </div>
+
+        if (normalizedTab === 'review') {
+          return (
+            <SignoffApprovalPanel
+              caseId={h.id}
+              projectId={resolvedPid}
+              selectedVersionId={sectionsCtx.selectedVersionId}
+              currentUserId={user?.id}
+              onLifecycleChanged={() => {
+                void refreshHandovers()
+                sectionsCtx.retryLoadReadiness()
+              }}
+              onNavigateTab={navigateTab}
+            />
           )
         }
-        if (tab === 'decisions') {
-          body = <FindingList items={f.decisions.map((x) => ({ ...x, kind: 'Decision' as const }))} onOpen={setOpen} />
-        }
-        if (tab === 'tasks') {
-          body = <FindingList items={f.tasks.map((x) => ({ ...x, kind: 'Task' as const }))} onOpen={setOpen} />
-        }
-        if (tab === 'risks') {
-          body = <FindingList items={f.risks.map((x) => ({ ...x, kind: 'Risk' as const }))} onOpen={setOpen} />
-        }
-        if (tab === 'dependencies') {
-          body = <FindingList items={f.dependencies.map((x) => ({ ...x, kind: 'Dependency' as const }))} onOpen={setOpen} />
-        }
-        if (tab === 'evidence') {
-          body = (
-            <Card className="overflow-hidden">
-              <Table>
-                <thead>
-                  <tr>
-                    <Th>Evidence</Th>
-                    <Th>Author</Th>
-                    <Th>Date</Th>
-                    <Th>Used by</Th>
-                    <Th>Verification</Th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {f.evidence.map((e) => (
-                    <tr
-                      key={e.id}
-                      className="cursor-pointer hover:bg-slate-50/70"
-                      onClick={() => router.push(`/projects/${h.projectId}/evidence/${e.id}`)}
-                    >
-                      <Td>
-                        <span className="flex items-center gap-3">
-                          <EvidenceTypeIcon type={e.type} />
-                          <span>
-                            <span className="block font-medium text-navy">{e.title}</span>
-                            <span className="text-xs text-muted">{EVIDENCE_TYPE_LABEL[e.type]} · {e.ref}</span>
-                          </span>
-                        </span>
-                      </Td>
-                      <Td className="text-[13px]">{personById(e.authorId).name}</Td>
-                      <Td className="text-[13px] text-muted">{(e.date.split(' ')[0] ?? e.date)}</Td>
-                      <Td className="text-[13px]">{all.filter((x) => x.evidenceIds.includes(e.id)).length} findings</Td>
-                      <Td><VerificationBadge status={e.verification} /></Td>
-                    </tr>
-                  ))}
-                </tbody>
-              </Table>
-            </Card>
+
+        if (normalizedTab === 'evidence') {
+          return (
+            <CanonicalEvidenceTable
+              data={sectionsCtx.sectionsData}
+              isLoading={sectionsCtx.isLoadingVersions || sectionsCtx.isLoadingSections}
+              error={sectionsCtx.sectionsError}
+              projectId={resolvedPid}
+              onRetry={sectionsCtx.retryLoadSections}
+            />
           )
         }
+
+        const targetSectionType = TAB_TO_SECTION_TYPE[normalizedTab] || 'project_overview_context'
+
         return (
-          <>
-            {body}
-            <FindingDrawer finding={open} onClose={() => setOpen(undefined)} />
-          </>
+          <CanonicalSectionPanel
+            sectionType={targetSectionType}
+            data={sectionsCtx.sectionsData}
+            isLoading={sectionsCtx.isLoadingVersions || sectionsCtx.isLoadingSections}
+            error={sectionsCtx.sectionsError}
+            projectId={resolvedPid}
+            handoverId={h.id}
+            onRetry={sectionsCtx.retryLoadSections}
+            onNavigateTab={navigateTab}
+            overviewExtras={normalizedTab === 'overview' ? checklistsCard : undefined}
+          />
         )
       }}
     </HandoverLayout>
@@ -1803,35 +1947,24 @@ export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?:
 
 /* ---------- 27. Published ---------- */
 export function PublishedHandovers() {
-  const s = useStore()
   const router = useRouter()
-  const { handoverCases, projects, user, refreshHandovers } = useLiveApp()
-  const [edit, setEdit] = useState<Handover | null>(null)
-  const [revoke, setRevoke] = useState<Handover | null>(null)
-  const [expiry, setExpiry] = useState('none')
+  const { handoverCases, projects, members, user } = useLiveApp()
 
   const liveHandovers = useMemo(() => {
     return (handoverCases || []).map((c) => {
-      const pName = projects.find((p) => p.id === c.project_id)?.name || 'Skillpassport'
+      const pName = projects.find((p) => p.id === c.project_id)?.name || 'Project'
       return mapCaseToHandover(c, pName)
     })
   }, [handoverCases, projects])
 
-  const allH = useMemo(() => {
-    const map = new Map<string, Handover>()
-    s.handovers.forEach((h) => map.set(h.id, h))
-    liveHandovers.forEach((h) => map.set(h.id, h))
-    return Array.from(map.values())
-  }, [s.handovers, liveHandovers])
-
-  const list = allH.filter((h) => ['published', 'completed', 'delivered', 'acknowledged'].includes(h.status))
+  const list = liveHandovers.filter((h) => ['published', 'completed', 'delivered', 'acknowledged'].includes(h.status))
 
   return (
     <>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between pb-5">
+      <div className="flex flex-col gap-3 pb-5 sm:flex-row sm:items-center sm:justify-between">
         <PageHeader
           title="Published Handovers"
-          subtitle="Control who can access published knowledge and track acknowledgement."
+          subtitle="Track published handover packages and formal recipient acknowledgements."
         />
         <Button icon={Plus} onClick={() => router.push('/handovers/new')}>
           Create handover
@@ -1861,65 +1994,58 @@ export function PublishedHandovers() {
                 <Th>Handover</Th>
                 <Th>Project</Th>
                 <Th>Recipient</Th>
-                <Th>Published</Th>
-                <Th>Access</Th>
-                <Th>Acknowledgement</Th>
+                <Th>Updated</Th>
+                <Th>Status</Th>
                 <Th className="text-right">Actions</Th>
               </tr>
             </thead>
             <tbody>
               {list.map((h) => {
-                const manager = s.projectRole(h.projectId) === 'manager'
+                const p = projects.find((x) => x.id === h.projectId)
+                const outName = getMemberDisplayName(h.outgoingId, members, user)
+                const incName = getMemberDisplayName(h.incomingId, members, user)
+                const isAck = h.status === 'completed' || (h.status as string) === 'acknowledged'
                 return (
                   <tr key={h.id} className="hover:bg-slate-50/50">
                     <Td>
-                      <Link to={`/handovers/${h.id}/report`} className="font-medium text-navy hover:text-brand">
+                      <Link to={`/handovers/${h.id}/review`} className="font-medium text-navy hover:text-brand">
                         {h.code}
                       </Link>
-                      <p className="text-xs text-muted">from {personById(h.outgoingId).name}</p>
+                      <p className="text-xs text-muted">from {outName}</p>
                     </Td>
-                    <Td className="text-[13px]">{s.allProjects.find((p) => p.id === h.projectId)?.name}</Td>
+                    <Td className="text-[13px]">{p?.name || 'Project'}</Td>
                     <Td>
                       <span className="flex items-center gap-2 whitespace-nowrap text-[13px]">
-                        <Avatar id={h.incomingId} size={24} />
-                        {personById(h.incomingId).name}
+                        <Avatar id={h.incomingId} name={incName} size={24} />
+                        {incName}
                       </span>
                     </Td>
-                    <Td className="whitespace-nowrap text-[13px] text-muted">{h.publishedOn}</Td>
+                    <Td className="whitespace-nowrap text-[13px] text-muted">{h.updated}</Td>
                     <Td>
-                      <Badge tone={h.access === 'Revoked' ? 'red' : h.access?.startsWith('Expires') ? 'amber' : 'green'} dot>
-                        {h.access ?? 'Active'}
-                      </Badge>
-                    </Td>
-                    <Td>
-                      {h.status === 'completed' ? (
-                        <Badge tone="green" icon={CheckCircle2}>Acknowledged {h.acknowledgedOn}</Badge>
+                      {isAck ? (
+                        <Badge tone="green" icon={CheckCircle2}>Acknowledged</Badge>
                       ) : (
-                        <Badge tone="amber" icon={Clock}>Pending</Badge>
+                        <Badge tone="amber" icon={Clock}>Pending acknowledgement</Badge>
                       )}
                     </Td>
                     <Td className="text-right">
                       <div className="flex justify-end gap-1.5">
-                        {manager ? (
-                          <>
-                            <Button size="sm" variant="secondary" icon={KeyRound} onClick={() => setEdit(h)}>
-                              Update access
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="text-red-600"
-                              disabled={h.access === 'Revoked'}
-                              onClick={() => setRevoke(h)}
-                            >
-                              Revoke
-                            </Button>
-                          </>
-                        ) : (
-                          <span className="text-xs text-muted">
-                            <Lock className="mr-1 inline size-3" />Manager only
-                          </span>
-                        )}
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          icon={ShieldCheck}
+                          onClick={() => router.push(`/handovers/${h.id}/review`)}
+                        >
+                          Publication &amp; Audit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          icon={BookOpen}
+                          onClick={() => router.push(`/handovers/${h.id}/recipient`)}
+                        >
+                          Recipient View
+                        </Button>
                       </div>
                     </Td>
                   </tr>
@@ -1929,95 +2055,25 @@ export function PublishedHandovers() {
           </Table>
         )}
       </Card>
-      <Modal
-        open={!!edit}
-        onClose={() => setEdit(null)}
-        title="Update access"
-        subtitle={edit ? `${edit.code} · ${personById(edit.incomingId).name}` : ''}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setEdit(null)}>Cancel</Button>
-            <Button
-              onClick={() => {
-                if (edit) s.updateHandover(edit.id, { access: expiry === 'none' ? 'Active' : 'Expires Jul 31' })
-                s.toast('Access updated')
-                setEdit(null)
-              }}
-            >
-              Save
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <div className="space-y-3">
-            <Radio
-              checked={expiry === 'none'}
-              onChange={() => setExpiry('none')}
-              label="No expiry"
-              description="Recipient keeps access while they're on the project."
-            />
-            <Radio
-              checked={expiry === 'jul'}
-              onChange={() => setExpiry('jul')}
-              label="Expire on Jul 31, 2025"
-              description="Access is removed automatically."
-            />
-          </div>
-          <div className="space-y-2 rounded-xl border border-line p-4">
-            <p className="text-[13px] font-medium text-navy">Recipient can access</p>
-            <Checkbox checked onChange={() => {}} label="Handover report" />
-            <Checkbox checked onChange={() => {}} label="Linked evidence" />
-            <Checkbox checked onChange={() => {}} label="AI assistant" />
-          </div>
-        </div>
-      </Modal>
-      <ConfirmDialog
-        open={!!revoke}
-        onClose={() => setRevoke(null)}
-        tone="danger"
-        title="Revoke access?"
-        confirmLabel="Revoke access"
-        body={
-          revoke && (
-            <>
-              {personById(revoke.incomingId).name} will immediately lose access to {revoke.code}, including the assistant. This is recorded in the audit log.
-            </>
-          )
-        }
-        onConfirm={() => {
-          if (revoke) s.updateHandover(revoke.id, { access: 'Revoked' })
-          s.toast('Access revoked', undefined, 'info')
-          setRevoke(null)
-        }}
-      />
     </>
   )
 }
 
 /* ---------- 28. Received ---------- */
 export function ReceivedHandovers() {
-  const s = useStore()
   const router = useRouter()
-  const { handoverCases, projects, user } = useLiveApp()
+  const { handoverCases, projects, members, user } = useLiveApp()
 
   const liveHandovers = useMemo(() => {
     return (handoverCases || []).map((c) => {
-      const pName = projects.find((p) => p.id === c.project_id)?.name || 'Skillpassport'
+      const pName = projects.find((p) => p.id === c.project_id)?.name || 'Project'
       return mapCaseToHandover(c, pName)
     })
   }, [handoverCases, projects])
 
-  const allH = useMemo(() => {
-    const map = new Map<string, Handover>()
-    s.handovers.forEach((h) => map.set(h.id, h))
-    liveHandovers.forEach((h) => map.set(h.id, h))
-    return Array.from(map.values())
-  }, [s.handovers, liveHandovers])
-
-  const currentUserId = user?.id || ME
-  const list = allH.filter(
-    (h) => (h.incomingId === currentUserId || h.incomingId === ME) &&
+  const currentUserId = user?.id || ''
+  const list = liveHandovers.filter(
+    (h) => h.incomingId === currentUserId &&
            ['published', 'completed', 'delivered', 'acknowledged'].includes(h.status as string)
   )
   const pending = list.filter((h) => (h.status as string) === 'published' || (h.status as string) === 'delivered')
@@ -2026,14 +2082,14 @@ export function ReceivedHandovers() {
     <>
       <PageHeader
         title="Received Handovers"
-        subtitle="Knowledge transferred to you. Start with anything awaiting acknowledgement."
+        subtitle="Published handover packages assigned to you. Review all eight domains and record formal acknowledgement."
       />
       {!list.length ? (
         <Card>
           <EmptyState
             icon={Inbox}
             title="Your inbox is empty"
-            body="When someone publishes a handover to you, it appears here with everything you need to get started."
+            body="When an approved handover package is published to you, it appears here with its verified knowledge domains and acknowledgement controls."
           />
         </Card>
       ) : (
@@ -2041,63 +2097,45 @@ export function ReceivedHandovers() {
           {!!pending.length && (
             <div className="mb-5">
               <Callout tone="blue" icon={Inbox} title={`${pending.length} handover${pending.length > 1 ? 's' : ''} awaiting your acknowledgement`}>
-                Review the knowledge, ask questions, then acknowledge so the outgoing member and manager know you're ready.
+                Review the published package domains, raise any clarifications, then record your formal acknowledgement.
               </Callout>
             </div>
           )}
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {list.map((h) => {
-              const p = s.allProjects.find((x) => x.id === h.projectId)!
-              const f = projectFindings(h.projectId)
+              const p = projects.find((x) => x.id === h.projectId)
+              const outName = getMemberDisplayName(h.outgoingId, members, user)
+              const isAck = h.status === 'completed' || (h.status as string) === 'acknowledged'
               return (
-                <Card key={h.id} interactive className={cn('flex flex-col overflow-hidden', h.status === 'published' && 'ring-2 ring-brand/20')}>
-                  <div className="h-1.5" style={{ background: p.color }} />
+                <Card key={h.id} interactive className={cn('flex flex-col overflow-hidden', !isAck && 'ring-2 ring-brand/20')}>
+                  <div className="h-1.5 bg-brand" />
                   <div className="flex flex-1 flex-col p-5">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-medium text-muted">{h.code}</span>
-                      {h.status === 'published' ? (
+                      {!isAck ? (
                         <Badge tone="amber" icon={Clock}>Pending acknowledgement</Badge>
                       ) : (
                         <Badge tone="green" icon={CheckCircle2}>Acknowledged</Badge>
                       )}
                     </div>
-                    <h3 className="mt-3 text-base font-semibold text-navy">{p.name}</h3>
+                    <h3 className="mt-3 text-base font-semibold text-navy">{p?.name || 'Project'}</h3>
                     <p className="mt-0.5 text-[13px] text-muted">{h.scope}</p>
                     <div className="mt-4 flex items-center gap-2.5 text-[13px]">
-                      <Avatar id={h.outgoingId} size={28} />
+                      <Avatar id={h.outgoingId} name={outName} size={28} />
                       <div>
-                        <p className="font-medium text-navy">{personById(h.outgoingId).name}</p>
-                        <p className="text-xs text-muted">Published {h.publishedOn}</p>
+                        <p className="font-medium text-navy">{outName}</p>
+                        <p className="text-xs text-muted">Updated {h.updated}</p>
                       </div>
-                    </div>
-                    <div className="mt-4 grid grid-cols-3 gap-2 text-center">
-                      {[
-                        ['Decisions', f.decisions.length],
-                        ['Tasks', f.tasks.length],
-                        ['Risks', f.risks.length]
-                      ].map(([l, v]) => (
-                        <div key={l as string} className="rounded-lg bg-slate-50 py-2">
-                          <p className="text-sm font-semibold text-navy">{v}</p>
-                          <p className="text-[11px] text-muted">{l}</p>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mt-4">
-                      <div className="mb-1 flex justify-between text-xs">
-                        <span className="text-muted">Completion</span>
-                        <span className="font-medium text-navy">{h.status === 'completed' ? 100 : 40}%</span>
-                      </div>
-                      <Progress value={h.status === 'completed' ? 100 : 40} size="sm" tone={h.status === 'completed' ? 'green' : 'blue'} />
                     </div>
                     <div className="mt-5 flex gap-2">
                       <Button className="flex-1" iconRight={ArrowRight} onClick={() => router.push(`/handovers/${h.id}/recipient`)}>
-                        Open handover
+                        Open package
                       </Button>
                       <Button
                         variant="secondary"
-                        icon={MessageSquareText}
-                        onClick={() => router.push(`/handovers/${h.id}/assistant`)}
-                        aria-label="Ask assistant"
+                        icon={ShieldCheck}
+                        onClick={() => router.push(`/handovers/${h.id}/review`)}
+                        aria-label="Sign-off and audit history"
                       />
                     </div>
                   </div>
@@ -2119,8 +2157,8 @@ export interface HandoversPageProps {
 
 function HandoversPageInner({ view = 'list', projectId }: HandoversPageProps) {
   const params = useParams()
-  const s = useStore()
-  const pId = projectId || (params?.id as string)
+  const { handoverCases, activeProject } = useLiveApp()
+  const pId = projectId || (params?.id as string) || activeProject?.id
 
   switch (view) {
     case 'new':
@@ -2133,7 +2171,7 @@ function HandoversPageInner({ view = 'list', projectId }: HandoversPageProps) {
     case 'project':
       return <AllHandovers defaultProjectId={pId} />
     case 'workspace': {
-      const targetId = s.handovers.find((h) => !pId || h.projectId === pId)?.id ?? s.handovers[0]?.id ?? ''
+      const targetId = handoverCases.find((h) => !pId || h.project_id === pId)?.id ?? handoverCases[0]?.id ?? ''
       if (targetId) {
         return <HandoverWorkspace id={targetId} />
       }

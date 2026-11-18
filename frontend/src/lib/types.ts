@@ -406,6 +406,721 @@ export interface HandoverReadinessData {
   recommendations: string[];
 }
 
+export type CanonicalHandoverSectionType =
+  | "project_overview_context"
+  | "decisions_rationale"
+  | "technical_architecture"
+  | "work_progress"
+  | "responsibilities_ownership"
+  | "dependencies_relationships"
+  | "bugs_blockers_risks"
+  | "operational_historical";
+
+export interface HandoverPackageVersionSummary {
+  id: UUID;
+  package_id: UUID;
+  version_number: number;
+  assembly_status?: string | null;
+  assembly_notes?: string | null;
+  notes?: string | null;
+  content_hash?: string | null;
+  assembly_snapshot_json?: Record<string, unknown> | null;
+  assembled_by_user_id?: UUID | null;
+  assembled_at?: string | null;
+  is_current: boolean;
+  created_at: string;
+}
+
+export interface HandoverContentLinkItem {
+  id: UUID;
+  section_id: UUID;
+  knowledge_item_id?: UUID | null;
+  relationship_id?: UUID | null;
+  evidence_id?: UUID | null;
+  link_type: string;
+  eligibility_status_json?: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface HandoverEvidenceProvenance {
+  evidence_id: UUID;
+  source_type: string;
+  source_provider?: string | null;
+  source_name: string;
+  source_reference?: string | null;
+  source_url?: string | null;
+  author?: string | null;
+  source_timestamp?: string | null;
+  extracted_at?: string | null;
+  support_type: string;
+  supporting_excerpt?: string | null;
+  acl_restricted: boolean;
+}
+
+export interface HandoverVerificationSummary {
+  verification_case_id?: UUID | null;
+  case_status?: string | null;
+  reviewer_decision?: string | null;
+  reviewed_by_user_id?: UUID | null;
+  reviewed_by_name?: string | null;
+  reviewed_at?: string | null;
+  review_notes?: string | null;
+}
+
+export interface HandoverSectionKnowledgeItem {
+  id: UUID;
+  content_link_id: UUID;
+  title: string;
+  content: string;
+  category: string;
+  epistemic_status: string;
+  review_status: string;
+  support_classification: string;
+  normalised_status?: string | null;
+  owner_label?: string | null;
+  structured_payload: Record<string, unknown>;
+  confidence_score?: number | null;
+  is_stale: boolean;
+  created_at: string;
+  updated_at: string;
+  source_observed_at?: string | null;
+  eligibility: Record<string, unknown>;
+  verification: HandoverVerificationSummary;
+  provenance: HandoverEvidenceProvenance[];
+  provenance_available: boolean;
+}
+
+export interface HandoverSectionRelationship {
+  id: UUID;
+  content_link_id: UUID;
+  relationship_type: string;
+  source_entity_id: UUID;
+  source_entity_name: string;
+  source_entity_type: string;
+  target_entity_id: UUID;
+  target_entity_name: string;
+  target_entity_type: string;
+  verification_status: string;
+  confidence_score: number;
+  is_stale: boolean;
+  reviewed_at?: string | null;
+  eligibility: Record<string, unknown>;
+  provenance: HandoverEvidenceProvenance[];
+  provenance_available: boolean;
+}
+
+export interface HandoverSectionConflictItem {
+  id: UUID;
+  verification_case_id: UUID;
+  conflict_type: string;
+  priority: string;
+  resolution_state: string;
+  explanation: string;
+  claim_a_text: string;
+  claim_b_text: string;
+  side_a_source_title?: string | null;
+  side_b_source_title?: string | null;
+  authoritative_claim_text?: string | null;
+  resolution_notes?: string | null;
+  resolved_at?: string | null;
+  updated_at: string;
+}
+
+export interface HandoverDomainEpistemicBreakdown {
+  human_verified_included: number;
+  pending_verification: number;
+  rejected: number;
+  unresolved_conflicts: number;
+  resolved_conflicts: number;
+  outdated: number;
+}
+
+export interface HandoverSectionDetail {
+  id: UUID;
+  version_id: UUID;
+  section_type: string;
+  section_title: string;
+  section_content?: string | null;
+  content_summary?: string | null;
+  section_order: number;
+  knowledge_item_count: number;
+  relationship_count: number;
+  metadata_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  content_links: HandoverContentLinkItem[];
+  knowledge_items: HandoverSectionKnowledgeItem[];
+  relationships: HandoverSectionRelationship[];
+  unresolved_conflicts: HandoverSectionConflictItem[];
+  resolved_conflicts: HandoverSectionConflictItem[];
+  epistemic_breakdown: HandoverDomainEpistemicBreakdown;
+  domain_context: Record<string, unknown>;
+}
+
+export interface HandoverVersionSectionsResponse {
+  case_id: UUID;
+  project_id: UUID;
+  version: HandoverPackageVersionSummary;
+  sections: HandoverSectionDetail[];
+  missing_section_types: string[];
+  epistemic_summary: HandoverDomainEpistemicBreakdown;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4: Live Handover Readiness Intelligence & Conflict Integration
+// ---------------------------------------------------------------------------
+
+export interface HandoverReadinessCategoryItem {
+  id: UUID;
+  version_id: UUID;
+  category: string;
+  label: string;
+  score: number;
+  max_score: number;
+  weight?: number | null;
+  level: "not_ready" | "partially_ready" | "ready" | "ready_with_warnings" | string;
+  blockers_json: string[];
+  warnings_json: string[];
+  missing_requirements: string[];
+  recommendations: string[];
+  related_section_tab?: string | null;
+  supporting_metrics: Record<string, unknown>;
+  details_json: Record<string, unknown>;
+  assessed_by_user_id?: UUID | null;
+  assessed_at: string;
+  created_at: string;
+}
+
+export interface ReadinessStructuredBlocker {
+  id: string;
+  group: string;
+  severity: "critical" | "high" | "medium" | "low" | string;
+  description: string;
+  originating_subsystem: string;
+  related_section_tab?: string | null;
+  related_record_id?: string | null;
+  recommended_action: string;
+  target_url?: string | null;
+}
+
+export interface ReadinessReviewEventItem {
+  id: UUID;
+  case_id: UUID;
+  case_title?: string | null;
+  action: string;
+  reviewer_name?: string | null;
+  new_status: string;
+  review_notes?: string | null;
+  created_at: string;
+}
+
+export interface ReadinessVerificationSummary {
+  total_knowledge_items: number;
+  eligible_human_verified: number;
+  pending_verification: number;
+  rejected_items: number;
+  verification_coverage_pct: number;
+  case_counts: Record<string, number>;
+  outstanding_blockers: string[];
+  recent_reviews: ReadinessReviewEventItem[];
+}
+
+export interface ReadinessConflictItem {
+  id: UUID;
+  verification_case_id: UUID;
+  conflict_type: string;
+  priority: "critical" | "high" | "medium" | "low" | string;
+  resolution_state: string;
+  is_blocking: boolean;
+  explanation: string;
+  affected_section_tab?: string | null;
+  side_a_source_title?: string | null;
+  side_b_source_title?: string | null;
+  acl_restricted: boolean;
+  resolution_notes?: string | null;
+  resolved_at?: string | null;
+  updated_at?: string | null;
+  conflict_url: string;
+}
+
+export interface ReadinessConflictSummary {
+  total_conflicts: number;
+  open_conflicts: number;
+  under_investigation: number;
+  awaiting_context: number;
+  resolved_conflicts: number;
+  critical_and_high_count: number;
+  blocking_approval_count: number;
+  items: ReadinessConflictItem[];
+}
+
+export interface ReadinessEvidenceQualitySummary {
+  total_knowledge_items: number;
+  items_with_evidence: number;
+  items_missing_evidence: number;
+  evidence_coverage_pct: number;
+  corroborated_items: number;
+  uncertain_items: number;
+  stale_items: number;
+  superseded_items: number;
+  total_evidence_sources: number;
+  accessible_evidence_count: number;
+  restricted_evidence_count: number;
+}
+
+export interface ReadinessChecklistItemEntry {
+  id: UUID;
+  item_text: string;
+  status: string;
+  blocking: boolean;
+  category?: string | null;
+  assigned_to_user_id?: UUID | null;
+  due_date?: string | null;
+}
+
+export interface ReadinessChecklistGroupSummary {
+  id: UUID;
+  checklist_type: string;
+  title: string;
+  total_items: number;
+  completed_items: number;
+  mandatory_total: number;
+  mandatory_completed: number;
+  mandatory_outstanding: number;
+  is_completed: boolean;
+  items: ReadinessChecklistItemEntry[];
+}
+
+export interface ReadinessChecklistSummary {
+  total_groups: number;
+  total_items: number;
+  completed_items: number;
+  completion_pct: number;
+  mandatory_total: number;
+  mandatory_completed: number;
+  mandatory_outstanding: number;
+  groups: ReadinessChecklistGroupSummary[];
+}
+
+export interface ReadinessSignoffPhaseStatus {
+  phase: string;
+  signoff_type: string;
+  status: string;
+  signed_at?: string | null;
+}
+
+export interface ReadinessApprovalEligibility {
+  current_case_status: string;
+  next_lifecycle_state?: string | null;
+  is_eligible_for_approval: boolean;
+  score_gate_passed: boolean;
+  verification_gate_passed: boolean;
+  conflict_gate_passed: boolean;
+  checklist_gate_passed: boolean;
+  blocking_requirements: string[];
+  warnings: string[];
+  required_signoffs: ReadinessSignoffPhaseStatus[];
+}
+
+export interface ReadinessAssessmentHistoryItem {
+  id: UUID;
+  assessed_at: string;
+  overall_score: number;
+  overall_level: string;
+  blocker_count: number;
+  warning_count: number;
+  assessed_by_name?: string | null;
+  notes?: string | null;
+}
+
+export interface HandoverReadinessIntelligenceResponse {
+  version_id: UUID;
+  case_id?: UUID | null;
+  project_id?: UUID | null;
+  version_number?: number | null;
+  content_hash?: string | null;
+  assessed_at?: string | null;
+  overall_score: number;
+  overall_level: "not_ready" | "partially_ready" | "ready" | "ready_with_warnings" | string;
+  categories: HandoverReadinessCategoryItem[];
+  is_ready_for_signoff: boolean;
+  blocker_count: number;
+  warning_count: number;
+  structured_blockers: ReadinessStructuredBlocker[];
+  recommendations: string[];
+  verification_summary?: ReadinessVerificationSummary | null;
+  conflict_summary?: ReadinessConflictSummary | null;
+  evidence_quality?: ReadinessEvidenceQualitySummary | null;
+  checklist_summary?: ReadinessChecklistSummary | null;
+  approval_eligibility?: ReadinessApprovalEligibility | null;
+  assessment_history: ReadinessAssessmentHistoryItem[];
+}
+
+// ---------------------------------------------------------------------------
+// Stage 5: Transition Checklists, Responsibility Transfer & Ownership Management
+// ---------------------------------------------------------------------------
+
+export interface HandoverStage5ActivityItem {
+  id: UUID;
+  event_type: string;
+  resource_type: string;
+  resource_id?: string | null;
+  actor_user_id?: UUID | null;
+  actor_name?: string | null;
+  outcome: string;
+  summary: string;
+  metadata_json: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ChecklistEvidenceSummary {
+  evidence_id: UUID;
+  title: string;
+  source_type?: string | null;
+  source_url?: string | null;
+  acl_restricted: boolean;
+}
+
+export interface HandoverChecklistItemDetail {
+  id: UUID;
+  checklist_id: UUID;
+  item_text: string;
+  description?: string | null;
+  completion_criteria?: string | null;
+  status: "pending" | "in_progress" | "completed" | "skipped" | "blocked" | string;
+  blocking: boolean;
+  category?: string | null;
+  assigned_to_user_id?: UUID | null;
+  assigned_to_name?: string | null;
+  due_date?: string | null;
+  is_overdue: boolean;
+  notes?: string | null;
+  evidence_item_id?: UUID | null;
+  evidence_summary?: ChecklistEvidenceSummary | null;
+  completed_by_user_id?: UUID | null;
+  completed_by_name?: string | null;
+  completed_at?: string | null;
+  reviewed_by_user_id?: UUID | null;
+  reviewed_by_name?: string | null;
+  reviewed_at?: string | null;
+  review_notes?: string | null;
+  reopened_count: number;
+  reopened_by_user_id?: UUID | null;
+  reopened_by_name?: string | null;
+  reopened_at?: string | null;
+  reopened_reason?: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HandoverChecklistGroupDetail {
+  id: UUID;
+  case_id: UUID;
+  generated_for_version_id?: UUID | null;
+  checklist_type: string;
+  title?: string | null;
+  description?: string | null;
+  total_items: number;
+  completed_items: number;
+  mandatory_total: number;
+  mandatory_completed: number;
+  mandatory_outstanding: number;
+  blocked_items: number;
+  overdue_items: number;
+  is_completed: boolean;
+  created_at: string;
+  items: HandoverChecklistItemDetail[];
+}
+
+export interface HandoverChecklistWorkspaceResponse {
+  case_id: UUID;
+  project_id: UUID;
+  total_checklists: number;
+  total_items: number;
+  completed_items: number;
+  outstanding_items: number;
+  blocked_items: number;
+  overdue_items: number;
+  mandatory_total: number;
+  mandatory_completed: number;
+  mandatory_outstanding: number;
+  optional_total: number;
+  optional_completed: number;
+  completion_pct: number;
+  checklists: HandoverChecklistGroupDetail[];
+  activity_history: HandoverStage5ActivityItem[];
+}
+
+export interface ResponsibilityEvidenceRef {
+  evidence_id: UUID;
+  title: string;
+  source_type?: string | null;
+  source_url?: string | null;
+  source_author?: string | null;
+  source_timestamp?: string | null;
+  excerpt?: string | null;
+  acl_restricted: boolean;
+}
+
+export interface ResponsibilityKnowledgeContextItem {
+  id: UUID;
+  category: string;
+  title: string;
+  summary: string;
+  epistemic_status: string;
+  review_status: string;
+  is_verified: boolean;
+  evidence_refs: ResponsibilityEvidenceRef[];
+}
+
+export interface ResponsibilityOwnershipValidationIssue {
+  severity: "critical" | "high" | "medium" | "low" | string;
+  code: string;
+  message: string;
+  transfer_id?: UUID | null;
+  user_id?: UUID | null;
+}
+
+export interface ResponsibilityParticipantSummary {
+  user_id: UUID;
+  full_name: string;
+  email: string;
+  role_name: string;
+  membership_status: string;
+  is_active: boolean;
+  is_departing_owner: boolean;
+  is_case_successor: boolean;
+  has_handover_access: boolean;
+}
+
+export interface ResponsibilityCandidateItem {
+  knowledge_item_id: UUID;
+  title: string;
+  summary: string;
+  epistemic_status: string;
+  review_status: string;
+  is_verified: boolean;
+  ownership_certainty: string;
+  source_context?: string | null;
+  evidence_refs: ResponsibilityEvidenceRef[];
+}
+
+export interface HandoverResponsibilityTransferDetail {
+  id: UUID;
+  case_id: UUID;
+  version_id?: UUID | null;
+  title?: string | null;
+  responsibility_description: string;
+  current_owner_id: UUID;
+  current_owner_name?: string | null;
+  current_owner_role?: string | null;
+  current_owner_active: boolean;
+  proposed_successor_id?: UUID | null;
+  proposed_successor_name?: string | null;
+  proposed_successor_role?: string | null;
+  proposed_successor_active?: boolean | null;
+  knowledge_domain?: string | null;
+  component_name?: string | null;
+  priority: "critical" | "high" | "medium" | "low" | string;
+  ownership_certainty: "confirmed" | "proposed" | "uncertain" | string;
+  operational_context?: string | null;
+  required_access?: string | null;
+  effective_transfer_date?: string | null;
+  transfer_status: string;
+  transfer_notes?: string | null;
+  blocker_reason?: string | null;
+  related_entity_id?: UUID | null;
+  related_entity_name?: string | null;
+  related_knowledge_item_id?: UUID | null;
+  outgoing_confirmed_by_user_id?: UUID | null;
+  outgoing_confirmed_by_name?: string | null;
+  outgoing_confirmed_at?: string | null;
+  outgoing_confirmation_notes?: string | null;
+  successor_acknowledged_by_user_id?: UUID | null;
+  successor_acknowledged_by_name?: string | null;
+  successor_acknowledged_at?: string | null;
+  successor_acknowledgement_notes?: string | null;
+  clarification_requested_by_user_id?: UUID | null;
+  clarification_requested_by_name?: string | null;
+  clarification_requested_at?: string | null;
+  clarification_request_notes?: string | null;
+  clarification_response_notes?: string | null;
+  reopened_count: number;
+  reopened_reason?: string | null;
+  version: number;
+  transferred_at?: string | null;
+  validation_warnings: string[];
+  related_knowledge: ResponsibilityKnowledgeContextItem[];
+  supporting_evidence: ResponsibilityEvidenceRef[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HandoverResponsibilityWorkspaceResponse {
+  case_id: UUID;
+  project_id: UUID;
+  departing_member_id: UUID;
+  case_successor_id?: UUID | null;
+  total_transfers: number;
+  unassigned_count: number;
+  awaiting_outgoing_count: number;
+  awaiting_successor_count: number;
+  acknowledged_count: number;
+  blocked_count: number;
+  clarification_count: number;
+  validation_issues: ResponsibilityOwnershipValidationIssue[];
+  eligible_participants: ResponsibilityParticipantSummary[];
+  transfers: HandoverResponsibilityTransferDetail[];
+  discovered_candidates: ResponsibilityCandidateItem[];
+  activity_history: HandoverStage5ActivityItem[];
+}
+
+// ---------------------------------------------------------------------------
+// Stage 6: Three-Phase Signoff, Approval, Publication & Recipient Acknowledgement
+// ---------------------------------------------------------------------------
+
+export interface DeliveryClarificationEntry {
+  id: string;
+  mode: "request" | "response" | string;
+  author_user_id: UUID;
+  author_name?: string | null;
+  notes: string;
+  created_at: string;
+}
+
+export interface HandoverSignoffRecord {
+  id: UUID;
+  case_id: UUID;
+  version_id: UUID;
+  signoff_type: "departing_signoff" | "reviewer_approval" | "successor_acknowledgement" | string;
+  signer_user_id: UUID;
+  signer_name?: string | null;
+  decision: "approved" | "rejected" | "returned_for_revision" | string;
+  comments?: string | null;
+  conditions?: string | null;
+  package_content_hash?: string | null;
+  affected_sections_json: string[];
+  is_superseded: boolean;
+  signature_hash?: string | null;
+  signed_at: string;
+  created_at: string;
+}
+
+export interface HandoverAcknowledgementRecord {
+  id: UUID;
+  delivery_id: UUID;
+  acknowledged_by_user_id: UUID;
+  acknowledged_by_name?: string | null;
+  acknowledgement_notes?: string | null;
+  confirmations_json: Record<string, unknown>;
+  acknowledgement_hash?: string | null;
+  acknowledged_at: string;
+  created_at: string;
+}
+
+export interface HandoverDeliveryRecord {
+  id: UUID;
+  version_id: UUID;
+  delivered_to_user_id: UUID;
+  delivered_to_name?: string | null;
+  delivered_by_user_id?: UUID | null;
+  delivered_by_name?: string | null;
+  delivery_method: string;
+  artifact_storage_path?: string | null;
+  artifact_checksum?: string | null;
+  message?: string | null;
+  is_active: boolean;
+  delivered_at: string;
+  expires_at?: string | null;
+  acknowledged: boolean;
+  acknowledgement?: HandoverAcknowledgementRecord | null;
+  clarifications: DeliveryClarificationEntry[];
+  created_at: string;
+}
+
+export interface HandoverStatusHistoryItem {
+  id: UUID;
+  case_id: UUID;
+  previous_status: string;
+  new_status: string;
+  changed_by_user_id: UUID;
+  change_reason?: string | null;
+  changed_at: string;
+}
+
+export interface SignoffPhaseDetail {
+  phase_number: number;
+  phase_name: string;
+  signoff_type: string;
+  purpose: string;
+  assigned_user_id?: UUID | null;
+  assigned_user_name?: string | null;
+  assigned_user_role?: string | null;
+  required_permission: string;
+  status: string;
+  viewer_can_act: boolean;
+  viewer_ineligibility_reason?: string | null;
+  pending_requirements: string[];
+  latest_decision?: HandoverSignoffRecord | null;
+}
+
+export interface SignoffLifecycleSummary {
+  current_status: string;
+  previous_status?: string | null;
+  next_permitted_transitions: string[];
+  responsible_role_label: string;
+  responsible_user_name?: string | null;
+  blocked_transition_reasons: string[];
+  case_version: number;
+  status_history: HandoverStatusHistoryItem[];
+}
+
+export interface SignoffPublicationStatus {
+  is_eligible_to_publish: boolean;
+  is_published: boolean;
+  blocking_reasons: string[];
+  approved_version_id?: UUID | null;
+  approved_version_number?: number | null;
+  approved_content_hash?: string | null;
+  published_version_id?: UUID | null;
+  published_version_number?: number | null;
+  published_content_hash?: string | null;
+  published_at?: string | null;
+  published_by_name?: string | null;
+  deliveries: HandoverDeliveryRecord[];
+}
+
+export interface HandoverSignoffWorkspaceResponse {
+  case_id: UUID;
+  project_id: UUID;
+  case_title: string;
+  case_status: string;
+  case_version: number;
+  departing_member_id: UUID;
+  departing_member_name?: string | null;
+  successor_id?: UUID | null;
+  successor_name?: string | null;
+  assigned_reviewer_id?: UUID | null;
+  assigned_reviewer_name?: string | null;
+  selected_version_id?: UUID | null;
+  selected_version_number?: number | null;
+  selected_content_hash?: string | null;
+  package_changed_since_approval: boolean;
+  package_change_notice?: string | null;
+  readiness_score?: number | null;
+  readiness_level?: string | null;
+  readiness_assessed_at?: string | null;
+  approval_eligibility?: ReadinessApprovalEligibility | null;
+  lifecycle: SignoffLifecycleSummary;
+  phases: SignoffPhaseDetail[];
+  publication: SignoffPublicationStatus;
+  eligible_reviewers: ResponsibilityParticipantSummary[];
+  eligible_recipients: ResponsibilityParticipantSummary[];
+  signoff_history: HandoverSignoffRecord[];
+  activity_history: HandoverStage5ActivityItem[];
+}
+
 export interface AuditEventItem {
   id: UUID;
   organisation_id: UUID;

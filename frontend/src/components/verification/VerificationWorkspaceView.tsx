@@ -1,23 +1,14 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   CheckCircle2,
   XCircle,
-  HelpCircle,
-  AlertTriangle,
   RefreshCw,
-  Search,
-  Filter,
   ShieldCheck,
   FileText,
   Database,
-  ArrowRight,
-  User,
-  Clock,
   Sparkles,
-  ChevronRight,
-  ExternalLink,
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { Button } from "../ui";
@@ -29,7 +20,7 @@ export function VerificationWorkspaceView({
   initialTab?: "queue" | "conflicts" | "history";
 } = {}) {
   const { activeProject } = useLiveApp();
-  const [activeTab, setActiveTab] = useState<"queue" | "conflicts" | "history">(initialTab);
+  const [_activeTab, _setActiveTab] = useState<"queue" | "conflicts" | "history">(initialTab);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [cases, setCases] = useState<Array<Record<string, unknown>>>([]);
   const [selectedCase, setSelectedCase] = useState<Record<string, unknown> | null>(null);
@@ -37,7 +28,7 @@ export function VerificationWorkspaceView({
   const [isLoading, setIsLoading] = useState(true);
   const [isActing, setIsActing] = useState(false);
 
-  const loadVerificationData = async (projectId: string) => {
+  const loadVerificationData = useCallback(async (projectId: string) => {
     setIsLoading(true);
     try {
       // Load summary
@@ -69,7 +60,7 @@ export function VerificationWorkspaceView({
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [selectedCase]);
 
   useEffect(() => {
     if (activeProject) {
@@ -79,7 +70,7 @@ export function VerificationWorkspaceView({
       setSelectedCase(null);
       setSummary(null);
     }
-  }, [activeProject]);
+  }, [activeProject, loadVerificationData]);
 
   const handleApprove = async (caseId: string) => {
     if (!activeProject) return;

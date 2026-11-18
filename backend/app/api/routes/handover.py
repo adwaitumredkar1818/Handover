@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
@@ -27,7 +27,8 @@ from app.api.deps import (
     get_llm_client,
     require_project_permission,
 )
-from app.models.enums import RoleName, VerificationTargetType
+from app.core.exceptions import ForbiddenError
+from app.models.enums import RoleName, SignoffType, VerificationTargetType
 from app.repositories.handover import (
     HandoverCaseRepository,
     HandoverPackageVersionRepository,
@@ -37,7 +38,10 @@ from app.repositories.handover import (
 )
 from app.schemas.handover import (
     AcknowledgementRequest,
+    ChecklistItemCreateRequest,
+    ChecklistItemReviewRequest,
     ChecklistItemUpdateRequest,
+    DeliveryClarificationRequest,
     DeliveryRequest,
     HandoverAcknowledgementResponse,
     HandoverCaseCreateRequest,
@@ -47,6 +51,7 @@ from app.schemas.handover import (
     HandoverCaseUpdateRequest,
     HandoverChecklistItemResponse,
     HandoverChecklistResponse,
+    HandoverChecklistWorkspaceResponse,
     HandoverContentLinkResponse,
     HandoverDeliveryResponse,
     HandoverEligibilityCheckResponse,
@@ -57,22 +62,33 @@ from app.schemas.handover import (
     HandoverReadinessAssessmentResponse,
     HandoverReadinessSummaryResponse,
     HandoverResponsibilityTransferResponse,
+    HandoverResponsibilityWorkspaceResponse,
     HandoverSectionResponse,
     HandoverSignoffResponse,
+    HandoverSignoffWorkspaceResponse,
     HandoverStatusHistoryResponse,
+    HandoverVersionSectionsResponse,
     NarrativeDraftRequest,
     OwnershipTransferRequest,
     OwnershipTransferRollbackRequest,
     PackageAssemblyRequest,
     PaginatedHandoverCaseResponse,
     ReadinessAssessmentRequest,
+    ResponsibilityClarificationRequest,
+    ResponsibilityOutgoingConfirmRequest,
+    ResponsibilityReopenRequest,
+    ResponsibilitySuccessorAckRequest,
     ResponsibilityTransferBulkRequest,
+    ResponsibilityTransferUpdateRequest,
+    ReviewerAssignRequest,
     SectionEditRequest,
+    SignoffPhaseReopenRequest,
     SignoffRequest,
 )
 from app.services.handover_assembly import PackageAssemblyService
 from app.services.handover_case import HandoverCaseService
 from app.services.handover_checklist import ChecklistService
+from app.services.handover_sections import HandoverSectionReadService
 from app.services.handover_eligibility import HandoverEligibilityService
 from app.services.handover_export import HandoverExportService
 from app.services.handover_narrative import HandoverNarrativeService
@@ -124,10 +140,13 @@ def list_handover_cases(
         items=[
             HandoverCaseListItem(
                 id=c.id,
+                project_id=c.project_id,
                 title=c.title,
                 status=c.status,
+                version=c.version,
                 departing_member_id=c.departing_member_id,
                 successor_id=c.successor_id,
+                assigned_reviewer_id=c.assigned_reviewer_id,
                 created_at=c.created_at,
                 updated_at=c.updated_at,
             )
@@ -295,20 +314,14 @@ def get_package_version_details(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found.")
 
     readiness_repo = HandoverReadinessRepository(session)
-    assessments = readiness_repo.list_by_version(version_id)
     readiness_summary = None
-    if assessments:
-        overall = next((a for a in assessments if a.category == "overall_quality"), None)
-        all_blockers = [b for a in assessments for b in a.blockers_json]
-        all_warnings = [w for a in assessments for w in a.warnings_json]
-        readiness_summary = HandoverReadinessSummaryResponse(
+    if readiness_repo.list_by_version(version_id):
+        readiness_summary = HandoverReadinessEngine(session).get_readiness_intelligence(
+            case_id=case_id,
             version_id=version_id,
-            overall_score=overall.score if overall else 0,
-            overall_level=overall.level if overall else "not_ready",
-            categories=[HandoverReadinessAssessmentResponse.model_validate(a) for a in assessments],
-            is_ready_for_signoff=(overall.score >= 70 if overall else False) and len(all_blockers) == 0,
-            blocker_count=len(all_blockers),
-            warning_count=len(all_warnings),
+            project_id=project_id,
+            viewer_user_id=project_ctx.user_id,
+            has_project_manage=project_ctx.has_permission("project.manage"),
         )
 
     checklist_repo = ChecklistService(session)
@@ -325,6 +338,7 @@ def get_package_version_details(
             section_order=s.section_order,
             knowledge_item_count=s.knowledge_item_count,
             relationship_count=s.relationship_count,
+            metadata_json=s.metadata_json or {},
             created_at=s.created_at,
             updated_at=s.created_at,
         )
@@ -353,6 +367,32 @@ def get_package_version_details(
     )
 
 
+@router.get(
+    "/cases/{case_id}/versions/{version_id}/sections",
+    response_model=HandoverVersionSectionsResponse,
+    summary="Get canonical eight-domain sections with hydrated provenance for a package version",
+)
+def get_package_version_sections(
+    project_id: uuid.UUID,
+    case_id: uuid.UUID,
+    version_id: uuid.UUID,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverVersionSectionsResponse:
+    """Retrieve canonical persisted sections, content links, ACL-checked provenance,
+    and epistemic/conflict separation for a specific handover case and package version.
+    Read-only: never mutates the package or historical versions.
+    """
+    service = HandoverSectionReadService(session)
+    return service.get_version_sections(
+        case_id=case_id,
+        version_id=version_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. Readiness Assessments
 # ---------------------------------------------------------------------------
@@ -374,12 +414,21 @@ def assess_package_readiness(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> HandoverReadinessSummaryResponse:
     """Run 9-category readiness evaluation across verified knowledge for a package version."""
+    version_repo = HandoverPackageVersionRepository(session)
+    version = version_repo.get_by_id(request.version_id, load_sections=False)
+    if not version or version.project_id != project_id or version.case_id != case_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Package version not found for this handover case and project.",
+        )
+
     engine = HandoverReadinessEngine(session)
     summary = engine.assess_version(
         version_id=request.version_id,
         project_id=project_id,
         user_id=project_ctx.user_id,
         notes=request.notes,
+        has_project_manage=project_ctx.has_permission("project.manage"),
     )
     session.commit()
     return summary
@@ -388,7 +437,7 @@ def assess_package_readiness(
 @router.get(
     "/cases/{case_id}/readiness/{version_id}",
     response_model=HandoverReadinessSummaryResponse,
-    summary="Get readiness assessment summary",
+    summary="Get live readiness intelligence summary for a package version",
 )
 def get_readiness_assessment(
     project_id: uuid.UUID,
@@ -397,32 +446,22 @@ def get_readiness_assessment(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> HandoverReadinessSummaryResponse:
-    """Get previously computed 9-category readiness scores for a package version."""
-    readiness_repo = HandoverReadinessRepository(session)
-    assessments = readiness_repo.list_by_version(version_id)
-    if not assessments:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No readiness assessment found for this version.",
-        )
-
-    overall = next((a for a in assessments if a.category == "overall_quality"), None)
-    all_blockers = [b for a in assessments for b in a.blockers_json]
-    all_warnings = [w for a in assessments for w in a.warnings_json]
-
-    return HandoverReadinessSummaryResponse(
+    """Get previously computed 9-category readiness scores enriched with live
+    Verification Center, Conflict Management, Checklist, Evidence Quality, and
+    authoritative Approval Eligibility intelligence. Strictly scoped to project & case.
+    """
+    engine = HandoverReadinessEngine(session)
+    return engine.get_readiness_intelligence(
+        case_id=case_id,
         version_id=version_id,
-        overall_score=overall.score if overall else 0,
-        overall_level=overall.level if overall else "not_ready",
-        categories=[HandoverReadinessAssessmentResponse.model_validate(a) for a in assessments],
-        is_ready_for_signoff=(overall.score >= 70 if overall else False) and len(all_blockers) == 0,
-        blocker_count=len(all_blockers),
-        warning_count=len(all_warnings),
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
     )
 
 
 # ---------------------------------------------------------------------------
-# 4. Checklists
+# 4. Transition Checklists (Stage 5 Complete)
 # ---------------------------------------------------------------------------
 
 
@@ -430,7 +469,7 @@ def get_readiness_assessment(
     "/cases/{case_id}/checklists/generate",
     response_model=list[HandoverChecklistResponse],
     status_code=status.HTTP_201_CREATED,
-    summary="Generate transition checklists",
+    summary="Idempotently generate transition checklists",
 )
 def generate_checklists(
     project_id: uuid.UUID,
@@ -439,32 +478,28 @@ def generate_checklists(
     session: Annotated[Session, Depends(get_db_session)],
     version_id: uuid.UUID | None = Query(None),
 ) -> list[HandoverChecklistResponse]:
-    """Generate dynamic transition checklists (pre-handover, knowledge-transfer, access)."""
+    """Idempotently generate standard transition checklists (pre-handover, knowledge-transfer, access)."""
     service = ChecklistService(session)
-    checklists = service.generate_checklists_for_case(
+    service.generate_checklists_for_case(
         case_id=case_id,
         project_id=project_id,
         user_id=project_ctx.user_id,
         version_id=version_id,
     )
     session.commit()
-    return [
-        HandoverChecklistResponse(
-            id=c.id,
-            case_id=c.case_id,
-            generated_for_version_id=c.version_id,
-            checklist_type=c.checklist_type,
-            created_at=c.created_at,
-            items=[HandoverChecklistItemResponse.model_validate(i) for i in c.items],
-        )
-        for c in checklists
-    ]
+    workspace = service.get_checklist_workspace(
+        case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    return workspace.checklists
 
 
 @router.get(
     "/cases/{case_id}/checklists",
     response_model=list[HandoverChecklistResponse],
-    summary="List checklists for a case",
+    summary="List hydrated checklists for a case",
 )
 def list_case_checklists(
     project_id: uuid.UUID,
@@ -472,26 +507,74 @@ def list_case_checklists(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> list[HandoverChecklistResponse]:
-    """List all checklists and items attached to this handover case."""
+    """List all checklists and ACL-checked items attached to this handover case."""
     service = ChecklistService(session)
-    checklists = service.list_checklists(case_id, project_id=project_id)
-    return [
-        HandoverChecklistResponse(
-            id=c.id,
-            case_id=c.case_id,
-            generated_for_version_id=c.version_id,
-            checklist_type=c.checklist_type,
-            created_at=c.created_at,
-            items=[HandoverChecklistItemResponse.model_validate(i) for i in c.items],
-        )
-        for c in checklists
-    ]
+    workspace = service.get_checklist_workspace(
+        case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    return workspace.checklists
+
+
+@router.get(
+    "/cases/{case_id}/checklists/workspace",
+    response_model=HandoverChecklistWorkspaceResponse,
+    summary="Get full Stage 5 transition checklist workspace with metrics and audit history",
+)
+def get_checklist_workspace(
+    project_id: uuid.UUID,
+    case_id: uuid.UUID,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverChecklistWorkspaceResponse:
+    """Retrieve complete Stage 5 checklist workspace, overdue/blocked metrics, ACL-checked evidence, and audit log."""
+    service = ChecklistService(session)
+    return service.get_checklist_workspace(
+        case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+
+
+@router.post(
+    "/cases/{case_id}/checklists/{checklist_id}/items",
+    response_model=HandoverChecklistItemResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a custom checklist item",
+)
+def create_checklist_item(
+    project_id: uuid.UUID,
+    case_id: uuid.UUID,
+    checklist_id: uuid.UUID,
+    request: ChecklistItemCreateRequest,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.edit"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverChecklistItemResponse:
+    """Create a custom transition checklist item with active participant and project evidence validation."""
+    service = ChecklistService(session)
+    item = service.create_item(
+        case_id=case_id,
+        checklist_id=checklist_id,
+        project_id=project_id,
+        user_id=project_ctx.user_id,
+        request=request,
+    )
+    session.commit()
+    return service.hydrate_item_response(
+        item,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
 
 
 @router.patch(
     "/checklists/items/{item_id}",
     response_model=HandoverChecklistItemResponse,
-    summary="Update checklist item completion status",
+    summary="Update checklist item status, assignment, due date, evidence, or reopen",
 )
 def update_checklist_item(
     project_id: uuid.UUID,
@@ -500,7 +583,7 @@ def update_checklist_item(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.edit"))],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> HandoverChecklistItemResponse:
-    """Update status (pending, in_progress, completed, skipped, blocked) of a checklist item."""
+    """Update status, assignee, due date, completion notes, evidence attachment, or reopen with mandatory reason."""
     service = ChecklistService(session)
     item = service.update_item_status(
         item_id=item_id,
@@ -509,11 +592,50 @@ def update_checklist_item(
         request=request,
     )
     session.commit()
-    return HandoverChecklistItemResponse.model_validate(item)
+    return service.hydrate_item_response(
+        item,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+
+
+@router.post(
+    "/checklists/items/{item_id}/review",
+    response_model=HandoverChecklistItemResponse,
+    summary="Independently verify or reopen a completed checklist item",
+)
+def review_checklist_item(
+    project_id: uuid.UUID,
+    item_id: uuid.UUID,
+    request: ChecklistItemReviewRequest,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.review"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverChecklistItemResponse:
+    """Record independent reviewer verification of a completed checklist item (separation of duties enforced)."""
+    service = ChecklistService(session)
+    is_org_admin = project_ctx.organisation_role.name in (
+        RoleName.ORG_OWNER.value,
+        RoleName.ORG_ADMIN.value,
+    )
+    item = service.review_item(
+        item_id=item_id,
+        project_id=project_id,
+        reviewer_user_id=project_ctx.user_id,
+        request=request,
+        is_org_admin=is_org_admin,
+    )
+    session.commit()
+    return service.hydrate_item_response(
+        item,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
 
 
 # ---------------------------------------------------------------------------
-# 5. Responsibilities
+# 5. Responsibilities & Ownership Transfer (Stage 5 Complete)
 # ---------------------------------------------------------------------------
 
 
@@ -530,7 +652,7 @@ def create_responsibility_transfers(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.edit"))],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> list[HandoverResponsibilityTransferResponse]:
-    """Define explicit responsibility transfer mappings from departing member to successor."""
+    """Define explicit responsibility transfer mappings validated against active project members."""
     service = OwnershipTransferService(session)
     created = service.create_responsibility_transfers(
         case_id=case_id,
@@ -539,13 +661,20 @@ def create_responsibility_transfers(
         request=request,
     )
     session.commit()
-    return [HandoverResponsibilityTransferResponse.model_validate(t) for t in created]
+    created_ids = {t.id for t in created}
+    workspace = service.get_responsibility_workspace(
+        case_id=case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    return [t for t in workspace.transfers if t.id in created_ids]
 
 
 @router.get(
     "/cases/{case_id}/responsibilities",
     response_model=list[HandoverResponsibilityTransferResponse],
-    summary="List mapped responsibilities",
+    summary="List hydrated responsibility transfers",
 )
 def list_responsibility_transfers(
     project_id: uuid.UUID,
@@ -553,68 +682,314 @@ def list_responsibility_transfers(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> list[HandoverResponsibilityTransferResponse]:
-    """List mapped responsibilities for a handover case."""
+    """List mapped responsibilities enriched with 8-domain knowledge and ACL-checked evidence."""
     service = OwnershipTransferService(session)
-    transfers = service.list_responsibility_transfers(case_id=case_id, project_id=project_id)
-    return [HandoverResponsibilityTransferResponse.model_validate(t) for t in transfers]
+    workspace = service.get_responsibility_workspace(
+        case_id=case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    return workspace.transfers
+
+
+@router.get(
+    "/cases/{case_id}/responsibilities/workspace",
+    response_model=HandoverResponsibilityWorkspaceResponse,
+    summary="Get full Stage 5 responsibility transfer & ownership management workspace",
+)
+def get_responsibility_workspace(
+    project_id: uuid.UUID,
+    case_id: uuid.UUID,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverResponsibilityWorkspaceResponse:
+    """Return full Stage 5 responsibility workspace with validation issues, eligible participants, candidates & audit history."""
+    service = OwnershipTransferService(session)
+    return service.get_responsibility_workspace(
+        case_id=case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
 
 
 @router.patch(
     "/responsibilities/{transfer_id}",
     response_model=HandoverResponsibilityTransferResponse,
-    summary="Update responsibility transfer status",
+    summary="Update responsibility transfer details, successor, or operational status",
 )
 def update_responsibility_status(
     project_id: uuid.UUID,
     transfer_id: uuid.UUID,
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.edit"))],
     session: Annotated[Session, Depends(get_db_session)],
-    status_value: str = Query(..., alias="status"),
+    body: ResponsibilityTransferUpdateRequest | None = Body(default=None),
+    status_value: str | None = Query(None, alias="status"),
     notes: str | None = Query(None),
 ) -> HandoverResponsibilityTransferResponse:
-    """Update status (pending, in_progress, completed, rolled_back) of a responsibility transfer."""
+    """Update responsibility transfer details, reassign successor, or update status."""
     service = OwnershipTransferService(session)
-    updated = service.update_responsibility_status(
+    if body is not None:
+        updated = service.update_responsibility_transfer(
+            transfer_id=transfer_id,
+            project_id=project_id,
+            user_id=project_ctx.user_id,
+            request=body,
+        )
+    elif status_value is not None:
+        updated = service.update_responsibility_status(
+            transfer_id=transfer_id,
+            project_id=project_id,
+            user_id=project_ctx.user_id,
+            status=status_value,
+            notes=notes,
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide a JSON update body or status query parameter.",
+        )
+    session.commit()
+    workspace = service.get_responsibility_workspace(
+        case_id=updated.case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    for t in workspace.transfers:
+        if t.id == updated.id:
+            return t
+    return HandoverResponsibilityTransferResponse.model_validate(updated)
+
+
+@router.post(
+    "/responsibilities/{transfer_id}/confirm-outgoing",
+    response_model=HandoverResponsibilityTransferResponse,
+    summary="Outgoing-owner confirmation of responsibility transfer preparation",
+)
+def confirm_responsibility_outgoing(
+    project_id: uuid.UUID,
+    transfer_id: uuid.UUID,
+    request: ResponsibilityOutgoingConfirmRequest,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.edit"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverResponsibilityTransferResponse:
+    """Outgoing owner confirms responsibility transfer is ready for successor acknowledgement."""
+    service = OwnershipTransferService(session)
+    can_manage = project_ctx.has_permission("project.manage") or project_ctx.organisation_role.name in (
+        RoleName.ORG_OWNER.value,
+        RoleName.ORG_ADMIN.value,
+    )
+    updated = service.confirm_outgoing_owner(
         transfer_id=transfer_id,
         project_id=project_id,
         user_id=project_ctx.user_id,
-        status=status_value,
-        notes=notes,
+        request=request,
+        can_manage_project=can_manage,
     )
     session.commit()
+    workspace = service.get_responsibility_workspace(
+        case_id=updated.case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    for t in workspace.transfers:
+        if t.id == updated.id:
+            return t
+    return HandoverResponsibilityTransferResponse.model_validate(updated)
+
+
+@router.post(
+    "/responsibilities/{transfer_id}/acknowledge",
+    response_model=HandoverResponsibilityTransferResponse,
+    summary="Receiving-successor acknowledgement of transferred responsibility",
+)
+def acknowledge_responsibility_successor(
+    project_id: uuid.UUID,
+    transfer_id: uuid.UUID,
+    request: ResponsibilitySuccessorAckRequest,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.acknowledge"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverResponsibilityTransferResponse:
+    """Designated incoming successor explicitly acknowledges receipt & understanding (distinct from managerial approval)."""
+    service = OwnershipTransferService(session)
+    updated = service.acknowledge_as_successor(
+        transfer_id=transfer_id,
+        project_id=project_id,
+        user_id=project_ctx.user_id,
+        request=request,
+    )
+    session.commit()
+    workspace = service.get_responsibility_workspace(
+        case_id=updated.case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    for t in workspace.transfers:
+        if t.id == updated.id:
+            return t
+    return HandoverResponsibilityTransferResponse.model_validate(updated)
+
+
+@router.post(
+    "/responsibilities/{transfer_id}/clarify",
+    response_model=HandoverResponsibilityTransferResponse,
+    summary="Request or respond to clarification on a responsibility transfer",
+)
+def clarify_responsibility_transfer(
+    project_id: uuid.UUID,
+    transfer_id: uuid.UUID,
+    request: ResponsibilityClarificationRequest,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverResponsibilityTransferResponse:
+    """Successor requests clarification or outgoing owner posts a clarification response."""
+    service = OwnershipTransferService(session)
+    can_manage = project_ctx.has_permission("handover.review") or project_ctx.has_permission("project.manage")
+    updated = service.handle_clarification(
+        transfer_id=transfer_id,
+        project_id=project_id,
+        user_id=project_ctx.user_id,
+        request=request,
+        can_manage_project=can_manage,
+    )
+    session.commit()
+    workspace = service.get_responsibility_workspace(
+        case_id=updated.case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    for t in workspace.transfers:
+        if t.id == updated.id:
+            return t
+    return HandoverResponsibilityTransferResponse.model_validate(updated)
+
+
+@router.post(
+    "/responsibilities/{transfer_id}/reopen",
+    response_model=HandoverResponsibilityTransferResponse,
+    summary="Reopen an acknowledged responsibility transfer with mandatory rationale",
+)
+def reopen_responsibility_transfer(
+    project_id: uuid.UUID,
+    transfer_id: uuid.UUID,
+    request: ResponsibilityReopenRequest,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.edit"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverResponsibilityTransferResponse:
+    """Reopen a responsibility transfer requiring further review or clarification."""
+    service = OwnershipTransferService(session)
+    can_manage = project_ctx.has_permission("project.manage") or project_ctx.organisation_role.name in (
+        RoleName.ORG_OWNER.value,
+        RoleName.ORG_ADMIN.value,
+    )
+    updated = service.reopen_transfer(
+        transfer_id=transfer_id,
+        project_id=project_id,
+        user_id=project_ctx.user_id,
+        request=request,
+        can_manage_project=can_manage,
+    )
+    session.commit()
+    workspace = service.get_responsibility_workspace(
+        case_id=updated.case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    for t in workspace.transfers:
+        if t.id == updated.id:
+            return t
     return HandoverResponsibilityTransferResponse.model_validate(updated)
 
 
 # ---------------------------------------------------------------------------
-# 6. Sign-Offs & Deliveries
+# 6. Sign-Offs, Approval, Publication & Recipient Acknowledgement (Stage 6)
 # ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/cases/{case_id}/signoffs/workspace",
+    response_model=HandoverSignoffWorkspaceResponse,
+    summary="Get complete Stage 6 signoff, approval, publication & recipient workspace",
+)
+def get_handover_signoff_workspace(
+    project_id: uuid.UUID,
+    case_id: uuid.UUID,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
+    session: Annotated[Session, Depends(get_db_session)],
+    version_id: uuid.UUID | None = Query(None),
+) -> HandoverSignoffWorkspaceResponse:
+    """Return authoritative three-phase signoff status, 4-gate approval eligibility, publication state, and recipient acknowledgements."""
+    service = HandoverSignoffService(session)
+    is_org_admin = project_ctx.organisation_role.name in (
+        RoleName.ORG_OWNER.value,
+        RoleName.ORG_ADMIN.value,
+    )
+    return service.get_signoff_workspace(
+        case_id=case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        version_id=version_id,
+        is_org_admin=is_org_admin,
+        can_review=project_ctx.has_permission("handover.review"),
+        can_approve=project_ctx.has_permission("handover.approve"),
+        can_deliver=project_ctx.has_permission("handover.deliver"),
+        can_acknowledge=project_ctx.has_permission("handover.acknowledge"),
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
 
 
 @router.post(
     "/cases/{case_id}/signoffs",
     response_model=HandoverSignoffResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Submit human sign-off",
+    summary="Submit human sign-off decision",
 )
 def submit_handover_signoff(
     project_id: uuid.UUID,
     case_id: uuid.UUID,
     request: SignoffRequest,
-    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.review"))],
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> HandoverSignoffResponse:
-    """Submit Phase 1 (departing), Phase 2 (reviewer approval), or Phase 3 (successor) sign-off."""
-    service = HandoverSignoffService(session)
+    """Submit Phase 1 (departing), Phase 2 (independent reviewer approval/rejection/change request), or Phase 3 (recipient ack)."""
     is_org_admin = project_ctx.organisation_role.name in (
         RoleName.ORG_OWNER.value,
         RoleName.ORG_ADMIN.value,
     )
+    # Phase-specific RBAC enforcement
+    if request.signoff_type == SignoffType.DEPARTING_SIGNOFF.value:
+        if not (
+            project_ctx.has_permission("handover.edit")
+            or project_ctx.has_permission("handover.review")
+            or is_org_admin
+        ):
+            raise ForbiddenError("Permission 'handover.edit' or 'handover.review' required for Phase 1 sign-off.")
+    elif request.signoff_type == SignoffType.REVIEWER_APPROVAL.value:
+        if not (
+            project_ctx.has_permission("handover.review")
+            or project_ctx.has_permission("handover.approve")
+            or is_org_admin
+        ):
+            raise ForbiddenError("Permission 'handover.review' required for Phase 2 reviewer decisions.")
+    elif request.signoff_type == SignoffType.SUCCESSOR_ACKNOWLEDGEMENT.value:
+        if not project_ctx.has_permission("handover.acknowledge"):
+            raise ForbiddenError("Permission 'handover.acknowledge' required for Phase 3 recipient acknowledgement.")
+
+    service = HandoverSignoffService(session)
     signoff = service.submit_signoff(
         case_id=case_id,
         project_id=project_id,
         user_id=project_ctx.user_id,
         request=request,
         is_org_admin=is_org_admin,
+        can_approve=project_ctx.has_permission("handover.approve"),
+        has_project_manage=project_ctx.has_permission("project.manage"),
     )
     session.commit()
     return HandoverSignoffResponse.model_validate(signoff)
@@ -631,17 +1006,94 @@ def list_handover_signoffs(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> list[HandoverSignoffResponse]:
-    """List all human sign-offs recorded for this handover case."""
+    """List all human sign-offs recorded for this handover case (strictly scoped to project)."""
+    HandoverCaseService(session).get_case(case_id, project_id=project_id, load_relationships=False)
     repo = HandoverSignoffRepository(session)
     signoffs = repo.list_by_case(case_id)
     return [HandoverSignoffResponse.model_validate(s) for s in signoffs]
 
 
 @router.post(
+    "/cases/{case_id}/signoffs/reviewer",
+    response_model=HandoverSignoffWorkspaceResponse,
+    summary="Assign or reassign an eligible independent reviewer",
+)
+def assign_handover_reviewer(
+    project_id: uuid.UUID,
+    case_id: uuid.UUID,
+    request: ReviewerAssignRequest,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.admin"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverSignoffWorkspaceResponse:
+    """Assign an active independent project member (not departing owner) as case reviewer."""
+    service = HandoverSignoffService(session)
+    service.assign_reviewer(
+        case_id=case_id,
+        project_id=project_id,
+        actor_user_id=project_ctx.user_id,
+        request=request,
+    )
+    session.commit()
+    is_org_admin = project_ctx.organisation_role.name in (
+        RoleName.ORG_OWNER.value,
+        RoleName.ORG_ADMIN.value,
+    )
+    return service.get_signoff_workspace(
+        case_id=case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        is_org_admin=is_org_admin,
+        can_review=project_ctx.has_permission("handover.review"),
+        can_approve=project_ctx.has_permission("handover.approve"),
+        can_deliver=project_ctx.has_permission("handover.deliver"),
+        can_acknowledge=project_ctx.has_permission("handover.acknowledge"),
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+
+
+@router.post(
+    "/cases/{case_id}/signoffs/reopen",
+    response_model=HandoverSignoffWorkspaceResponse,
+    summary="Reopen a signoff phase with mandatory audit rationale",
+)
+def reopen_handover_signoff_phase(
+    project_id: uuid.UUID,
+    case_id: uuid.UUID,
+    request: SignoffPhaseReopenRequest,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.approve"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverSignoffWorkspaceResponse:
+    """Explicitly reopen Phase 1 or Phase 2 prior to publication, preserving prior signoffs immutably."""
+    service = HandoverSignoffService(session)
+    service.reopen_signoff_phase(
+        case_id=case_id,
+        project_id=project_id,
+        actor_user_id=project_ctx.user_id,
+        request=request,
+    )
+    session.commit()
+    is_org_admin = project_ctx.organisation_role.name in (
+        RoleName.ORG_OWNER.value,
+        RoleName.ORG_ADMIN.value,
+    )
+    return service.get_signoff_workspace(
+        case_id=case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        is_org_admin=is_org_admin,
+        can_review=project_ctx.has_permission("handover.review"),
+        can_approve=project_ctx.has_permission("handover.approve"),
+        can_deliver=project_ctx.has_permission("handover.deliver"),
+        can_acknowledge=project_ctx.has_permission("handover.acknowledge"),
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+
+
+@router.post(
     "/cases/{case_id}/deliver",
     response_model=list[HandoverDeliveryResponse],
     status_code=status.HTTP_201_CREATED,
-    summary="Deliver approved package version",
+    summary="Publish and deliver approved package version",
 )
 def deliver_handover_package(
     project_id: uuid.UUID,
@@ -650,7 +1102,7 @@ def deliver_handover_package(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.deliver"))],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> list[HandoverDeliveryResponse]:
-    """Deliver an approved package version to successors."""
+    """Publish an approved, integrity-verified package version to eligible active recipients."""
     service = HandoverSignoffService(session)
     deliveries = service.deliver_package(
         case_id=case_id,
@@ -666,7 +1118,7 @@ def deliver_handover_package(
     "/deliveries/{delivery_id}/acknowledge",
     response_model=HandoverAcknowledgementResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Successor receipt acknowledgement",
+    summary="Recipient formal acknowledgement of published handover package",
 )
 def acknowledge_delivery(
     project_id: uuid.UUID,
@@ -677,7 +1129,7 @@ def acknowledge_delivery(
     ],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> HandoverAcknowledgementResponse:
-    """Successor submits formal acknowledgement of delivered handover package."""
+    """Designated recipient submits formal acknowledgement of complete published handover package."""
     service = HandoverSignoffService(session)
     ack = service.acknowledge_delivery(
         delivery_id=delivery_id,
@@ -687,6 +1139,42 @@ def acknowledge_delivery(
     )
     session.commit()
     return HandoverAcknowledgementResponse.model_validate(ack)
+
+
+@router.post(
+    "/deliveries/{delivery_id}/clarify",
+    response_model=HandoverDeliveryResponse,
+    summary="Request or respond to clarification on a published handover package",
+)
+def clarify_handover_delivery(
+    project_id: uuid.UUID,
+    delivery_id: uuid.UUID,
+    request: DeliveryClarificationRequest,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverDeliveryResponse:
+    """Recipient raises a clarification request or outgoing owner/manager posts a response without mutating the published snapshot."""
+    service = HandoverSignoffService(session)
+    can_manage = project_ctx.has_permission("project.manage") or project_ctx.has_permission("handover.deliver")
+    updated = service.handle_delivery_clarification(
+        delivery_id=delivery_id,
+        project_id=project_id,
+        user_id=project_ctx.user_id,
+        request=request,
+        can_manage_project=can_manage,
+    )
+    session.commit()
+    workspace = service.get_signoff_workspace(
+        case_id=updated.case_id,
+        project_id=project_id,
+        viewer_user_id=project_ctx.user_id,
+        version_id=updated.version_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
+    )
+    for d in workspace.publication.deliveries:
+        if d.id == updated.id:
+            return d
+    return HandoverDeliveryResponse.model_validate(updated)
 
 
 # ---------------------------------------------------------------------------
@@ -765,7 +1253,10 @@ def draft_section_narrative(
     service = HandoverNarrativeService(session, llm_client=llm_client)
     return service.draft_section_narrative(
         project_id=project_id,
+        case_id=case_id,
         request=request,
+        viewer_user_id=project_ctx.user_id,
+        has_project_manage=project_ctx.has_permission("project.manage"),
     )
 
 
@@ -830,17 +1321,25 @@ def check_handover_eligibility(
             target_id,
             viewer_user_id=project_ctx.user_id,
             has_project_manage=has_manage,
+            project_id=project_id,
         )
     elif target_type == VerificationTargetType.RELATIONSHIP.value:
         res = service.check_relationship_eligibility(
             target_id,
             viewer_user_id=project_ctx.user_id,
             has_project_manage=has_manage,
+            project_id=project_id,
         )
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid target type '{target_type}'. Must be 'knowledge_item' or 'relationship'.",
+        )
+
+    if res.case_status == "not_found":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"{target_type} {target_id} not found in this project.",
         )
 
     return HandoverEligibilityCheckResponse(
@@ -869,10 +1368,12 @@ def export_handover_package(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
     session: Annotated[Session, Depends(get_db_session)],
     format: str = Query("markdown", description="Export format: 'markdown', 'json', or 'pdf'"),
+    version_id: uuid.UUID | None = Query(None, description="Optional specific package version UUID"),
 ) -> Any:
-    """Export a structured handover package with strict provenance and source ACL filtering."""
+    """Export a viewer-authorized handover package with strict per-request source ACL filtering and secret redaction."""
     service = HandoverExportService(session)
     fmt = format.lower().strip()
+    has_manage = project_ctx.has_permission("project.manage")
 
     try:
         if fmt == "markdown":
@@ -880,7 +1381,10 @@ def export_handover_package(
                 project_id=project_id,
                 case_id=case_id,
                 user_id=project_ctx.user_id,
+                version_id=version_id,
+                has_project_manage=has_manage,
             )
+            session.commit()
             return PlainTextResponse(
                 content=md_content,
                 media_type="text/markdown",
@@ -893,14 +1397,20 @@ def export_handover_package(
                 project_id=project_id,
                 case_id=case_id,
                 user_id=project_ctx.user_id,
+                version_id=version_id,
+                has_project_manage=has_manage,
             )
+            session.commit()
             return json_data
         elif fmt == "pdf":
             pdf_bytes = service.export_pdf(
                 project_id=project_id,
                 case_id=case_id,
                 user_id=project_ctx.user_id,
+                version_id=version_id,
+                has_project_manage=has_manage,
             )
+            session.commit()
             return Response(
                 content=pdf_bytes,
                 media_type="application/pdf",

@@ -7,13 +7,10 @@ import {
   Clock,
   CheckCircle2,
   XCircle,
-  HelpCircle,
   FileText,
   GitCommit,
   Search,
-  Filter,
   RefreshCw,
-  ExternalLink,
   ShieldAlert,
   ShieldCheck,
   ArrowRight,
@@ -21,7 +18,6 @@ import {
   Info,
   Check,
   Calendar,
-  Layers,
   ChevronRight,
 } from "lucide-react";
 import Link from "next/link";
@@ -71,7 +67,7 @@ export function ConflictsWorkspace() {
   const { activeProject } = useLiveApp();
 
   const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
-  const [summary, setSummary] = useState<ConflictSummary | null>(null);
+  const [_summary, setSummary] = useState<ConflictSummary | null>(null);
   const [selectedConflictId, setSelectedConflictId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [detecting, setDetecting] = useState(false);
@@ -164,7 +160,7 @@ export function ConflictsWorkspace() {
         setResolutionNotes(selectedConflict.resolution_notes || "");
       }
     }
-  }, [selectedConflict?.id]);
+  }, [selectedConflict]);
 
   const handleResolveConflict = async () => {
     if (!activeProject?.id || !selectedConflict) return;
@@ -197,7 +193,7 @@ export function ConflictsWorkspace() {
       );
 
       // Update in-memory state immediately so screen and badges update instantly
-      const updatedItem = (updated as any)?.id ? (updated as any) : {
+      const updatedItem: ConflictItem = updated?.id ? updated : {
         ...selectedConflict,
         resolution_state: state,
         resolution_notes: resolutionNotes.trim(),
@@ -264,15 +260,15 @@ export function ConflictsWorkspace() {
     () => conflicts.filter((c) => c.resolution_state !== "unresolved").length,
     [conflicts]
   );
-  const temporalCount = useMemo(
+  const _temporalCount = useMemo(
     () => conflicts.filter((c) => c.conflict_type === "temporal_conflict").length,
     [conflicts]
   );
-  const decisionCount = useMemo(
+  const _decisionCount = useMemo(
     () => conflicts.filter((c) => c.conflict_type === "decision_conflict").length,
     [conflicts]
   );
-  const statusCount = useMemo(
+  const _statusCount = useMemo(
     () => conflicts.filter((c) => c.conflict_type === "status_conflict").length,
     [conflicts]
   );
@@ -311,7 +307,7 @@ export function ConflictsWorkspace() {
       }
       return true;
     });
-  }, [conflicts, filterTab, searchQuery, selectedConflictId]);
+  }, [conflicts, filterTab, searchQuery]);
 
   const formatTimestamp = (ts?: string | null) => {
     if (!ts) return "Timestamp not recorded";

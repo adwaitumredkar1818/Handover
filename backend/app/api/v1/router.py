@@ -15,6 +15,7 @@ from app.api.routes.retrieval import router as retrieval_router
 from app.api.routes.sources import router as sources_router
 from app.api.routes.users import router as users_router
 from app.api.routes.verification import router as verification_router
+from app.api.routes.conflicts import router as conflicts_router
 from app.api.routes.handover import router as handover_router
 from app.api.routes.assistant import router as assistant_router
 from app.api.routes.metrics import metrics_router
@@ -35,6 +36,7 @@ api_v1_router.include_router(knowledge_router)
 api_v1_router.include_router(knowledge_intelligence_router)
 api_v1_router.include_router(relationships_router)
 api_v1_router.include_router(verification_router)
+api_v1_router.include_router(conflicts_router)
 api_v1_router.include_router(handover_router)
 api_v1_router.include_router(assistant_router)
 api_v1_router.include_router(metrics_router)

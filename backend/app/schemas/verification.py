@@ -1,8 +1,4 @@
-"""Pydantic v2 schemas for Verification Center APIs.
-
-Platform: The Handover
-Module: Verification Center (Module 3 / Validation Area)
-"""
+"""Pydantic v2 schemas for the Verification Center (Phase 1 Rebuild)."""
 
 from __future__ import annotations
 
@@ -10,95 +6,180 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field, field_validator
+
+from app.schemas.common import BaseSchema
 
 
-class VerificationIssueResponse(BaseModel):
-    """Schema for individual verification issues."""
+# ---------------------------------------------------------------------------
+# Summary & Queue
+# ---------------------------------------------------------------------------
 
-    model_config = ConfigDict(from_attributes=True)
+
+class VerificationSummaryResponse(BaseSchema):
+    """Project-wide verification status counts and review metrics."""
+
+    project_id: uuid.UUID
+    total_cases: int = 0
+    candidate_count: int = 0
+    pending_review_count: int = 0
+    conflicted_count: int = 0
+    unresolved_count: int = 0
+    verified_count: int = 0
+    rejected_count: int = 0
+    open_issues_count: int = 0
+    open_conflicts_count: int = 0
+    pending_context_requests_count: int = 0
+
+
+class VerificationQueueItem(BaseSchema):
+    """Compact queue entry displayed in the Left Panel (Findings Queue)."""
 
     id: uuid.UUID
-    case_id: uuid.UUID
+    project_id: uuid.UUID
+    target_type: str
+    target_id: uuid.UUID
+    title: str
+    domain: str
+    current_claim: str
+    original_ai_claim: str
+    case_status: str
+    priority: str
+    person_name: str | None = None
+    source_provider: str | None = None
+    assigned_reviewer_id: uuid.UUID | None = None
+    assigned_reviewer_name: str | None = None
+    evidence_count: int = 0
+    open_issues_count: int = 0
+    verification_categories: list[str] = Field(default_factory=list)
+    model_confidence: float | None = None
+    uncertainty_note: str | None = None
+    evidence_completeness: str | None = None
+    priority_reason: str | None = None
+    recommendation_action: str | None = None
+    corroboration_level: str | None = None
+    freshness_status: str | None = None
+    version: int = 1
+    last_reviewed_at: datetime | None = None
+    updated_at: datetime
+    created_at: datetime
+
+
+class VerificationQueueResponse(BaseSchema):
+    """Paginated findings queue with filter metadata."""
+
+    items: list[VerificationQueueItem] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 50
+    offset: int = 0
+    available_domains: list[str] = Field(default_factory=list)
+    available_sources: list[str] = Field(default_factory=list)
+    available_people: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Centre Panel: Evidence, Issues, Conflicts, Revisions, History
+# ---------------------------------------------------------------------------
+
+
+class EvidenceReferenceDetail(BaseSchema):
+    """ACL-checked source evidence reference displayed in Panel B."""
+
+    id: uuid.UUID
+    evidence_item_id: uuid.UUID
+    evidence_chunk_id: uuid.UUID | None = None
+    source_provider: str
+    source_name: str
+    original_title: str
+    author: str | None = None
+    timestamp: datetime | None = None
+    original_source_url: str | None = None
+    excerpt: str | None = None
+    location_label: str | None = None
+    relationship_to_finding: str
+    acl_scope: str = "project_members"
+
+
+class VerificationIssueDetail(BaseSchema):
+    """Automated verification issue across the 6 canonical review categories."""
+
+    id: uuid.UUID
+    verification_category: str
     issue_type: str
     severity: str
     description: str
     detection_method: str
-    details_json: dict[str, Any] = Field(default_factory=dict)
-    conflicting_evidence_id: uuid.UUID | None = None
-    conflicting_chunk_id: uuid.UUID | None = None
     resolution_state: str
-    resolution_reason: str | None = None
-    resolved_by_user_id: uuid.UUID | None = None
-    resolved_at: datetime | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    conflicting_evidence_id: uuid.UUID | None = None
     created_at: datetime
+    resolved_at: datetime | None = None
 
 
-class VerificationConflictResponse(BaseModel):
-    """Schema for cross-source contradiction records."""
+class ConflictClaimSide(BaseSchema):
+    """One side of a side-by-side opposing source comparison."""
 
-    model_config = ConfigDict(from_attributes=True)
+    evidence_item_id: uuid.UUID
+    source_provider: str
+    original_title: str
+    author: str | None = None
+    timestamp: datetime | None = None
+    original_source_url: str | None = None
+    claim_text: str
+
+
+class VerificationConflictPreview(BaseSchema):
+    """Side-by-side opposing source claims rendered inside Panel B."""
 
     id: uuid.UUID
-    case_id: uuid.UUID
     conflict_type: str
-    claim_a_text: str
-    claim_a_source_evidence_id: uuid.UUID
-    claim_a_chunk_id: uuid.UUID | None = None
-    claim_a_source_timestamp: datetime | None = None
-    claim_a_source_title: str | None = None
-    claim_a_source_type: str | None = None
-
-    claim_b_text: str
-    claim_b_source_evidence_id: uuid.UUID
-    claim_b_chunk_id: uuid.UUID | None = None
-    claim_b_source_timestamp: datetime | None = None
-    claim_b_source_title: str | None = None
-    claim_b_source_type: str | None = None
-
     explanation: str
     temporal_comparison: str
     resolution_state: str
-    resolution_notes: str | None = None
-    resolved_by_user_id: uuid.UUID | None = None
-    resolved_at: datetime | None = None
+    side_a: ConflictClaimSide | None = None
+    side_b: ConflictClaimSide | None = None
+    restricted_by_acl: bool = False
     created_at: datetime
 
-    # Contextual target metadata
-    target_id: uuid.UUID | None = None
-    target_type: str | None = None
-    target_title: str | None = None
-    target_category: str | None = None
 
-
-class VerificationReviewEventResponse(BaseModel):
-    """Schema for audit-tracked review actions."""
-
-    model_config = ConfigDict(from_attributes=True)
+class VerificationRevisionDetail(BaseSchema):
+    """Immutable revision record preserving AI original and human edits."""
 
     id: uuid.UUID
-    case_id: uuid.UUID
+    revision_number: int
+    claim_text: str
+    domain: str
+    is_ai_original: bool
+    edited_by_user_id: uuid.UUID | None = None
+    edited_by_name: str | None = None
+    edit_reason: str | None = None
+    created_at: datetime
+
+
+class VerificationReviewEventDetail(BaseSchema):
+    """Immutable human review action record."""
+
+    id: uuid.UUID
     reviewer_user_id: uuid.UUID
+    reviewer_name: str | None = None
     action: str
     previous_status: str
     new_status: str
+    case_version: int
+    decision_reason: str | None = None
     review_notes: str | None = None
-    event_type: str | None = None
-    notes: str | None = None
-    finding_patch_json: dict[str, Any] | None = None
-    correlation_id: str
     created_at: datetime
 
 
-class VerificationContextRequestResponse(BaseModel):
-    """Schema for in-platform clarification requests."""
-
-    model_config = ConfigDict(from_attributes=True)
+class VerificationContextRequestDetail(BaseSchema):
+    """Clarification request sent to a project member / knowledge owner."""
 
     id: uuid.UUID
     case_id: uuid.UUID
     requested_by_user_id: uuid.UUID
+    requested_by_name: str | None = None
     requested_from_user_id: uuid.UUID
+    requested_from_name: str | None = None
     question: str
     requested_information_type: str
     status: str
@@ -108,211 +189,149 @@ class VerificationContextRequestResponse(BaseModel):
     created_at: datetime
 
 
-class VerificationCaseItemResponse(BaseModel):
-    """Compact summary schema for queue browsing."""
-
-    model_config = ConfigDict(from_attributes=True)
+class VerificationCaseDetailResponse(BaseSchema):
+    """Complete Centre + Right panel payload for a selected finding."""
 
     id: uuid.UUID
-    organisation_id: uuid.UUID
     project_id: uuid.UUID
     target_type: str
     target_id: uuid.UUID
+    title: str
+    domain: str
+    original_ai_claim: str
+    current_claim: str
     case_status: str
-    machine_assessment_status: str
     priority: str
+    person_name: str | None = None
+    source_provider: str | None = None
     assigned_reviewer_id: uuid.UUID | None = None
-    machine_assessment_json: dict[str, Any] = Field(default_factory=dict)
+    assigned_reviewer_name: str | None = None
+    model_confidence: float | None = None
+    uncertainty_note: str | None = None
+    evidence_completeness: str | None = None
     version: int
-    open_issues_count: int = 0
-    open_conflicts_count: int = 0
+    handover_eligible: bool
+    handover_eligibility_reason: str
+    restricted_evidence_count: int = 0
+    evidence_references: list[EvidenceReferenceDetail] = Field(default_factory=list)
+    issues: list[VerificationIssueDetail] = Field(default_factory=list)
+    conflicts: list[VerificationConflictPreview] = Field(default_factory=list)
+    revisions: list[VerificationRevisionDetail] = Field(default_factory=list)
+    review_events: list[VerificationReviewEventDetail] = Field(default_factory=list)
+    context_requests: list[VerificationContextRequestDetail] = Field(default_factory=list)
+    machine_assessment: dict[str, Any] = Field(default_factory=dict)
+    priority_reason: str | None = None
+    recommendation: dict[str, Any] | None = None
+    completeness_assessment: dict[str, Any] | None = None
+    reliability_assessment: dict[str, Any] | None = None
+    freshness_assessment: dict[str, Any] | None = None
+    corroboration_assessment: dict[str, Any] | None = None
+    contradiction_analysis: dict[str, Any] | None = None
+    monitoring_status: dict[str, Any] | None = None
     last_assessed_at: datetime | None = None
     last_reviewed_at: datetime | None = None
     resolved_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
-    # Rich finding metadata for list browsing
-    title: str | None = None
-    summary: str | None = None
+
+# ---------------------------------------------------------------------------
+# Action Payloads (Right Panel)
+# ---------------------------------------------------------------------------
+
+
+def _require_non_empty(value: str, field_label: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{field_label} is required and cannot be empty.")
+    return cleaned
+
+
+class ApproveFindingRequest(BaseSchema):
+    reviewer_note: str | None = None
+    decision_reason: str | None = None
+
+
+class RejectFindingRequest(BaseSchema):
+    decision_reason: str = Field(..., min_length=3, max_length=4000)
+    reviewer_note: str | None = None
+
+    @field_validator("decision_reason")
+    @classmethod
+    def validate_reason(cls, v: str) -> str:
+        return _require_non_empty(v, "Rejection reason")
+
+
+class EditFindingRequest(BaseSchema):
+    current_claim: str = Field(..., min_length=3, max_length=8000)
     domain: str | None = None
-    category: str | None = None
-    confidence_score: float | None = None
-    finding: dict[str, Any] | None = None
-    status: str | None = None
-    risk_level: str | None = None
-    issue_count: int | None = None
+    edit_reason: str = Field(..., min_length=3, max_length=4000)
+    reviewer_note: str | None = None
+
+    @field_validator("current_claim")
+    @classmethod
+    def validate_claim(cls, v: str) -> str:
+        return _require_non_empty(v, "Structured claim")
+
+    @field_validator("edit_reason")
+    @classmethod
+    def validate_edit_reason(cls, v: str) -> str:
+        return _require_non_empty(v, "Correction reason")
 
 
-class VerificationCaseDetailResponse(BaseModel):
-    """Complete detail schema for inspecting and reviewing a case."""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    organisation_id: uuid.UUID
-    project_id: uuid.UUID
-    target_type: str
-    target_id: uuid.UUID
-    case_status: str
-    machine_assessment_status: str
-    priority: str
-    assigned_reviewer_id: uuid.UUID | None = None
-    machine_assessment_json: dict[str, Any] = Field(default_factory=dict)
-    version: int
-    last_assessed_at: datetime | None = None
-    last_reviewed_at: datetime | None = None
-    resolved_at: datetime | None = None
-    created_at: datetime
-    updated_at: datetime
-
-    target_data: dict[str, Any] = Field(default_factory=dict)
-    issues: list[VerificationIssueResponse] = Field(default_factory=list)
-    conflicts: list[VerificationConflictResponse] = Field(default_factory=list)
-    review_events: list[VerificationReviewEventResponse] = Field(default_factory=list)
-    context_requests: list[VerificationContextRequestResponse] = Field(default_factory=list)
-
-
-class VerificationQueueResponse(BaseModel):
-    """Paginated list of verification cases in the human review queue."""
-
-    items: list[VerificationCaseItemResponse]
-    total: int
-    limit: int
-    offset: int
-
-
-class VerificationSummaryResponse(BaseModel):
-    """Aggregated project verification metrics."""
-
-    total_cases: int
-    by_status: dict[str, int]
-    by_priority: dict[str, int]
-    open_issues_count: int
-    open_conflicts_count: int
-    pending_context_requests_count: int
-
-
-# ==============================================================================
-# Action Requests
-# ==============================================================================
-
-
-class ApproveCaseRequest(BaseModel):
-    """Request payload to approve a finding or relationship."""
-
-    expected_version: int | None = Field(default=None, description="Current optimistic version of the case.")
-    review_notes: str | None = Field(default=None, max_length=2000)
-    notes: str | None = Field(default=None, max_length=2000)
-
-
-class RejectCaseRequest(BaseModel):
-    """Request payload to reject a candidate finding or relationship."""
-
-    expected_version: int | None = Field(default=None)
-    reason: str = Field(default="Rejected during review", max_length=500)
-    review_notes: str | None = Field(default=None, max_length=2000)
-    notes: str | None = Field(default=None, max_length=2000)
-
-
-class EditFindingRequest(BaseModel):
-    """Request payload to correct finding details with diff tracking."""
-
-    expected_version: int | None = Field(default=None)
-    patch_data: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Fields to patch (title, summary, item_payload)."
-    )
-    title: str | None = None
-    summary: str | None = None
-    reason: str = Field(default="Auditor correction", max_length=500)
-
-
-class RequestContextRequest(BaseModel):
-    """Request payload to ask a clarification question."""
-
+class RequestContextRequest(BaseSchema):
+    question: str = Field(..., min_length=3, max_length=4000)
     requested_from_user_id: uuid.UUID
-    question: str = Field(min_length=5, max_length=2000)
-    requested_information_type: str = Field(default="general", max_length=64)
-    expected_version: int | None = None
+    requested_information_type: str = Field(default="clarification", max_length=64)
+    reviewer_note: str | None = None
+
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, v: str) -> str:
+        return _require_non_empty(v, "Clarification question")
 
 
-class MarkUnresolvedRequest(BaseModel):
-    """Request payload to mark a case as unresolved."""
-
-    expected_version: int | None = Field(default=None)
-    explanation: str = Field(default="Unresolved - consensus not established", max_length=2000)
-    reason: str | None = Field(default=None, max_length=2000)
-
-
-class AssignReviewerRequest(BaseModel):
-    """Request payload to assign or reassign a verification case."""
-
-    expected_version: int = Field(ge=1)
-    assignee_user_id: uuid.UUID | None = None
-
-
-class RespondContextRequest(BaseModel):
-    """Request payload to respond to a clarification question."""
-
-    response_text: str = Field(min_length=2, max_length=4000)
+class RespondContextRequest(BaseSchema):
+    response_text: str = Field(..., min_length=2, max_length=8000)
     response_evidence_id: uuid.UUID | None = None
+    excerpt: str | None = None
+
+    @field_validator("response_text")
+    @classmethod
+    def validate_response(cls, v: str) -> str:
+        return _require_non_empty(v, "Context response")
 
 
-class HandoverEligibilityResponse(BaseModel):
-    """Downstream eligibility assessment for handover package generation."""
+class MarkUnresolvedRequest(BaseSchema):
+    decision_reason: str = Field(..., min_length=3, max_length=4000)
+    reviewer_note: str | None = None
 
-    is_eligible: bool
-    target_type: str
-    target_id: uuid.UUID
-    case_status: str
-    epistemic_status: str
-    blockers: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
+    @field_validator("decision_reason")
+    @classmethod
+    def validate_reason(cls, v: str) -> str:
+        return _require_non_empty(v, "Unresolved explanation")
 
 
-class ConflictListResponse(BaseModel):
-    """Paginated list of detected cross-source conflicts."""
-
-    items: list[VerificationConflictResponse]
-    total: int
-    unresolved_count: int
-    reconciled_count: int
-    superseded_count: int
-    dismissed_count: int
+class AssignReviewerRequest(BaseSchema):
+    assigned_reviewer_id: uuid.UUID | None = None
 
 
-class ConflictSummaryResponse(BaseModel):
-    """Aggregated conflict statistics for the project."""
-
-    total_conflicts: int
-    unresolved_count: int
-    reconciled_count: int
-    superseded_count: int
-    dismissed_count: int
-    by_type: dict[str, int] = Field(default_factory=dict)
+class SyncAndAssessResponse(BaseSchema):
+    project_id: uuid.UUID
+    cases_created: int = 0
+    cases_updated: int = 0
+    issues_detected: int = 0
+    cases_assessed: int = 0
 
 
-class ResolveConflictRequest(BaseModel):
-    """Request payload to adjudicate a contradiction record."""
-
-    resolution_state: str = Field(
-        description="Resolution state: 'reconciled' | 'superseded' | 'dismissed'"
-    )
-    resolution_notes: str = Field(
-        min_length=3,
-        max_length=2000,
-        description="Mandatory reviewer rationale explaining the adjudication decision",
-    )
-    preferred_claim: str | None = Field(
-        default=None,
-        description="Which claim was accepted: 'a' | 'b' | 'both' | 'dismissed'",
-    )
+class MonitorSourceChangeRequest(BaseSchema):
+    evidence_id: uuid.UUID
+    change_type: str = "modified"
 
 
-class DetectConflictsResponse(BaseModel):
-    """Response returned after running cross-source conflict detection."""
-
-    detected_count: int
-    new_conflicts_count: int
-    message: str
+class MonitorSourceChangeResponse(BaseSchema):
+    evidence_id: uuid.UUID
+    change_type: str
+    affected_case_ids: list[uuid.UUID] = Field(default_factory=list)
+    reverification_triggered: bool = False
+    summary: str

@@ -122,12 +122,16 @@ export function AppLayout({ children }: { children: ReactNode }) {
   }
 
   // Wide container for data-dense routes
+  const isVerificationViewportRoute =
+    pathname === "/verification" ||
+    Boolean(pathname && /^\/projects\/[^/]+\/verification\/?$/.test(pathname));
+
   const isWide =
     pathname === "/evidence" ||
     pathname === "/audit" ||
     pathname === "/knowledge" ||
     pathname === "/relationships" ||
-    pathname === "/verification" ||
+    isVerificationViewportRoute ||
     pathname === "/conflicts" ||
     pathname === "/handover";
 
@@ -148,12 +152,21 @@ export function AppLayout({ children }: { children: ReactNode }) {
           onOpenSearch={() => setIsCommandPaletteOpen(true)}
         />
 
-        <main id="main-scroll" className="ambient-canvas scrollbar-thin flex-1 overflow-y-auto relative">
+        <main
+          id="main-scroll"
+          className={`ambient-canvas scrollbar-thin flex-1 min-h-0 relative ${
+            isVerificationViewportRoute
+              ? "overflow-y-auto md:overflow-hidden md:flex md:flex-col"
+              : "overflow-y-auto"
+          }`}
+        >
           <BrandLoadingScreen isLoading={!isMounted || !user || isLoadingAuth} />
 
           <div
-            className={`animate-fade mx-auto w-full px-4 py-6 sm:px-6 lg:px-8 lg:py-8 ${
-              isWide ? "max-w-[1600px]" : "max-w-[1360px]"
+            className={`animate-fade mx-auto w-full px-4 sm:px-6 lg:px-8 ${
+              isVerificationViewportRoute
+                ? "max-w-[1600px] py-4 lg:py-5 md:flex-1 md:min-h-0 md:flex md:flex-col"
+                : `py-6 lg:py-8 ${isWide ? "max-w-[1600px]" : "max-w-[1360px]"}`
             }`}
           >
             {isMounted && user && !user.is_email_verified ? (

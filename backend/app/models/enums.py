@@ -774,6 +774,17 @@ class VerificationCaseStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class VerificationCategory(StrEnum):
+    """Six canonical review categories defined in the Verification Center spec."""
+
+    EXTRACTED_FINDING_VERIFICATION = "extracted_finding_verification"
+    CONFLICTING_EVIDENCE = "conflicting_evidence"
+    MISSING_EVIDENCE = "missing_evidence"
+    OUTDATED_INFORMATION = "outdated_information"
+    UNCERTAIN_RELATIONSHIPS = "uncertain_relationships"
+    DUPLICATE_FINDINGS = "duplicate_findings"
+
+
 class MachineAssessmentStatus(StrEnum):
     """Deterministic & AI automated evaluation outcome."""
 
@@ -855,9 +866,33 @@ class ConflictResolutionState(StrEnum):
     """Resolution status for side-by-side contradiction records."""
 
     UNRESOLVED = "unresolved"
+    OPEN = "open"
+    UNDER_INVESTIGATION = "under_investigation"
+    AWAITING_CONTEXT = "awaiting_context"
+    RESOLVED = "resolved"
     RECONCILED = "reconciled"
     SUPERSEDED = "superseded"
     DISMISSED = "dismissed"
+    REOPENED = "reopened"
+
+
+class ConflictPriority(StrEnum):
+    """Priority level of a conflict."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class ConflictResolutionStrategy(StrEnum):
+    """Strategy applied when resolving a conflict."""
+
+    SIDE_A_AUTHORITATIVE = "side_a_authoritative"
+    SIDE_B_AUTHORITATIVE = "side_b_authoritative"
+    RECONCILED = "reconciled"
+    COEXISTING_VARIANTS = "coexisting_variants"
+    DISMISSED_FALSE_POSITIVE = "dismissed_false_positive"
 
 
 class ReviewActionType(StrEnum):
@@ -977,9 +1012,20 @@ class SignoffDecision(StrEnum):
 
 
 class TransferStatus(StrEnum):
-    """State tracking for a responsibility or ownership transfer."""
+    """State tracking for a responsibility or ownership transfer.
+
+    Preserves canonical legacy states (`pending`, `in_progress`, `completed`,
+    `rolled_back`, `failed`) alongside explicit Stage 5 governance milestones.
+    """
 
     PENDING = "pending"
+    PREPARED = "prepared"
+    AWAITING_OUTGOING_CONFIRMATION = "awaiting_outgoing_confirmation"
+    AWAITING_SUCCESSOR_ACKNOWLEDGEMENT = "awaiting_successor_acknowledgement"
+    ACKNOWLEDGED = "acknowledged"
+    BLOCKED = "blocked"
+    CLARIFICATION_REQUESTED = "clarification_requested"
+    REOPENED = "reopened"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     ROLLED_BACK = "rolled_back"

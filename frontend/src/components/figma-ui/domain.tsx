@@ -781,6 +781,7 @@ export const cnx = cn
 
 export function HandoverTable({ items, empty }: { items: Handover[]; empty?: ReactNode }) {
   const s = useFigmaStore()
+  const { projects, activeProject, members, user } = useLiveApp()
   if (!items.length) return <>{empty}</>
   return (
     <>
@@ -789,12 +790,15 @@ export function HandoverTable({ items, empty }: { items: Handover[]; empty?: Rea
           <thead><tr>{['Handover', 'Project', 'Outgoing → Incoming', 'Created', 'Progress', 'Review stage', 'Status'].map((h) => <th key={h} className="whitespace-nowrap border-b border-line bg-slate-50/70 px-4 py-2.5 text-xs font-medium text-muted first:pl-5 last:pr-5">{h}</th>)}</tr></thead>
           <tbody>
             {items.map((h) => {
-              const p = s.allProjects.find((x) => x.id === h.projectId)
+              const p = projects.find((x) => x.id === h.projectId) || (activeProject?.id === h.projectId ? activeProject : null) || s.allProjects.find((x) => x.id === h.projectId)
+              const pName = p?.name || activeProject?.name || 'Project'
+              const outName = members.find((m) => m.user_id === h.outgoingId || m.id === h.outgoingId)?.full_name || (user?.id === h.outgoingId ? (user.full_name || user.email) : null) || personById(h.outgoingId)?.name || 'Member'
+              const incName = h.incomingId ? (members.find((m) => m.user_id === h.incomingId || m.id === h.incomingId)?.full_name || (user?.id === h.incomingId ? (user.full_name || user.email) : null) || personById(h.incomingId)?.name || 'Member') : 'Unassigned'
               return (
                 <tr key={h.id} className="cursor-pointer border-b border-line/70 hover:bg-slate-50/70" onClick={() => navigate(`/handovers/${h.id}`)}>
                   <td className="py-3 pl-5 pr-4"><p className="font-medium text-navy">{h.code}</p><p className="max-w-[220px] truncate text-xs text-muted">{h.scope}</p></td>
-                  <td className="px-4 py-3"><span className="flex items-center gap-2"><span className="size-2 rounded-full" style={{ background: p?.color }} /><span className="whitespace-nowrap text-[13px] text-navy">{p?.name}</span></span></td>
-                  <td className="px-4 py-3"><span className="flex items-center gap-1.5 whitespace-nowrap"><Avatar id={h.outgoingId} size={24} /><ArrowRight className="size-3 text-slate-400" /><Avatar id={h.incomingId} size={24} /><span className="ml-1 text-[13px] text-muted">{personById(h.outgoingId)?.name?.split(' ')[0] ?? ''} → {personById(h.incomingId)?.name?.split(' ')[0] ?? ''}</span></span></td>
+                  <td className="px-4 py-3"><span className="flex items-center gap-2"><span className="size-2 rounded-full" style={{ background: (p as any)?.color || '#0F6CBD' }} /><span className="whitespace-nowrap text-[13px] text-navy">{pName}</span></span></td>
+                  <td className="px-4 py-3"><span className="flex items-center gap-1.5 whitespace-nowrap"><Avatar id={h.outgoingId} name={outName} size={24} /><ArrowRight className="size-3 text-slate-400" /><Avatar id={h.incomingId} name={incName} size={24} /><span className="ml-1 text-[13px] text-muted">{outName.split(' ')[0]} → {incName.split(' ')[0]}</span></span></td>
                   <td className="whitespace-nowrap px-4 py-3 text-[13px] text-muted">{h.created}</td>
                   <td className="w-36 px-4 py-3"><div className="flex items-center gap-2"><div className="h-1.5 flex-1 rounded-full bg-slate-100"><div className={cn('h-full rounded-full', h.progress === 100 ? 'bg-ok' : 'bg-brand')} style={{ width: `${h.progress}%` }} /></div><span className="text-xs text-muted">{h.progress}%</span></div></td>
                   <td className="px-4 py-3"><StageDots status={h.status} /></td>
@@ -806,13 +810,19 @@ export function HandoverTable({ items, empty }: { items: Handover[]; empty?: Rea
         </table>
       </div>
       <ul className="divide-y divide-line md:hidden">
-        {items.map((h) => (
-          <li key={h.id}><LinkTo to={`/handovers/${h.id}`} className="block px-4 py-3.5">
-            <div className="flex items-center justify-between"><p className="font-medium text-navy">{h.code}</p><StatusPill status={h.status} /></div>
-            <p className="mt-0.5 text-xs text-muted">{s.allProjects.find((x) => x.id === h.projectId)?.name} · {personById(h.outgoingId)?.name?.split(' ')[0] ?? ''} → {personById(h.incomingId)?.name?.split(' ')[0] ?? ''}</p>
-            <div className="mt-2 h-1.5 rounded-full bg-slate-100"><div className="h-full rounded-full bg-brand" style={{ width: `${h.progress}%` }} /></div>
-          </LinkTo></li>
-        ))}
+        {items.map((h) => {
+          const p = projects.find((x) => x.id === h.projectId) || (activeProject?.id === h.projectId ? activeProject : null) || s.allProjects.find((x) => x.id === h.projectId)
+          const pName = p?.name || activeProject?.name || 'Project'
+          const outName = members.find((m) => m.user_id === h.outgoingId || m.id === h.outgoingId)?.full_name || (user?.id === h.outgoingId ? (user.full_name || user.email) : null) || personById(h.outgoingId)?.name || 'Member'
+          const incName = h.incomingId ? (members.find((m) => m.user_id === h.incomingId || m.id === h.incomingId)?.full_name || (user?.id === h.incomingId ? (user.full_name || user.email) : null) || personById(h.incomingId)?.name || 'Member') : 'Unassigned'
+          return (
+            <li key={h.id}><LinkTo to={`/handovers/${h.id}`} className="block px-4 py-3.5">
+              <div className="flex items-center justify-between"><p className="font-medium text-navy">{h.code}</p><StatusPill status={h.status} /></div>
+              <p className="mt-0.5 text-xs text-muted">{pName} · {outName.split(' ')[0]} → {incName.split(' ')[0]}</p>
+              <div className="mt-2 h-1.5 rounded-full bg-slate-100"><div className="h-full rounded-full bg-brand" style={{ width: `${h.progress}%` }} /></div>
+            </LinkTo></li>
+          )
+        })}
       </ul>
     </>
   )
