@@ -1,0 +1,263 @@
+import React from "react";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
+import {
+  buildAmeliorateFlowchartElements,
+  resolveIncrementalNodePositions,
+  type HandoverGraphEdge,
+  type HandoverGraphNode,
+} from "../components/knowledge/ameliorate/ameliorateAdapter";
+import { AmeliorateFlowchartCanvas } from "../components/knowledge/ameliorate/AmeliorateFlowchartCanvas";
+
+let lastMiniMapProps: Record<string, unknown> = {};
+const mockFitView = vi.fn();
+const mockGetViewport = vi.fn(() => ({ x: 10, y: 20, zoom: 0.85 }));
+const mockSetViewport = vi.fn();
+
+vi.mock("@xyflow/react", () => ({
+  ReactFlow: ({
+    nodes,
+    children,
+    onInit,
+    onNodeClick,
+  }: {
+    nodes: Array<{ id: string }>;
+    children?: React.ReactNode;
+    onInit?: (inst: unknown) => void;
+    onNodeClick?: (e: unknown, node: unknown) => void;
+  }) => {
+    React.useEffect(() => {
+      onInit?.({
+        fitView: mockFitView,
+        getViewport: mockGetViewport,
+        setViewport: mockSetViewport,
+      });
+    }, [onInit]);
+    return (
+      <div data-testid="react-flow-mock">
+        {nodes.map((n) => (
+          <button
+            key={n.id}
+            type="button"
+            data-testid={`mock-node-${n.id}`}
+            onClick={() => onNodeClick?.({}, n)}
+          >
+            {n.id}
+          </button>
+        ))}
+        {children}
+      </div>
+    );
+  },
+  Controls: () => <div data-testid="rf-controls" />,
+  Background: () => <div data-testid="rf-background" />,
+  MiniMap: (props: Record<string, unknown>) => {
+    lastMiniMapProps = props;
+    return <div data-testid="rf-minimap" />;
+  },
+  useNodesState: (init: unknown[]) => {
+    const [val, setVal] = React.useState(init);
+    return [val, setVal, vi.fn()];
+  },
+  useEdgesState: (init: unknown[]) => {
+    const [val, setVal] = React.useState(init);
+    return [val, setVal, vi.fn()];
+  },
+  MarkerType: { ArrowClosed: "arrowclosed" },
+  Handle: () => null,
+  Position: { Top: "top", Bottom: "bottom" },
+  getBezierPath: () => ["M0,0 L10,10", 5, 5],
+  EdgeLabelRenderer: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
+}));
+
+function makeNode(id: string, type = "technical_component"): HandoverGraphNode {
+  return {
+    id,
+    entity_type: type,
+    label: `Node ${id}`,
+    status: "SOURCE_EXTRACTED",
+    verification_status: "unverified",
+    evidence_count: 1,
+    evidence_ids: [],
+    aliases: [],
+    metadata: {},
+  };
+}
+
+function makeEdge(source: string, target: string, idx = 0): HandoverGraphEdge {
+  return {
+    id: `e-${source}-${target}-${idx}`,
+    source,
+    target,
+    relationship_type: "depends_on",
+    label: "depends on",
+    evidence_basis: "explicit",
+    verification_status: "unverified",
+    confidence_score: 0.9,
+    evidence_ids: [],
+  };
+}
+
+function assertNoNodeOverlaps(nodes: Array<{ id: string; position: { x: number; y: number } }>) {
+  const W = 204;
+  const H = 104;
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i]!;
+      const b = nodes[j]!;
+      const overlapX = Math.abs(a.position.x - b.position.x) < W;
+      const overlapY = Math.abs(a.position.y - b.position.y) < H;
+      expect(overlapX && overlapY, `Overlap between ${a.id} and ${b.id}`).toBe(false);
+    }
+  }
+}
+
+describe("Adaptive Graph Layouts, MiniMap & Fullscreen", () => {
+  beforeEach(() => {
+    lastMiniMapProps = {};
+    mockFitView.mockClear();
+    mockGetViewport.mockClear();
+    mockSetViewport.mockClear();
+  });
+
+  const topologies: Array<{
+    name: string;
+    build: () => { nodes: HandoverGraphNode[]; edges: HandoverGraphEdge[] };
+  }> = [
+    {
+      name: "2 nodes / 1 edge",
+      build: () => ({
+        nodes: [makeNode("a"), makeNode("b")],
+        edges: [makeEdge("a", "b")],
+      }),
+    },
+    {
+      name: "5 nodes hub-and-spoke",
+      build: () => ({
+        nodes: ["hub", "s1", "s2", "s3", "s4"].map((id) => makeNode(id)),
+        edges: ["s1", "s2", "s3", "s4"].map((s, i) => makeEdge("hub", s, i)),
+      }),
+    },
+    {
+      name: "12 nodes branching hierarchy",
+      build: () => {
+        const nodes = Array.from({ length: 12 }, (_, i) => makeNode(`h${i}`));
+        const edges: HandoverGraphEdge[] = [];
+        for (let i = 1; i < 12; i++) {
+          edges.push(makeEdge(`h${Math.floor((i - 1) / 2)}`, `h${i}`, i));
+        }
+        return { nodes, edges };
+      },
+    },
+    {
+      name: "20 nodes multiple connected components",
+      build: () => {
+        const nodes = Array.from({ length: 20 }, (_, i) => makeNode(`m${i}`));
+        const edges: HandoverGraphEdge[] = [];
+        for (let g = 0; g < 4; g++) {
+          const base = g * 5;
+          for (let k = 1; k < 5; k++) {
+            edges.push(makeEdge(`m${base}`, `m${base + k}`, base + k));
+          }
+        }
+        return { nodes, edges };
+      },
+    },
+    {
+      name: "45 nodes dense cross-connected graph",
+      build: () => {
+        const nodes = Array.from({ length: 45 }, (_, i) => makeNode(`d${i}`));
+        const edges: HandoverGraphEdge[] = [];
+        let eid = 0;
+        for (let i = 0; i < 45; i++) {
+          edges.push(makeEdge(`d${i}`, `d${(i + 1) % 45}`, eid++));
+          edges.push(makeEdge(`d${i}`, `d${(i + 7) % 45}`, eid++));
+        }
+        return { nodes, edges };
+      },
+    },
+    {
+      name: "70 nodes large graph",
+      build: () => {
+        const nodes = Array.from({ length: 70 }, (_, i) => makeNode(`lg${i}`));
+        const edges = Array.from({ length: 69 }, (_, i) => makeEdge(`lg${Math.floor(i / 3)}`, `lg${i + 1}`, i));
+        return { nodes, edges };
+      },
+    },
+  ];
+
+  const viewports = [
+    { label: "wide", viewportWidth: 1600, viewportHeight: 700 },
+    { label: "tall", viewportWidth: 600, viewportHeight: 1000 },
+    { label: "laptop", viewportWidth: 1024, viewportHeight: 600 },
+    { label: "fullscreen", viewportWidth: 1920, viewportHeight: 1080 },
+  ];
+
+  for (const topo of topologies) {
+    for (const vp of viewports) {
+      it(`lays out ${topo.name} cleanly in ${vp.label} viewport with zero overlaps and deterministic coordinates`, () => {
+        const { nodes: rawNodes, edges: rawEdges } = topo.build();
+        const first = buildAmeliorateFlowchartElements(rawNodes, rawEdges, null, vp);
+        const second = buildAmeliorateFlowchartElements(rawNodes, rawEdges, null, vp);
+
+        expect(first.nodes).toHaveLength(rawNodes.length);
+        assertNoNodeOverlaps(first.nodes);
+        expect(first.nodes.map((n) => n.position)).toEqual(second.nodes.map((n) => n.position));
+      });
+    }
+  }
+
+  it("preserves existing node positions during incremental background updates", () => {
+    const initialNodes = [makeNode("n1"), makeNode("n2")];
+    const initialEdges = [makeEdge("n1", "n2")];
+    const layout1 = buildAmeliorateFlowchartElements(initialNodes, initialEdges, null);
+
+    const existingPos = new Map<string, { x: number; y: number }>();
+    existingPos.set("n1", { x: 420, y: 180 });
+    existingPos.set("n2", { x: 760, y: 310 });
+
+    const nextNodes = [makeNode("n1"), makeNode("n2"), makeNode("n3")];
+    const nextEdges = [makeEdge("n1", "n2"), makeEdge("n2", "n3", 1)];
+    const layout2 = buildAmeliorateFlowchartElements(nextNodes, nextEdges, null);
+    const resolved = resolveIncrementalNodePositions(layout2.nodes, layout2.edges, existingPos);
+
+    const p1 = resolved.find((n) => n.id === "n1")!.position;
+    const p2 = resolved.find((n) => n.id === "n2")!.position;
+    expect(p1).toEqual({ x: 420, y: 180 });
+    expect(p2).toEqual({ x: 760, y: 310 });
+    expect(layout1.nodes.length).toBe(2);
+    assertNoNodeOverlaps(resolved);
+  });
+
+  it("renders interactive MiniMap (pannable, zoomable, bottom-right) and supports Fullscreen + Escape", () => {
+    const rawNodes = [makeNode("a"), makeNode("b"), makeNode("c")];
+    const rawEdges = [makeEdge("a", "b"), makeEdge("b", "c", 1)];
+    const onSelectNode = vi.fn();
+
+    render(
+      <AmeliorateFlowchartCanvas
+        rawNodes={rawNodes}
+        rawEdges={rawEdges}
+        selectedNodeId="a"
+        onSelectNode={onSelectNode}
+      />
+    );
+
+    expect(screen.getByTestId("rf-minimap")).toBeInTheDocument();
+    expect(lastMiniMapProps.pannable).toBe(true);
+    expect(lastMiniMapProps.zoomable).toBe(true);
+    expect(lastMiniMapProps.position).toBe("bottom-right");
+
+    const fsBtn = screen.getByRole("button", { name: /Expand to fullscreen/i });
+    fireEvent.click(fsBtn);
+
+    const container = screen.getByTestId("ameliorate-graph-container");
+    expect(container.className).toContain("fixed inset-0");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(container.className).not.toContain("fixed inset-0");
+
+    fireEvent.click(screen.getByTestId("mock-node-b"));
+    expect(onSelectNode).toHaveBeenCalledTimes(1);
+  });
+});
