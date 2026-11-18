@@ -59,6 +59,9 @@ export interface AmeliorateNodeData extends Record<string, unknown> {
 export interface AmeliorateEdgeData extends Record<string, unknown> {
   raw: HandoverGraphEdge;
   spotlight: AmeliorateSpotlight;
+  labelX?: number;
+  labelY?: number;
+  hasCollision?: boolean;
 }
 
 export const AMELIORATE_PRIMARY_SPOTLIGHT = "#4f46e5";
@@ -175,6 +178,72 @@ const ENTITY_THEME_MAP: Record<string, AmeliorateNodeTheme> = {
     badgeText: "#ffffff",
     typeLabel: "Integration",
   },
+  confirmed_member: {
+    borderColor: "#4f46e5",
+    badgeBg: "#4338ca",
+    badgeText: "#ffffff",
+    typeLabel: "Project Member",
+  },
+  project_member: {
+    borderColor: "#4f46e5",
+    badgeBg: "#4338ca",
+    badgeText: "#ffffff",
+    typeLabel: "Project Member",
+  },
+  work_cluster: {
+    borderColor: "#059669",
+    badgeBg: "#047857",
+    badgeText: "#ffffff",
+    typeLabel: "Work Cluster",
+  },
+  external_contributor: {
+    borderColor: "#64748b",
+    badgeBg: "#475569",
+    badgeText: "#ffffff",
+    typeLabel: "External",
+  },
+  bot: {
+    borderColor: "#71717a",
+    badgeBg: "#52525b",
+    badgeText: "#ffffff",
+    typeLabel: "Bot",
+  },
+  contributor: {
+    borderColor: "#f59e0b",
+    badgeBg: "#d97706",
+    badgeText: "#ffffff",
+    typeLabel: "Contributor",
+  },
+  person: {
+    borderColor: "#4f46e5",
+    badgeBg: "#4338ca",
+    badgeText: "#ffffff",
+    typeLabel: "Contributor",
+  },
+  decision: {
+    borderColor: "#d97706",
+    badgeBg: "#b45309",
+    badgeText: "#ffffff",
+    typeLabel: "Decision",
+  },
+  commit: {
+    borderColor: "#6366f1",
+    badgeBg: "#4f46e5",
+    badgeText: "#ffffff",
+    typeLabel: "Commit",
+  },
+  pull_request: {
+    borderColor: "#8b5cf6",
+    badgeBg: "#7c3aed",
+    badgeText: "#ffffff",
+    typeLabel: "Pull Request",
+  },
+  issue: {
+    borderColor: "#0ea5e9",
+    badgeBg: "#0284c7",
+    badgeText: "#ffffff",
+    typeLabel: "Issue",
+  },
 };
 
 const FALLBACK_THEME: AmeliorateNodeTheme = {
@@ -188,6 +257,24 @@ export function resolveAmeliorateNodeTheme(node: HandoverGraphNode): AmeliorateN
   const canon = (node.label || "").toLowerCase();
   const type = (node.entity_type || "").toLowerCase();
   const cat = (node.category || "").toLowerCase();
+
+  if (node.metadata?.customTypeLabel && (ENTITY_THEME_MAP[type] || ENTITY_THEME_MAP[cat])) {
+    const baseTheme = ENTITY_THEME_MAP[type] ?? ENTITY_THEME_MAP[cat] ?? FALLBACK_THEME;
+    return {
+      ...baseTheme,
+      typeLabel: String(node.metadata.customTypeLabel),
+    };
+  }
+
+  if (type === "confirmed_member" || cat === "confirmed_member" || type === "project_member") return ENTITY_THEME_MAP["confirmed_member"]!;
+  if (type === "work_cluster" || cat === "work_cluster") return ENTITY_THEME_MAP["work_cluster"]!;
+  if (type === "external_contributor" || cat === "external_contributor") return ENTITY_THEME_MAP["external_contributor"]!;
+  if (type === "bot" || cat === "bot") return ENTITY_THEME_MAP["bot"]!;
+  if (type === "contributor" || cat === "unidentified") return ENTITY_THEME_MAP["contributor"]!;
+  if (type === "decision" || cat === "decision") return ENTITY_THEME_MAP["decision"]!;
+  if (type === "commit" || cat === "commit") return ENTITY_THEME_MAP["commit"]!;
+  if (type === "pull_request" || cat === "pull_request") return ENTITY_THEME_MAP["pull_request"]!;
+  if (type === "issue" || cat === "issue") return ENTITY_THEME_MAP["issue"]!;
 
   if (type === "project" || canon === "skillspassport") return ENTITY_THEME_MAP["project"] ?? FALLBACK_THEME;
   if (canon.includes("next") || canon.includes("react") || cat === "frontend") return ENTITY_THEME_MAP["frontend"] ?? FALLBACK_THEME;
@@ -210,9 +297,21 @@ export function resolveNodeTier(node: HandoverGraphNode): number {
   const type = (node.entity_type || "").toLowerCase();
   const cat = (node.category || "").toLowerCase();
 
-  // Tier 0: Project root / System client entry
+  // Tier 0: Project root / System client entry / Confirmed Project Members
   if (type === "project" || canon === "skillspassport") return 0;
   if (canon === "browser" || canon.includes("web client")) return 0;
+  if (type === "confirmed_member" || cat === "confirmed_member" || type === "project_member") return 0;
+
+  // Tier 1: External / Unmapped Contributors / Decision
+  if (type === "contributor" || type === "external_contributor" || type === "bot" || cat === "unidentified" || type === "person") return 1;
+
+  // Tier 2: Work Clusters / Technical Components
+  if (type === "work_cluster" || cat === "work_cluster") return 2;
+
+  // Features & Workflows semantics: Product -> Features -> Workflow Steps -> Outcomes/Requirements
+  if (type === "feature") return 1;
+  if (type === "operational_procedure" || cat === "workflow_step") return 2;
+  if (type === "requirement" || type === "work_item") return 3;
 
   // Tier 1: Frontend framework / UI library / API Gateway routes
   if (canon.includes("next") || canon.includes("react") || canon.includes("routes") || cat === "frontend") return 1;
@@ -226,8 +325,9 @@ export function resolveNodeTier(node: HandoverGraphNode): number {
   // Tier 4: AI Inference Runtime & Vector Store
   if (canon.includes("ollama") || canon.includes("qwen") || canon.includes("chroma") || cat === "ai_ml") return 4;
 
-  // Tier 5: External Data Sources & Integrations
+  // Tier 5: External Data Sources & Integrations / Artefacts
   if (canon.includes("github") || canon.includes("jira") || canon.includes("slack") || cat === "external_integrations") return 5;
+  if (type === "commit" || type === "pull_request" || type === "issue") return 3;
 
   return 2;
 }
@@ -289,8 +389,8 @@ export function buildAmeliorateFlowchartElements(
     }
   }
 
-  const NODE_COL_GAP = 220;
-  const NODE_ROW_GAP = 135;
+  const NODE_COL_GAP = 330;
+  const NODE_ROW_GAP = 280;
 
   // Standard max width: 3 nodes
   const maxRowItems = Math.min(Math.max(...visualRows.map((r) => r.length), 1), 3);
@@ -344,7 +444,57 @@ export function buildAmeliorateFlowchartElements(
     });
   });
 
-  const edges: Edge<AmeliorateEdgeData>[] = validEdges.map((e) => {
+  // Node card bounding boxes for collision checking (card is 196w x ~96h, give 28px safety halo)
+  const NODE_W = 196;
+  const NODE_H = 96;
+  const nodeBoxes: Array<{ xmin: number; xmax: number; ymin: number; ymax: number }> = [];
+  nodePosMap.forEach(({ x, y }) => {
+    nodeBoxes.push({
+      xmin: x - 28,
+      xmax: x + NODE_W + 28,
+      ymin: y - 28,
+      ymax: y + NODE_H + 28,
+    });
+  });
+
+  // Consolidate parallel edges between the same node pair regardless of direction to avoid duplicate lines and overlapping labels
+  const edgePairMap = new Map<string, HandoverGraphEdge[]>();
+  for (const e of validEdges) {
+    const key = [e.source, e.target].sort().join("<->");
+    const list = edgePairMap.get(key) || [];
+    list.push(e);
+    edgePairMap.set(key, list);
+  }
+
+  const consolidatedEdges: HandoverGraphEdge[] = [];
+  for (const [, pairList] of edgePairMap) {
+    if (!pairList || pairList.length === 0) continue;
+    const primary = pairList[0];
+    if (!primary) continue;
+    if (pairList.length === 1) {
+      consolidatedEdges.push(primary);
+    } else {
+      // Merge multi-edges between the same pair into a single edge with distinct labels
+      const distinctLabels = Array.from(new Set(pairList.map((e) => e.label).filter(Boolean)));
+      const combinedLabel = distinctLabels.join(" · ");
+      const combinedEvidenceIds = Array.from(new Set(pairList.flatMap((e) => e.evidence_ids || [])));
+      consolidatedEdges.push({
+        id: pairList.map((e) => e.id).join("__"),
+        source: primary.source,
+        target: primary.target,
+        relationship_type: primary.relationship_type,
+        label: combinedLabel,
+        evidence_basis: primary.evidence_basis,
+        verification_status: primary.verification_status,
+        confidence_score: primary.confidence_score,
+        evidence_ids: combinedEvidenceIds,
+      });
+    }
+  }
+
+  const placedLabels: Array<{ x: number; y: number; w: number; h: number }> = [];
+
+  const edges: Edge<AmeliorateEdgeData>[] = consolidatedEdges.map((e) => {
     const spotlight: AmeliorateSpotlight =
       selectedNodeId && (e.source === selectedNodeId || e.target === selectedNodeId)
         ? "primary"
@@ -353,6 +503,79 @@ export function buildAmeliorateFlowchartElements(
       spotlight === "primary"
         ? AMELIORATE_PRIMARY_SPOTLIGHT
         : AMELIORATE_DEFAULT_EDGE_COLOR;
+
+    let customLabelX: number | undefined;
+    let customLabelY: number | undefined;
+    let hasCollision = false;
+
+    const sPos = nodePosMap.get(e.source);
+    const tPos = nodePosMap.get(e.target);
+
+    if (e.label && sPos && tPos) {
+      const sx = sPos.x + NODE_W / 2;
+      const sy = sPos.y + NODE_H;
+      const tx = tPos.x + NODE_W / 2;
+      const ty = tPos.y;
+      const dy = ty - sy;
+
+      const p0: [number, number] = [sx, sy];
+      const c = Math.max(35, Math.abs(dy) * 0.45);
+      const p1: [number, number] = [sx, sy + c];
+      const p2: [number, number] = [tx, ty - c];
+      const p3: [number, number] = [tx, ty];
+
+      const lblW = Math.max(54, e.label.length * 6.5 + 20);
+      const lblH = 22;
+
+      // Conservative candidate positions strictly along the bezier curve
+      const candidateTs = [0.50, 0.40, 0.60];
+      let chosenX: number | null = null;
+      let chosenY: number | null = null;
+
+      for (const t of candidateTs) {
+        const mt = 1 - t;
+        const bx = mt * mt * mt * p0[0] + 3 * mt * mt * t * p1[0] + 3 * mt * t * t * p2[0] + t * t * t * p3[0];
+        const by = mt * mt * mt * p0[1] + 3 * mt * mt * t * p1[1] + 3 * mt * t * t * p2[1] + t * t * t * p3[1];
+        const cx = bx;
+        const cy = by;
+
+        // Strict zero-node-collision guarantee: label must not overlap any node card or its safety halo
+        const collidesWithNode = nodeBoxes.some(
+          (b) =>
+            cx + lblW / 2 > b.xmin &&
+            cx - lblW / 2 < b.xmax &&
+            cy + lblH / 2 > b.ymin &&
+            cy - lblH / 2 < b.ymax
+        );
+        if (collidesWithNode) continue;
+
+        // Strict zero-label-collision guarantee: label must not overlap any already-placed label
+        const collidesWithLabel = placedLabels.some((pl) => {
+          const xDist = Math.abs(cx - pl.x);
+          const yDist = Math.abs(cy - pl.y);
+          const minXDist = (lblW + pl.w) / 2 + 20;
+          const minYDist = (lblH + pl.h) / 2 + 14;
+          return xDist < minXDist && yDist < minYDist;
+        });
+        if (collidesWithLabel) continue;
+
+        chosenX = cx;
+        chosenY = cy;
+        break;
+      }
+
+      if (chosenX !== null && chosenY !== null) {
+        placedLabels.push({ x: chosenX, y: chosenY, w: lblW, h: lblH });
+        customLabelX = Math.round(chosenX);
+        customLabelY = Math.round(chosenY);
+        hasCollision = false;
+      } else {
+        // In crowded channels where space is contested, mark hasCollision so the label stays clean & hidden until hover/select
+        customLabelX = Math.round((sx + tx) / 2);
+        customLabelY = Math.round((sy + ty) / 2);
+        hasCollision = true;
+      }
+    }
 
     return {
       id: e.id,
@@ -371,9 +594,87 @@ export function buildAmeliorateFlowchartElements(
       data: {
         raw: e,
         spotlight,
+        labelX: customLabelX,
+        labelY: customLabelY,
+        hasCollision,
       },
     };
   });
 
   return { nodes, edges };
+}
+
+export function updateAmeliorateSpotlight(
+  nodes: Node<AmeliorateNodeData>[],
+  edges: Edge<AmeliorateEdgeData>[],
+  selectedNodeId: string | null
+): { nodes: Node<AmeliorateNodeData>[]; edges: Edge<AmeliorateEdgeData>[] } {
+  const neighborSet = new Set<string>();
+  if (selectedNodeId) {
+    for (const e of edges) {
+      if (e.source === selectedNodeId) neighborSet.add(e.target);
+      if (e.target === selectedNodeId) neighborSet.add(e.source);
+    }
+  }
+
+  const updatedNodes = nodes.map((n) => {
+    const isSelected = selectedNodeId === n.id;
+    const spotlight: AmeliorateSpotlight =
+      isSelected
+        ? "primary"
+        : selectedNodeId && neighborSet.has(n.id)
+        ? "secondary"
+        : "normal";
+    if (n.selected === isSelected && n.data.spotlight === spotlight) {
+      return n;
+    }
+    return {
+      ...n,
+      selected: isSelected,
+      data: {
+        ...n.data,
+        spotlight,
+      },
+    };
+  });
+
+  const updatedEdges: Edge<AmeliorateEdgeData>[] = edges.map((e) => {
+    const spotlight: AmeliorateSpotlight =
+      selectedNodeId && (e.source === selectedNodeId || e.target === selectedNodeId)
+        ? "primary"
+        : "normal";
+    const strokeColor =
+      spotlight === "primary"
+        ? AMELIORATE_PRIMARY_SPOTLIGHT
+        : AMELIORATE_DEFAULT_EDGE_COLOR;
+    const markerEndObj = typeof e.markerEnd === "object" && e.markerEnd !== null ? e.markerEnd : null;
+    const currentColor = markerEndObj && "color" in markerEndObj ? (markerEndObj as { color?: string }).color : undefined;
+    if (e.data?.spotlight === spotlight && currentColor === strokeColor) {
+      return e;
+    }
+    const edgeData = e.data;
+    if (!edgeData) {
+      return e;
+    }
+    const updatedEdge: Edge<AmeliorateEdgeData> = {
+      ...e,
+      markerEnd: {
+        ...(markerEndObj || {}),
+        type: MarkerType.ArrowClosed,
+        color: strokeColor,
+        width: 14,
+        height: 14,
+      },
+      data: {
+        raw: edgeData.raw,
+        spotlight,
+        labelX: edgeData.labelX,
+        labelY: edgeData.labelY,
+        hasCollision: edgeData.hasCollision,
+      },
+    };
+    return updatedEdge;
+  });
+
+  return { nodes: updatedNodes, edges: updatedEdges };
 }

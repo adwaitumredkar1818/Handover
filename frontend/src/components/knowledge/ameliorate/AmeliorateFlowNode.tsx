@@ -19,6 +19,15 @@ import {
   Network,
   Database,
   BookOpen,
+  UserCheck,
+  User,
+  UserX,
+  Bot,
+  FolderGit2,
+  GitBranch,
+  GitCommit,
+  GitPullRequest,
+  AlertCircle,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -29,6 +38,15 @@ import {
 
 function getNodeCategoryIcon(typeLabel: string): LucideIcon {
   const norm = typeLabel.toLowerCase();
+  if (norm.includes("member")) return UserCheck;
+  if (norm.includes("external")) return UserX;
+  if (norm.includes("bot")) return Bot;
+  if (norm.includes("contributor") || norm.includes("person")) return User;
+  if (norm.includes("cluster")) return FolderGit2;
+  if (norm.includes("decision")) return GitBranch;
+  if (norm.includes("commit")) return GitCommit;
+  if (norm.includes("pull request")) return GitPullRequest;
+  if (norm.includes("issue")) return AlertCircle;
   if (norm.includes("project")) return Boxes;
   if (norm.includes("feature")) return Sparkles;
   if (norm.includes("requirement")) return Zap;
@@ -105,10 +123,15 @@ function AmeliorateFlowNodeBase({ data, selected }: NodeProps) {
       </div>
 
       {/* Middle body: clean centered Ameliorate node text */}
-      <div className="flex flex-1 items-center justify-center px-3 py-1.5">
+      <div className="flex flex-1 flex-col items-center justify-center px-3 py-1.5">
         <p className="text-[13px] font-medium leading-snug text-slate-800 text-center line-clamp-2">
           {raw.label}
         </p>
+        {(raw.metadata?.identity_note || raw.metadata?.subtitle || (raw.metadata?.contribution_count !== undefined && Number(raw.metadata.contribution_count) > 0 ? `${raw.metadata.contribution_count} contrib(s)` : null)) && (
+          <p className="text-[10px] text-slate-500 text-center truncate max-w-[175px] mt-0.5 leading-none">
+            {String(raw.metadata?.identity_note || raw.metadata?.subtitle || `${raw.metadata?.contribution_count} contrib(s)`)}
+          </p>
+        )}
       </div>
     </div>
   );
