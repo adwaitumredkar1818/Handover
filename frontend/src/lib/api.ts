@@ -25,6 +25,7 @@ import type {
   RegisterWithInvitationResponse,
   VerifyEmailResponse,
   RequestEmailVerificationResponse,
+  ProjectProcessingStatus,
 } from "./types";
 
 export function getApiBaseUrl(): string {
@@ -282,11 +283,19 @@ async function requestInternal<T>(
     headers["Content-Type"] = "application/json";
   }
 
-  const res = await fetch(url, {
-    ...options,
-    credentials: options.credentials || "include",
-    headers,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...options,
+      credentials: options.credentials || "include",
+      headers,
+    });
+  } catch (err: unknown) {
+    if (err instanceof ApiError) throw err;
+    throw new ApiError("Network unavailable or server restarting", 0, {
+      originalError: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   if (
     res.status === 401 &&
@@ -705,6 +714,14 @@ export const api = {
         }
       );
     },
+    async getProcessingStatus(projectId: string): Promise<ProjectProcessingStatus> {
+      return request<ProjectProcessingStatus>(`/projects/${projectId}/processing-status`);
+    },
+    async retryProcessing(projectId: string): Promise<ProjectProcessingStatus> {
+      return request<ProjectProcessingStatus>(`/projects/${projectId}/processing-status/retry`, {
+        method: "POST",
+      });
+    },
   },
 
   // Project Members & Transition Roles
@@ -895,6 +912,11 @@ export const api = {
     },
     async reprocess(projectId: string, evidenceId: string): Promise<unknown> {
       return request<unknown>(`/projects/${projectId}/evidence/${evidenceId}/reprocess`, {
+        method: "POST",
+      });
+    },
+    async extract(projectId: string, evidenceId: string): Promise<unknown> {
+      return request<unknown>(`/projects/${projectId}/evidence/${evidenceId}/extract`, {
         method: "POST",
       });
     },
@@ -1554,6 +1576,19 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ reason }),
       });
+    },
+    async reviewFinding(
+      projectId: string,
+      findingId: string,
+      payload: { action: "approve" | "flag" | "reject"; notes?: string }
+    ): Promise<Record<string, unknown>> {
+      return request(
+        `/projects/${projectId}/verification/findings/${findingId}/review`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      );
     },
     async editFinding(projectId: string, caseId: string, payload: { title?: string; summary?: string; expected_version: number; reason?: string }): Promise<Record<string, unknown>> {
       return request(`/projects/${projectId}/verification/cases/${caseId}/finding`, {

@@ -207,6 +207,9 @@ export interface EvidenceSummary {
   content_hash: string;
   indexing_status: string;
   processing_status?: string;
+  lifecycle_stage?: string;
+  semantic_status?: string | null;
+  knowledge_count?: number;
   error_code?: string | null;
   error_message?: string | null;
   extracted_text_preview?: string | null;
@@ -258,6 +261,29 @@ export interface EvidenceDetail {
   can_download: boolean;
   download_url?: string | null;
   chunks: EvidenceChunkDetail[];
+  lifecycle_stage?: string;
+  semantic_status?: string | null;
+  knowledge_count?: number;
+  linked_knowledge_items?: Array<{
+    id: string;
+    category: string;
+    title: string;
+    summary: string;
+    confidence?: number;
+    epistemic_status?: string;
+  }>;
+  linked_entities?: Array<{
+    id: string;
+    name: string;
+    entity_type: string;
+    category?: string;
+  }>;
+  linked_relationships?: Array<{
+    id: string;
+    source: string;
+    target: string;
+    relationship_type: string;
+  }>;
 }
 
 export interface EvidenceMetrics {
@@ -778,4 +804,43 @@ export interface NotificationPreferences {
   integration_alerts: boolean;
   project_updates: boolean;
   updated_at?: string | null;
+}
+
+export interface ProjectProcessingStatus {
+  state: "no_evidence" | "queued" | "processing" | "partially_ready" | "ready" | "failed" | "insufficient_evidence";
+  state_label: string;
+  is_processing: boolean;
+  stage: "parsing" | "syncing" | "indexing" | "extracting_knowledge" | "reconstructing_graphs" | "idle" | null;
+  stage_label: string | null;
+  total_evidence_count: number;
+  processed_evidence_count: number;
+  queued_evidence_count: number;
+  failed_evidence_count: number;
+  has_existing_graphs: boolean;
+  knowledge_item_count: number;
+  entity_count: number;
+  relationship_count: number;
+  last_reconstructed_at: string | null;
+  error_message: string | null;
+  updated_at: string;
+  graph_version?: string | null;
+  stage_counts?: Record<string, number>;
+  total_imported?: number;
+  deterministic_ready?: number;
+  semantic_queued?: number;
+  semantic_extracting?: number;
+  semantic_ready?: number;
+  graph_published?: number;
+  failed?: number;
+  not_applicable?: number;
+  item_states?: Record<
+    string,
+    {
+      lifecycle_stage?: string;
+      semantic_status?: string;
+      processing_status?: string;
+      indexing_status?: string;
+      knowledge_count?: number;
+    }
+  >;
 }
