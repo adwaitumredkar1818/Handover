@@ -181,6 +181,7 @@ class BatchValidationReport:
     rejected_schema_count: int = 0
     rejected_ungrounded_count: int = 0
     rejection_reasons: list[str] = field(default_factory=list)
+    rejected_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _normalize_text_for_matching(value: str) -> str:
@@ -573,7 +574,13 @@ class KnowledgeCandidateValidator:
 
             if not verified_links:
                 report.rejected_ungrounded_count += 1
-                report.rejection_reasons.append(ref_rejection or "no_verified_evidence_links")
+                rej_reason = ref_rejection or "no_verified_evidence_links"
+                report.rejection_reasons.append(rej_reason)
+                report.rejected_items.append({
+                    "category": category.value if hasattr(category, "value") else str(category),
+                    "title": getattr(candidate, "title", "untitled"),
+                    "reason": rej_reason,
+                })
                 continue
 
             payload = candidate.model_dump(
@@ -696,6 +703,7 @@ class KnowledgeCandidateValidator:
             if not isinstance(raw_entry, dict):
                 report.rejected_schema_count += 1
                 report.rejection_reasons.append("candidate_not_object")
+                report.rejected_items.append({"category": "unknown", "title": "<non-dict>", "reason": "candidate_not_object"})
                 continue
 
             raw_cat = str(raw_entry.get("category", "")).lower().strip()
@@ -703,12 +711,14 @@ class KnowledgeCandidateValidator:
             if category is None:
                 report.rejected_schema_count += 1
                 report.rejection_reasons.append(f"unknown_category:{raw_cat[:30]}")
+                report.rejected_items.append({"category": raw_cat, "title": str(raw_entry.get("title", "")), "reason": f"unknown_category:{raw_cat[:30]}"})
                 continue
 
             title = str(raw_entry.get("title", "")).strip()
             if not title:
                 report.rejected_schema_count += 1
                 report.rejection_reasons.append("missing_title")
+                report.rejected_items.append({"category": raw_cat, "title": "<missing_title>", "reason": "missing_title"})
                 continue
 
             summary = str(raw_entry.get("structured_summary") or raw_entry.get("description") or title).strip()
@@ -717,6 +727,7 @@ class KnowledgeCandidateValidator:
             if not isinstance(raw_refs, list) or not raw_refs:
                 report.rejected_ungrounded_count += 1
                 report.rejection_reasons.append("missing_evidence_refs")
+                report.rejected_items.append({"category": raw_cat, "title": title, "reason": "missing_evidence_refs"})
                 continue
 
             verified_links: list[VerifiedEvidenceLinkDraft] = []
@@ -785,7 +796,13 @@ class KnowledgeCandidateValidator:
 
             if not verified_links:
                 report.rejected_ungrounded_count += 1
-                report.rejection_reasons.append(ref_rejection or "no_verified_evidence_links")
+                rej_reason = ref_rejection or "no_verified_evidence_links"
+                report.rejection_reasons.append(rej_reason)
+                report.rejected_items.append({
+                    "category": category.value if hasattr(category, "value") else str(category),
+                    "title": title,
+                    "reason": rej_reason,
+                })
                 continue
 
             payload = dict(raw_entry.get("structured_payload") or {})

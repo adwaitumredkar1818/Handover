@@ -54,6 +54,11 @@ from app.services.knowledge_validator import (
     get_category_response_json_schema,
     get_multi_domain_response_json_schema,
 )
+from app.services.ollama_live_log import (
+    record_ollama_batch_completed,
+    record_ollama_batch_failed,
+    record_ollama_batch_started,
+)
 from app.services.llm import (
     LLMExecutionError,
     LLMGenerationRequest,
@@ -545,6 +550,8 @@ class ReconstructionWorkerService:
                 if ev is None or ev.project_id != claimed.project_id:
                     acc.skipped_items += 1
                     continue
+                ev_title = str(ev.title or "")
+                ev_id_str = str(ev.id)
                 if ev.processing_status not in _ELIGIBLE_EVIDENCE_STATUSES:
                     acc.skipped_items += 1
                     continue
@@ -654,12 +661,29 @@ class ReconstructionWorkerService:
                     b_count,
                     len(batch),
                 )
+                record_ollama_batch_started(
+                    model_name=self._llm.model_name,
+                    batch_num=b_count,
+                    chunks_count=len(batch),
+                    evidence_id=ev_id_str,
+                    evidence_title=ev_title,
+                    project_id=str(claimed.project_id),
+                )
                 try:
                     llm_res = self._call_llm_multi_domain_with_retry(
                         batch=batch,
                         acc=acc,
                     )
                 except LLMExecutionError as exc:
+                    record_ollama_batch_failed(
+                        model_name=self._llm.model_name,
+                        batch_num=b_count,
+                        chunks_count=len(batch),
+                        evidence_id=ev_id_str,
+                        evidence_title=ev_title,
+                        project_id=str(claimed.project_id),
+                        error_message=str(exc),
+                    )
                     if exc.code == "LLM_TRUNCATED" and len(batch) > 1:
                         logger.warning(
                             "Batch of %d chunks failed with LLM_TRUNCATED. Splitting in half for adaptive recovery.",
@@ -700,6 +724,37 @@ class ReconstructionWorkerService:
                     val_report.candidates_received,
                     len(val_report.accepted_items),
                 )
+                record_ollama_batch_completed(
+                    model_name=self._llm.model_name,
+                    batch_num=b_count,
+                    chunks_count=len(batch),
+                    evidence_id=ev_id_str,
+                    evidence_title=ev_title,
+                    project_id=str(claimed.project_id),
+                    duration_ms=getattr(llm_res, "duration_ms", 0.0),
+                    candidates_count=val_report.candidates_received,
+                    accepted_items=val_report.accepted_items,
+                    rejected_items=getattr(val_report, "rejected_items", []),
+                )
+                for it in val_report.accepted_items:
+                    ex = it.evidence_links[0].supporting_excerpt if it.evidence_links else ""
+                    quote_prev = (ex[:100] + "...") if len(ex) > 100 else ex
+                    conf_val = float((it.confidence_metadata or {}).get("confidence_score", 0.75))
+                    logger.info(
+                        "  [OLLAMA EXTRACTED] [ACCEPTED] [%s] '%s' (conf=%.2f, links=%d) quote: '%s'",
+                        it.category.value if hasattr(it.category, "value") else str(it.category),
+                        it.title,
+                        conf_val,
+                        len(it.evidence_links),
+                        quote_prev,
+                    )
+                for rej in getattr(val_report, "rejected_items", []):
+                    logger.info(
+                        "  [OLLAMA EXTRACTED] [REJECTED] [%s] '%s' -> %s",
+                        rej.get("category", "unknown"),
+                        rej.get("title", "untitled"),
+                        rej.get("reason", "unknown"),
+                    )
                 acc.candidates_generated += val_report.candidates_received
                 acc.claims_rejected_ungrounded += (
                     val_report.rejected_schema_count + val_report.rejected_ungrounded_count
