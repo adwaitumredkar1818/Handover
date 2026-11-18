@@ -612,7 +612,7 @@ class IntegrationRepository:
 
     def has_active_sync_run_for_mapping(self, mapping_id: uuid.UUID) -> bool:
         stmt = (
-            select(SourceSyncRun.id)
+            select(SourceSyncRun)
             .where(
                 SourceSyncRun.project_source_mapping_id == mapping_id,
                 SourceSyncRun.status.in_(
@@ -622,9 +622,22 @@ class IntegrationRepository:
                     )
                 ),
             )
+            .order_by(SourceSyncRun.started_at.desc().nulls_last())
             .limit(1)
         )
-        return self._session.execute(stmt).scalar_one_or_none() is not None
+        sync_run = self._session.execute(stmt).scalars().first()
+        if sync_run is None:
+            return False
+        if sync_run.background_job_id:
+            from app.models.job import BackgroundJob
+            job = self._session.get(BackgroundJob, sync_run.background_job_id)
+            if job is not None and job.status not in ("queued", "running"):
+                sync_run.status = SourceSyncRunStatus.FAILED.value
+                sync_run.error_code = job.error_code or "ORPHANED_JOB_TERMINATED"
+                sync_run.error_message = job.error_message or "Associated background job terminated."
+                self._session.flush()
+                return False
+        return True
 
     def list_sync_runs_for_project(
         self,

@@ -30,8 +30,12 @@ class EmailDeliveryResult:
     error_message: str | None = None
 
 
+# Alias for contract compatibility
+EmailDispatchResult = EmailDeliveryResult
+
+
 class EmailProviderProtocol(Protocol):
-    """Pluggable provider interface allowing Resend, mock, or future SMTP/SES backends."""
+    """Pluggable provider interface allowing Gmail SMTP, mock, or future SMTP/SES backends."""
 
     @property
     def provider_name(self) -> str:
@@ -40,4 +44,14 @@ class EmailProviderProtocol(Protocol):
 
     def send(self, message: EmailMessage) -> EmailDeliveryResult:
         """Submit an outbound email message and return an explicit delivery status."""
+        ...
+
+    def send_email(
+        self,
+        to_email: str,
+        subject: str,
+        html_content: str,
+        text_content: str | None = None,
+    ) -> EmailDeliveryResult:
+        """Convenience adapter adhering to functional interface contract."""
         ...

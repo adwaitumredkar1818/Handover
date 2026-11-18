@@ -667,7 +667,7 @@ class RawChunkItemResponse(BaseSchema):
     chunk_type: str
     char_count: int
     token_estimate: int
-    text_content: str
+    chunk_text: str
     indexing_status: str
 
 

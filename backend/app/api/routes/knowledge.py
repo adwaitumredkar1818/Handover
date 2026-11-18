@@ -15,6 +15,7 @@ from app.api.deps import (
 )
 from app.schemas.knowledge import (
     EvidenceExtractRequest,
+    EvidenceFactsResponse,
     ExtractionTriggerResponse,
     KnowledgeExtractionRunListResponse,
     KnowledgeExtractionRunResponse,
@@ -30,10 +31,16 @@ router = APIRouter(tags=["Knowledge Reconstruction"])
 
 
 @router.post(
-    "/projects/{project_id}/evidence/{evidence_id}/extract",
+    "/projects/{project_id}/evidence/{evidence_id}/extractions",
     response_model=ExtractionTriggerResponse,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue evidence-grounded knowledge extraction for one evidence item",
+)
+@router.post(
+    "/projects/{project_id}/evidence/{evidence_id}/extract",
+    response_model=ExtractionTriggerResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Queue evidence-grounded knowledge extraction for one evidence item (alias)",
 )
 def trigger_evidence_knowledge_extraction(
     evidence_id: uuid.UUID,
@@ -49,6 +56,116 @@ def trigger_evidence_knowledge_extraction(
         project_ctx=project_ctx,
         evidence_id=evidence_id,
         payload=payload or EvidenceExtractRequest(),
+    )
+
+
+@router.get(
+    "/projects/{project_id}/evidence/{evidence_id}/extractions",
+    response_model=KnowledgeExtractionRunListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List knowledge extraction runs for a specific evidence item",
+)
+def list_evidence_extraction_runs(
+    evidence_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext,
+        Depends(require_project_permission("project.read")),
+    ],
+    service: Annotated[
+        KnowledgeReconstructionService,
+        Depends(get_knowledge_reconstruction_service),
+    ],
+    run_status: Annotated[str | None, Query(alias="status")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> KnowledgeExtractionRunListResponse:
+    """List extraction run history scoped to an authorised evidence item."""
+    return service.list_evidence_extraction_runs(
+        project_ctx=project_ctx,
+        evidence_id=evidence_id,
+        status=run_status,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/evidence/{evidence_id}/extractions/{run_id}",
+    response_model=KnowledgeExtractionRunResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Inspect status, token telemetry, and grounding counts for one evidence extraction run",
+)
+def get_evidence_extraction_run(
+    evidence_id: uuid.UUID,
+    run_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext,
+        Depends(require_project_permission("project.read")),
+    ],
+    service: Annotated[
+        KnowledgeReconstructionService,
+        Depends(get_knowledge_reconstruction_service),
+    ],
+) -> KnowledgeExtractionRunResponse:
+    """Retrieve one evidence extraction run and associated background job status."""
+    return service.get_evidence_extraction_run(
+        project_ctx=project_ctx,
+        evidence_id=evidence_id,
+        run_id=run_id,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/evidence/{evidence_id}/facts",
+    response_model=EvidenceFactsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve AI-extracted facts and distinguished raw source chunks for an evidence item",
+)
+def get_evidence_facts(
+    evidence_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext,
+        Depends(require_project_permission("project.read")),
+    ],
+    service: Annotated[
+        KnowledgeReconstructionService,
+        Depends(get_knowledge_reconstruction_service),
+    ],
+) -> EvidenceFactsResponse:
+    """Return structured atomic facts with excerpts, grounding scores, and distinct raw chunks."""
+    return service.get_evidence_facts(
+        project_ctx=project_ctx,
+        evidence_id=evidence_id,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/evidence/{evidence_id}/findings",
+    response_model=KnowledgeItemListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List candidate and verified knowledge findings linked to an evidence item",
+)
+def get_evidence_findings(
+    evidence_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext,
+        Depends(require_project_permission("project.read")),
+    ],
+    service: Annotated[
+        KnowledgeReconstructionService,
+        Depends(get_knowledge_reconstruction_service),
+    ],
+    category: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> KnowledgeItemListResponse:
+    """Return knowledge items citing this evidence item, respecting source ACLs."""
+    return service.list_knowledge_items(
+        project_ctx=project_ctx,
+        category=category,
+        evidence_id=evidence_id,
+        limit=limit,
+        offset=offset,
     )
 
 

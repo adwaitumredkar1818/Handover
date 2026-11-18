@@ -73,6 +73,7 @@ class SlackSyncOrchestrator:
         access_token: str,
         actor_user_id: uuid.UUID | None,
         sync_mode: str,
+        on_batch_commit: Any = None,
     ) -> SyncExecutionReport:
         now = utc_now()
         report = SyncExecutionReport()
@@ -138,6 +139,17 @@ class SlackSyncOrchestrator:
                 },
             ),
         )
+
+        if on_batch_commit:
+            try:
+                on_batch_commit(
+                    "channel_metadata",
+                    report.items_discovered,
+                    report.items_created,
+                    report.items_updated,
+                )
+            except Exception:
+                pass
 
         # 3. Retrieve users map for human names/emails
         users_map: dict[str, dict[str, Any]] = {}
@@ -268,6 +280,27 @@ class SlackSyncOrchestrator:
                 seen_external_ids=seen_external_ids,
                 record=record,
             )
+            if on_batch_commit and (report.items_discovered % 5 == 0):
+                try:
+                    on_batch_commit(
+                        "slack_messages",
+                        report.items_discovered,
+                        report.items_created,
+                        report.items_updated,
+                    )
+                except Exception:
+                    pass
+
+        if on_batch_commit:
+            try:
+                on_batch_commit(
+                    "slack_messages",
+                    report.items_discovered,
+                    report.items_created,
+                    report.items_updated,
+                )
+            except Exception:
+                pass
 
         new_cursor = dict(cursor_before)
         if latest_seen_ts:

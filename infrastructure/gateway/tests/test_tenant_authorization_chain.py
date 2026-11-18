@@ -224,7 +224,7 @@ def test_gateway_vector_search_enforces_mandatory_tenant_scope():
     assert data["error"]["code"] == "TENANT_SCOPE_REQUIRED"
 
 
-def test_gateway_vector_search_scopes_to_authorized_project():
+def test_gateway_vector_search_scopes_to_authorized_project(monkeypatch):
     """Gateway test: Vector search with explicit tenant scope executes with $and boundaries."""
     env = create_synthetic_rbac_environment()
     payload = {
@@ -233,6 +233,36 @@ def test_gateway_vector_search_scopes_to_authorized_project():
         "query_embedding": [0.01] * 768,
         "top_k": 3,
     }
+
+    # Mock ChromaService.query_vector to isolate tenant scoping verification from live Docker daemon
+    from infrastructure.gateway.schemas import VectorHit, VectorSearchResponse
+
+    async def _mock_query_vector(self, collection_name, query_embedding, top_k=10, where=None):
+        # Assert tenant isolation boundary was properly injected into where clause
+        assert where is not None
+        assert "$and" in where
+        clauses = where["$and"]
+        org_matched = any(c.get("organisation_id", {}).get("$eq") == str(env["org_a"].id) for c in clauses)
+        proj_matched = any(c.get("project_id", {}).get("$eq") == str(env["proj_a1"].id) for c in clauses)
+        assert org_matched and proj_matched
+
+        return VectorSearchResponse(
+            collection_name="ipkrh_evidence_chunks_nomic-embed-text_v1",
+            hits=[
+                VectorHit(
+                    id="chunk-1",
+                    distance=0.05,
+                    similarity=0.95,
+                    metadata={"organisation_id": str(env["org_a"].id), "project_id": str(env["proj_a1"].id)},
+                )
+            ],
+            total_hits=1,
+            duration_ms=5.0,
+        )
+
+    from infrastructure.gateway.services.chroma_service import ChromaService
+    monkeypatch.setattr(ChromaService, "query_vector", _mock_query_vector)
+
     resp = gateway_client.post("/v1/vector/search", json=payload, headers=VALID_HEADERS)
     # The request is validly formed and scoped; returns 200 with scoped query
     assert resp.status_code == 200

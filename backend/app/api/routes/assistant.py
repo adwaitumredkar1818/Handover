@@ -12,10 +12,12 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -41,6 +43,9 @@ from app.schemas.assistant import (
 from app.services.assistant import ProjectKnowledgeAssistantService
 from app.services.assistant_llm import AssistantLLMReasoner
 from app.services.assistant_retrieval import AssistantRetrievalService
+from app.services.ai.orchestrator import ProjectIntelligenceOrchestrator
+from app.services.ai.registry import InvestigationRuntimeRegistry
+from app.services.ai.state import InvestigationState, InvestigationStatus
 from app.services.llm import StructuredLLMClient
 from app.services.rbac import ProjectContext
 from app.services.retrieval import HybridRetrievalService
@@ -65,6 +70,30 @@ def _get_assistant_service(
         llm_client=llm_client,
     )
     return ProjectKnowledgeAssistantService(
+        session=session,
+        settings=settings,
+        retrieval_service=retrieval_svc,
+        llm_reasoner=llm_reasoner,
+    )
+
+
+def _get_orchestrator(
+    session: Session = Depends(get_db_session),
+    settings: Settings = Depends(get_app_settings),
+    hybrid_service: HybridRetrievalService = Depends(get_hybrid_retrieval_service),
+    llm_client: StructuredLLMClient = Depends(get_llm_client),
+) -> ProjectIntelligenceOrchestrator:
+    """Dependency provider assembling the Project Intelligence Orchestrator."""
+    retrieval_svc = AssistantRetrievalService(
+        session=session,
+        settings=settings,
+        hybrid_retrieval_service=hybrid_service,
+    )
+    llm_reasoner = AssistantLLMReasoner(
+        settings=settings,
+        llm_client=llm_client,
+    )
+    return ProjectIntelligenceOrchestrator(
         session=session,
         settings=settings,
         retrieval_service=retrieval_svc,
@@ -200,6 +229,182 @@ def ask_question(
         conversation_id=conversation_id,
         request=payload,
     )
+
+
+# ---------------------------------------------------------------------------
+# Investigation & Real-Time SSE Streaming Endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/conversations/{conversation_id}/investigations",
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new investigation and dispatch state graph",
+)
+async def create_investigation(
+    request: Request,
+    project_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    payload: QuestionRequest,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("assistant.chat"))],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    hybrid_service: Annotated[HybridRetrievalService, Depends(get_hybrid_retrieval_service)],
+    llm_client: Annotated[StructuredLLMClient, Depends(get_llm_client)],
+) -> dict[str, Any]:
+    """Start an asynchronous, multi-step investigation session and return its ID."""
+    investigation_id = uuid.uuid4()
+    state = InvestigationState(
+        investigation_id=investigation_id,
+        conversation_id=conversation_id,
+        project_id=project_id,
+        organisation_id=project_ctx.organisation.id,
+        user_id=project_ctx.principal.user.id,
+        user_role=getattr(getattr(project_ctx.project_membership, "role", None), "name", str(getattr(project_ctx.project_membership, "role", "member"))),
+        query=payload.question,
+        response_mode=payload.response_mode,
+        target_domains=[d.value for d in payload.include_domains] if payload.include_domains else [],
+    )
+
+    # Launch state graph execution in the background with a dedicated database session
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        from app.db.session import create_session_factory
+        session_factory = create_session_factory(request.app.state.db_engine)
+
+    async def _execute_investigation_in_background() -> None:
+        with session_factory() as bg_session:
+            bg_retrieval_svc = AssistantRetrievalService(
+                session=bg_session,
+                settings=settings,
+                hybrid_retrieval_service=hybrid_service,
+            )
+            bg_llm_reasoner = AssistantLLMReasoner(
+                settings=settings,
+                llm_client=llm_client,
+            )
+            bg_orchestrator = ProjectIntelligenceOrchestrator(
+                session=bg_session,
+                settings=settings,
+                retrieval_service=bg_retrieval_svc,
+                llm_reasoner=bg_llm_reasoner,
+            )
+            await bg_orchestrator.run_investigation(state, project_ctx)
+
+    import asyncio
+    asyncio.create_task(_execute_investigation_in_background())
+
+    return {
+        "investigation_id": str(investigation_id),
+        "conversation_id": str(conversation_id),
+        "status": "queued",
+        "query": payload.question,
+        "mode": payload.response_mode.value,
+        "events_url": f"/api/v1/projects/{project_id}/assistant/investigations/{investigation_id}/events",
+    }
+
+
+@router.get(
+    "/investigations/{investigation_id}/events",
+    summary="Subscribe to live investigation progress over Server-Sent Events (SSE)",
+)
+async def stream_investigation_events(
+    project_id: uuid.UUID,
+    investigation_id: uuid.UUID,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("assistant.read"))],
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    """Stream real-time investigation events with automatic Last-Event-ID resumption."""
+    registry = InvestigationRuntimeRegistry.get_instance()
+    state = registry.get_state(investigation_id)
+
+    async def event_generator():
+        since_seq = 0
+        all_historical = registry.get_event_history(investigation_id, since_sequence=0)
+        latest_seq = max((h.sequence_number for h in all_historical), default=0)
+
+        # Robust cursor validation: distinguish valid, missing, malformed, and future cursors
+        if last_event_id is not None:
+            if not last_event_id.isdigit():
+                # Malformed cursor: emit explicit cursor_reset event and replay from beginning
+                yield f"event: cursor_reset\ndata: {{\"error\": \"Malformed Last-Event-ID: {last_event_id}\", \"expected\": \"integer\", \"replaying_from\": 0}}\n\n"
+                since_seq = 0
+            else:
+                parsed_seq = int(last_event_id)
+                if parsed_seq > latest_seq and latest_seq > 0:
+                    # Future cursor: client claims cursor beyond server state.
+                    # Send explicit cursor_error and reset to latest state to prevent silent drop
+                    yield f"event: cursor_error\ndata: {{\"error\": \"Cursor {parsed_seq} exceeds latest server sequence {latest_seq}\", \"action\": \"resync\", \"latest_sequence\": {latest_seq}}}\n\n"
+                    since_seq = latest_seq
+                else:
+                    since_seq = parsed_seq
+
+        # 1. Replay historical events
+        historical = registry.get_event_history(investigation_id, since_sequence=since_seq)
+        for h_event in historical:
+            yield h_event.to_sse_format()
+
+        # If already completed or failed, close stream
+        latest_state = registry.get_state(investigation_id)
+        if latest_state and latest_state.status in {
+            InvestigationStatus.COMPLETED,
+            InvestigationStatus.FAILED,
+            InvestigationStatus.CANCELLED,
+        }:
+            return
+
+        # 2. Subscribe to live events
+        queue = await registry.subscribe(investigation_id)
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield event.to_sse_format()
+                    if event.event_type in {"investigation_completed", "investigation_failed", "investigation_cancelled"}:
+                        break
+                except asyncio.TimeoutError:
+                    # Send periodic keep-alive comment to keep cloud proxies alive
+                    yield ": keep-alive\n\n"
+                    # Check terminal state
+                    cur_state = registry.get_state(investigation_id)
+                    if cur_state and cur_state.status in {
+                        InvestigationStatus.COMPLETED,
+                        InvestigationStatus.FAILED,
+                        InvestigationStatus.CANCELLED,
+                    }:
+                        break
+        finally:
+            await registry.unsubscribe(investigation_id, queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get(
+    "/investigations/{investigation_id}",
+    summary="Get current state of an investigation",
+)
+def get_investigation_state(
+    project_id: uuid.UUID,
+    investigation_id: uuid.UUID,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("assistant.read"))],
+) -> dict[str, Any]:
+    """Inspect current plan, node, and findings of an ongoing or completed investigation."""
+    registry = InvestigationRuntimeRegistry.get_instance()
+    state = registry.get_state(investigation_id)
+    if not state:
+        raise NotFoundError("Investigation not found or expired from runtime.", code="INVESTIGATION_NOT_FOUND")
+
+    if state.project_id != project_id:
+        raise ForbiddenError("Investigation belongs to another project.", code="FORBIDDEN_INVESTIGATION")
+
+    return state.model_dump()
 
 
 # ---------------------------------------------------------------------------

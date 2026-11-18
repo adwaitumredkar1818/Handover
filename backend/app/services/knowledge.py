@@ -43,6 +43,8 @@ from app.repositories.knowledge import (
 )
 from app.schemas.knowledge import (
     EvidenceExtractRequest,
+    EvidenceFactsResponse,
+    ExtractedFactItemResponse,
     ExtractionTriggerResponse,
     KnowledgeEvidenceLinkResponse,
     KnowledgeExtractionRunListResponse,
@@ -53,6 +55,7 @@ from app.schemas.knowledge import (
     KnowledgeItemSummaryResponse,
     ProjectKnowledgeExtractRequest,
     ProjectKnowledgeStatusResponse,
+    RawChunkItemResponse,
 )
 from app.services.audit import AuditService
 from app.services.evidence import to_background_job_response
@@ -628,6 +631,206 @@ class KnowledgeReconstructionService:
         if run is None:
             raise NotFoundError("Extraction run was not found.", code="EXTRACTION_RUN_NOT_FOUND")
         return to_extraction_run_response(run)
+
+    def list_evidence_extraction_runs(
+        self,
+        *,
+        project_ctx: ProjectContext,
+        evidence_id: uuid.UUID,
+        status: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> KnowledgeExtractionRunListResponse:
+        evidence = self._evidence_repo.get_by_id(evidence_id, include_deleted=False)
+        if evidence is None or evidence.project_id != project_ctx.project.id:
+            raise NotFoundError("Evidence item was not found.", code="EVIDENCE_NOT_FOUND")
+
+        self._access_policy.enforce_evidence_access(
+            evidence=evidence,
+            project_ctx=project_ctx,
+            session=self._session,
+            audit_service=self._audit,
+        )
+
+        if status is not None and status not in _VALID_RUN_STATUSES:
+            raise BadRequestError(
+                "Unsupported extraction run status filter.",
+                code="INVALID_FILTER",
+            )
+        runs, total = self._knowledge_repo.list_runs_for_project(
+            project_id=project_ctx.project.id,
+            evidence_id=evidence_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+        return KnowledgeExtractionRunListResponse(
+            items=[to_extraction_run_response(run) for run in runs],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_evidence_extraction_run(
+        self,
+        *,
+        project_ctx: ProjectContext,
+        evidence_id: uuid.UUID,
+        run_id: uuid.UUID,
+    ) -> KnowledgeExtractionRunResponse:
+        evidence = self._evidence_repo.get_by_id(evidence_id, include_deleted=False)
+        if evidence is None or evidence.project_id != project_ctx.project.id:
+            raise NotFoundError("Evidence item was not found.", code="EVIDENCE_NOT_FOUND")
+
+        self._access_policy.enforce_evidence_access(
+            evidence=evidence,
+            project_ctx=project_ctx,
+            session=self._session,
+            audit_service=self._audit,
+        )
+
+        run = self._knowledge_repo.get_run_by_id(run_id, project_id=project_ctx.project.id)
+        if run is None or run.evidence_id != evidence_id:
+            raise NotFoundError(
+                "Extraction run was not found for this evidence item.",
+                code="EXTRACTION_RUN_NOT_FOUND",
+            )
+        return to_extraction_run_response(run)
+
+    def get_evidence_facts(
+        self,
+        *,
+        project_ctx: ProjectContext,
+        evidence_id: uuid.UUID,
+    ) -> EvidenceFactsResponse:
+        evidence = self._evidence_repo.get_by_id(evidence_id, include_deleted=False)
+        if evidence is None or evidence.project_id != project_ctx.project.id:
+            raise NotFoundError("Evidence item was not found.", code="EVIDENCE_NOT_FOUND")
+
+        self._access_policy.enforce_evidence_access(
+            evidence=evidence,
+            project_ctx=project_ctx,
+            session=self._session,
+            audit_service=self._audit,
+        )
+
+        chunk_repo = EvidenceChunkRepository(self._session)
+        chunks = chunk_repo.list_chunks_for_evidence(evidence.id)
+        raw_chunks = [
+            RawChunkItemResponse(
+                id=c.id,
+                chunk_index=c.chunk_index,
+                page_number=c.page_number,
+                chunk_type=c.chunk_type,
+                char_count=c.char_count,
+                token_estimate=c.token_estimate,
+                chunk_text=c.chunk_text,
+                indexing_status=c.indexing_status,
+            )
+            for c in chunks
+        ]
+
+        accessible_items, _ = self._knowledge_repo.list_accessible_items_for_project(
+            project_id=project_ctx.project.id,
+            viewer_user_id=project_ctx.principal.user_id,
+            has_project_manage=project_ctx.has_permission("project.manage"),
+            evidence_id=evidence.id,
+            limit=500,
+            offset=0,
+        )
+
+        facts: list[ExtractedFactItemResponse] = []
+        for result in accessible_items:
+            item = result.item
+            matching_links = [
+                lnk for lnk in result.accessible_links if lnk.evidence_id == evidence.id
+            ]
+            conf_meta = item.confidence_metadata_json or {}
+            grounding_score = float(conf_meta.get("grounding_score", 1.0))
+            conf_level = str(conf_meta.get("confidence_level", "high"))
+            conf_expl = conf_meta.get("confidence_explanation") or conf_meta.get("rationale")
+            val_state = (
+                "candidate"
+                if item.review_status in {"candidate", "pending_review"}
+                else ("verified" if item.review_status == "approved" else item.review_status)
+            )
+
+            if matching_links:
+                for lnk in matching_links:
+                    loc = lnk.source_location_json or {}
+                    page_num = loc.get("page_number")
+                    page_or_sec = loc.get("page_or_section") or (
+                        f"Page {page_num}" if page_num else None
+                    )
+                    facts.append(
+                        ExtractedFactItemResponse(
+                            id=lnk.id,
+                            evidence_id=evidence.id,
+                            knowledge_item_id=item.id,
+                            chunk_id=lnk.evidence_chunk_id,
+                            title=item.title,
+                            description=item.structured_summary,
+                            category=item.category,
+                            primary_domain=item.primary_domain or item.category,
+                            confidence_level=conf_level,
+                            grounding_score=grounding_score,
+                            confidence_explanation=conf_expl,
+                            original_excerpt=lnk.supporting_excerpt,
+                            page_or_section=page_or_sec,
+                            validation_state=val_state,
+                            is_ai_extracted=True,
+                            created_at=item.created_at,
+                        )
+                    )
+            else:
+                facts.append(
+                    ExtractedFactItemResponse(
+                        id=item.id,
+                        evidence_id=evidence.id,
+                        knowledge_item_id=item.id,
+                        chunk_id=None,
+                        title=item.title,
+                        description=item.structured_summary,
+                        category=item.category,
+                        primary_domain=item.primary_domain or item.category,
+                        confidence_level=conf_level,
+                        grounding_score=grounding_score,
+                        confidence_explanation=conf_expl,
+                        original_excerpt=item.structured_summary,
+                        page_or_section=None,
+                        validation_state=val_state,
+                        is_ai_extracted=True,
+                        created_at=item.created_at,
+                    )
+                )
+
+        latest_run = self._knowledge_repo.get_active_run_for_evidence(
+            project_id=project_ctx.project.id,
+            evidence_id=evidence.id,
+        )
+        if latest_run is None:
+            runs, _ = self._knowledge_repo.list_runs_for_project(
+                project_id=project_ctx.project.id,
+                evidence_id=evidence.id,
+                limit=1,
+            )
+            if runs:
+                latest_run = runs[0]
+
+        latest_run_id = latest_run.id if latest_run else None
+        latest_run_status = latest_run.status if latest_run else None
+
+        return EvidenceFactsResponse(
+            evidence_id=evidence.id,
+            project_id=project_ctx.project.id,
+            total_facts=len(facts) + len(raw_chunks),
+            ai_extracted_count=len(facts),
+            raw_chunk_count=len(raw_chunks),
+            latest_run_id=latest_run_id,
+            latest_run_status=latest_run_status,
+            facts=facts,
+            raw_chunks=raw_chunks,
+        )
 
     def retry_extraction_run(
         self,

@@ -194,6 +194,10 @@ class ForgotPasswordResponse(BaseSchema):
         default=None,
         description="Password reset token returned ONLY in development/testing mode when SMTP is not configured.",
     )
+    email_delivery: Literal["not_configured", "submitted", "failed"] | None = Field(
+        default=None,
+        description="Status of the transactional password reset email dispatch.",
+    )
 
 
 class ResetPasswordRequest(BaseSchema):

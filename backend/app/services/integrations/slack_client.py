@@ -141,6 +141,21 @@ class SlackClient:
                     break
                 raise_for_provider_error(resp, provider="slack", endpoint_label="conversations.list")
                 data = resp.json()
+                if (
+                    not data.get("ok")
+                    and data.get("error") == "missing_scope"
+                    and "private_channel" in str(params.get("types", ""))
+                ):
+                    logger.info("Slack token lacks groups:read; falling back to public channels only.")
+                    params["types"] = "public_channel"
+                    types = "public_channel"
+                    resp = client.get(
+                        f"{self.BASE_URL}/conversations.list",
+                        headers=self._headers(access_token),
+                        params=params,
+                    )
+                    raise_for_provider_error(resp, provider="slack", endpoint_label="conversations.list")
+                    data = resp.json()
                 self._check_slack_response(data, "conversations.list")
 
                 for ch in data.get("channels", []):
