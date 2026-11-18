@@ -367,7 +367,7 @@ export function adaptEntityToHandoverGraph(entityGraph: {
 }
 
 export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps) {
-  const { members: liveMembers } = useLiveApp();
+  const { members: liveMembers, activeProject } = useLiveApp();
   const [fetchedMembers, setFetchedMembers] = useState<any[]>([]);
   const activeProjectIdRef = useRef(projectId);
 
@@ -375,17 +375,39 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     activeProjectIdRef.current = projectId;
   }, [projectId]);
 
-  useEffect(() => {
+  const refreshProjectMembersList = useCallback(async () => {
     if (!projectId) return;
-    api.members.list(projectId).then((m) => {
+    try {
+      const m = await api.members.list(projectId);
       if (activeProjectIdRef.current !== projectId) return;
-      if (Array.isArray(m) && m.length > 0) {
+      if (Array.isArray(m)) {
         setFetchedMembers(m);
       }
-    }).catch(() => {});
+    } catch {
+      // Non-fatal fallback to liveMembers
+    }
   }, [projectId]);
 
-  const projectMembers = fetchedMembers.length > 0 ? fetchedMembers : liveMembers;
+  useEffect(() => {
+    refreshProjectMembersList();
+  }, [refreshProjectMembersList]);
+
+  const projectMembers = useMemo(() => {
+    const byId = new Map<string, any>();
+    for (const m of fetchedMembers) {
+      if (m && m.id && m.status !== "removed") {
+        byId.set(String(m.id), m);
+      }
+    }
+    if (activeProject?.id === projectId && Array.isArray(liveMembers)) {
+      for (const m of liveMembers) {
+        if (m && m.id && m.status !== "removed") {
+          byId.set(String(m.id), m);
+        }
+      }
+    }
+    return Array.from(byId.values());
+  }, [fetchedMembers, liveMembers, activeProject?.id, projectId]);
 
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -430,7 +452,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   }>({ nodes: [], edges: [], summary: {} });
 
   // Filters & expansion
-  const [layoutMode, setLayoutMode] = useState<"cluster" | "grid" | "circle">("cluster");
+  const [layoutMode, setLayoutMode] = useState<"layered" | "grid">("layered");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [selectedTypeFilter, setSelectedTypeFilter] = useState<string>("all");
   const [contributorTypeFilter, setContributorTypeFilter] = useState<string>("all");
@@ -548,7 +570,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   }, [projectId]);
 
   const computeEntityLayout = useCallback(
-    (nodesList: KnowledgeEntityNode[], mode: "cluster" | "grid" | "circle") => {
+    (nodesList: KnowledgeEntityNode[], mode: "layered" | "grid") => {
       const total = nodesList.length;
       if (total === 0) return [];
       if (mode === "grid") {
@@ -559,49 +581,42 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
           position: { x: (idx % cols) * 260 + 40, y: Math.floor(idx / cols) * 150 + 40 },
         }));
       }
-      if (mode === "cluster") {
-        const typeGroups: Record<string, KnowledgeEntityNode[]> = {};
-        nodesList.forEach((n) => {
-          const t = (n.entity_type || n.type || "general").toLowerCase();
-          (typeGroups[t] ||= []).push(n);
-        });
-        const types = Object.keys(typeGroups);
-        const angleStep = (2 * Math.PI) / Math.max(1, types.length);
-        const radius = Math.max(420, types.length * 130);
-        const out: Array<{ id: string; raw: KnowledgeEntityNode; position: { x: number; y: number } }> = [];
-        types.forEach((type, tIdx) => {
-          const items = typeGroups[type]!;
-          const cx = 750 + radius * Math.cos(tIdx * angleStep);
-          const cy = 650 + radius * Math.sin(tIdx * angleStep);
-          const cols = Math.max(2, Math.ceil(Math.sqrt(items.length)));
-          items.forEach((item, idx) => {
-            out.push({
-              id: String(item.id),
-              raw: item,
-              position: {
-                x: cx - (cols * 240) / 2 + (idx % cols) * 240,
-                y: cy - (Math.ceil(items.length / cols) * 130) / 2 + Math.floor(idx / cols) * 130,
-              },
-            });
+      // Clean top-to-bottom layered grouping by entity type (no circular/radial layout)
+      const typeGroups: Record<string, KnowledgeEntityNode[]> = {};
+      nodesList.forEach((n) => {
+        const t = (n.entity_type || n.type || "general").toLowerCase();
+        (typeGroups[t] ||= []).push(n);
+      });
+      const types = Object.keys(typeGroups).sort();
+      const out: Array<{ id: string; raw: KnowledgeEntityNode; position: { x: number; y: number } }> = [];
+      let currentY = 40;
+      const maxCols = 4;
+      types.forEach((type) => {
+        const items = typeGroups[type]!;
+        const rowCols = Math.min(items.length, maxCols);
+        const totalW = (rowCols - 1) * 260;
+        items.forEach((item, idx) => {
+          const row = Math.floor(idx / maxCols);
+          const col = idx % maxCols;
+          out.push({
+            id: String(item.id),
+            raw: item,
+            position: {
+              x: Math.round(400 - totalW / 2 + col * 260),
+              y: currentY + row * 150,
+            },
           });
         });
-        return out;
-      }
-      const r = Math.max(480, total * 20);
-      return nodesList.map((n, idx) => {
-        const angle = (idx / total) * 2 * Math.PI;
-        return {
-          id: String(n.id),
-          raw: n,
-          position: { x: 800 + r * Math.cos(angle), y: 700 + r * Math.sin(angle) },
-        };
+        currentY += Math.ceil(items.length / maxCols) * 150 + 60;
       });
+      return out;
     },
     []
   );
 
   // Reset state on project switch to prevent any cross-project leakage
   useEffect(() => {
+    setFetchedMembers([]);
     setRawContributorGraph({ nodes: [], edges: [], summary: {} });
     setRawEntityGraph({ nodes: [], edges: [] });
     setContributors([]);
@@ -1037,12 +1052,13 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     if (prevMembersSigRef.current !== membersSignature) {
       prevMembersSigRef.current = membersSignature;
       invalidateGraphCache("rel_");
+      refreshProjectMembersList();
       loadPeopleAndEntityGraphs(true);
       if (activeTab === "identity_review" || activeTab === "responsibilities") {
         loadTabDetails(activeTab, true);
       }
     }
-  }, [membersSignature, activeTab, loadPeopleAndEntityGraphs, loadTabDetails]);
+  }, [membersSignature, activeTab, refreshProjectMembersList, loadPeopleAndEntityGraphs, loadTabDetails]);
 
   const handleNodeClick = async (_: unknown, node: Node) => {
     const rawData = (node.data as { raw?: any })?.raw;
@@ -1347,13 +1363,12 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                   </select>
                   <select
                     value={layoutMode}
-                    onChange={(e) => setLayoutMode(e.target.value as "cluster" | "grid" | "circle")}
+                    onChange={(e) => setLayoutMode(e.target.value as "layered" | "grid")}
                     aria-label="Graph layout"
                     className="px-2.5 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700"
                   >
-                    <option value="cluster">Cluster Layout</option>
+                    <option value="layered">Clean Layered Layout</option>
                     <option value="grid">Grid Layout</option>
-                    <option value="circle">Radial Layout</option>
                   </select>
                 </>
               )}
@@ -1644,6 +1659,9 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                       <p className="text-xs text-slate-500">
                         Contributions: {c.contribution_count} · Repos: {c.repositories.join(", ") || "N/A"} · Basis: {c.match_method || "unmatched"}
                       </p>
+                      {c.match_method === "pending_identity" && (
+                        <p className="text-xs text-amber-700">Not linked to a source identity</p>
+                      )}
                       {c.suggested_member_name && !c.matched_member_name && (
                         <p className="text-xs text-amber-700">Suggested member candidate: {c.suggested_member_name}</p>
                       )}

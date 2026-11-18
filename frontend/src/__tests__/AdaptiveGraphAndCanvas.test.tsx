@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import {
   buildAmeliorateFlowchartElements,
+  layoutWithElk,
   recomputeEdgeLabelPositions,
   resolveIncrementalNodePositions,
   type HandoverGraphEdge,
@@ -306,5 +307,45 @@ describe("Adaptive Graph Layouts, MiniMap & Fullscreen", () => {
     });
     expect(largeLayout.nodes).toHaveLength(108);
     assertNoNodeOverlaps(largeLayout.nodes);
+  });
+
+  it("preserves 2-person-to-1-cluster small layout and runs ELK Layered cleanly on 25-node and 55-node graphs", async () => {
+    // 1. Small 2-contributor-to-1-cluster reference layout
+    const smallNodes = [
+      makeNode("p1", "confirmed_member"),
+      makeNode("p2", "confirmed_member"),
+      makeNode("c1", "work_cluster"),
+    ];
+    const smallEdges = [makeEdge("p1", "c1", 0), makeEdge("p2", "c1", 1)];
+    const smallBase = buildAmeliorateFlowchartElements(smallNodes, smallEdges, null);
+    const smallElk = await layoutWithElk(smallBase.nodes, smallBase.edges);
+    const np1 = smallElk.nodes.find((n) => n.id === "p1")!;
+    const np2 = smallElk.nodes.find((n) => n.id === "p2")!;
+    const nc1 = smallElk.nodes.find((n) => n.id === "c1")!;
+    expect(np1.position.y).toBe(np2.position.y);
+    expect(nc1.position.y).toBeGreaterThan(np1.position.y);
+    assertNoNodeOverlaps(smallElk.nodes);
+
+    // 2. 25-node and 55-node graphs via ELK Layered
+    for (const count of [25, 55]) {
+      const nodes = Array.from({ length: count }, (_, i) =>
+        makeNode(`elk${i}`, i === 0 ? "project" : i % 4 === 0 ? "service" : "technology")
+      );
+      const edges = Array.from({ length: count - 1 }, (_, i) =>
+        makeEdge(`elk${Math.floor(i / 3)}`, `elk${i + 1}`, i)
+      );
+      const base = buildAmeliorateFlowchartElements(nodes, edges, null, {
+        viewportWidth: 1366,
+        viewportHeight: 768,
+      });
+      const elkRes = await layoutWithElk(base.nodes, base.edges, {
+        viewportWidth: 1366,
+        viewportHeight: 768,
+      });
+      expect(elkRes.nodes).toHaveLength(count);
+      assertNoNodeOverlaps(elkRes.nodes);
+      const xs = elkRes.nodes.map((n) => n.position.x);
+      expect(Math.max(...xs) - Math.min(...xs)).toBeGreaterThan(400);
+    }
   });
 });

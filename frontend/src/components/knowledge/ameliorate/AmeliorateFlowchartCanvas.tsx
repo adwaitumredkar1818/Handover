@@ -23,6 +23,7 @@ import {
 import { Expand, Minimize2, LayoutGrid, Scan } from "lucide-react";
 import {
   buildAmeliorateFlowchartElements,
+  layoutWithElk,
   recomputeEdgeLabelPositions,
   resolveIncrementalNodePositions,
   updateAmeliorateSpotlight,
@@ -180,8 +181,11 @@ export function AmeliorateFlowchartCanvas({
   );
 
   // On base layout change (initial load or progressive new nodes arriving):
-  // Preserve ONLY user-dragged coordinates so Ollama additions get the clean 2D adaptive layout without collapsing.
+  // - Small graphs (1-6 nodes) use the compact synchronous layered layout directly.
+  // - Larger graphs (7+ nodes) run ELK Layered asynchronously and preserve user-dragged coordinates.
   useEffect(() => {
+    let cancelled = false;
+
     const newIds = new Set(baseLayout.nodes.map((n) => n.id));
     if (positionsRef.current.size > 0 && newIds.size > 0) {
       let overlapCount = 0;
@@ -195,40 +199,69 @@ export function AmeliorateFlowchartCanvas({
       }
     }
 
-    const draggedPositions = new Map<string, { x: number; y: number }>();
-    for (const id of userDraggedIdsRef.current) {
-      const pos = positionsRef.current.get(id);
-      if (pos) draggedPositions.set(id, pos);
+    const applyFinalLayout = (
+      layoutNodes: Node<AmeliorateNodeData>[],
+      layoutEdges: Edge<AmeliorateEdgeData>[],
+      isFinalForFit: boolean
+    ) => {
+      if (cancelled) return;
+      const draggedPositions = new Map<string, { x: number; y: number }>();
+      for (const id of userDraggedIdsRef.current) {
+        const pos = positionsRef.current.get(id);
+        if (pos) draggedPositions.set(id, pos);
+      }
+
+      const positionedNodes = resolveIncrementalNodePositions(
+        layoutNodes,
+        layoutEdges,
+        draggedPositions,
+        measuredDimsRef.current
+      );
+      positionsRef.current = new Map(positionedNodes.map((n) => [n.id, n.position]));
+
+      const alignedEdges = recomputeEdgeLabelPositions(
+        positionedNodes,
+        layoutEdges,
+        measuredDimsRef.current
+      );
+
+      const { nodes: updatedNodes, edges: updatedEdges } = updateAmeliorateSpotlight(
+        positionedNodes,
+        alignedEdges,
+        selectedNodeId
+      );
+      setNodes(updatedNodes);
+      setEdges(updatedEdges);
+
+      if (isFinalForFit && !hasFittedRef.current && updatedNodes.length > 0 && flowInstanceRef.current) {
+        hasFittedRef.current = true;
+        requestAnimationFrame(() => {
+          flowInstanceRef.current?.fitView({ ...FIT_VIEW_OPTIONS, duration: 0 });
+        });
+      }
+    };
+
+    if (baseLayout.nodes.length <= 6) {
+      applyFinalLayout(baseLayout.nodes, baseLayout.edges, true);
+      return () => {
+        cancelled = true;
+      };
     }
 
-    const positionedNodes = resolveIncrementalNodePositions(
-      baseLayout.nodes,
-      baseLayout.edges,
-      draggedPositions,
-      measuredDimsRef.current
-    );
-    positionsRef.current = new Map(positionedNodes.map((n) => [n.id, n.position]));
+    // Immediate render with baseLayout while ELK Layered computes
+    applyFinalLayout(baseLayout.nodes, baseLayout.edges, false);
 
-    const alignedEdges = recomputeEdgeLabelPositions(
-      positionedNodes,
-      baseLayout.edges,
-      measuredDimsRef.current
-    );
+    layoutWithElk(baseLayout.nodes, baseLayout.edges, {
+      viewportWidth: viewportSize.width,
+      viewportHeight: viewportSize.height,
+      nodeDimensions: measuredDimsRef.current,
+    }).then((elkResult) => {
+      applyFinalLayout(elkResult.nodes, elkResult.edges, true);
+    });
 
-    const { nodes: updatedNodes, edges: updatedEdges } = updateAmeliorateSpotlight(
-      positionedNodes,
-      alignedEdges,
-      selectedNodeId
-    );
-    setNodes(updatedNodes);
-    setEdges(updatedEdges);
-
-    if (!hasFittedRef.current && updatedNodes.length > 0 && flowInstanceRef.current) {
-      hasFittedRef.current = true;
-      requestAnimationFrame(() => {
-        flowInstanceRef.current?.fitView({ ...FIT_VIEW_OPTIONS, duration: 0 });
-      });
-    }
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseLayout, setNodes, setEdges]);
 
