@@ -713,6 +713,14 @@ class ContributionAttributionService:
             .all()
         )
         pm_by_id = {pm.id: pm for pm in memberships}
+        roster_rows = list(
+            self._session.execute(
+                select(TeamRosterMember).where(TeamRosterMember.project_id == project_id)
+            )
+            .scalars()
+            .all()
+        )
+        roster_by_id = {r.id: r for r in roster_rows}
 
         grouped: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -724,15 +732,18 @@ class ContributionAttributionService:
             if entry is None:
                 raw_email = meta.get("git_author_email")
                 matched_pm = pm_by_id.get(row.matched_project_membership_id) if row.matched_project_membership_id else None
+                matched_roster_id = getattr(row, "matched_roster_member_id", None)
+                matched_roster = roster_by_id.get(matched_roster_id) if matched_roster_id else None
+                has_match = matched_pm is not None or matched_roster is not None
                 effective_pm_id = str(matched_pm.id) if matched_pm is not None else None
                 effective_ctype = (
                     row.contributor_type
-                    if (row.contributor_type != ContributorType.CONFIRMED_MEMBER.value or matched_pm is not None)
+                    if (row.contributor_type != ContributorType.CONFIRMED_MEMBER.value or has_match)
                     else ContributorType.UNIDENTIFIED.value
                 )
                 effective_rstatus = (
                     row.review_status
-                    if (row.contributor_type != ContributorType.CONFIRMED_MEMBER.value or matched_pm is not None)
+                    if (row.contributor_type != ContributorType.CONFIRMED_MEMBER.value or has_match)
                     else ContributorReviewStatus.PENDING.value
                 )
                 suggested_pm_id = meta.get("suggested_project_membership_id")
@@ -742,7 +753,11 @@ class ContributionAttributionService:
                     "display_name": (
                         matched_pm.user.full_name
                         if matched_pm and matched_pm.user
-                        else (meta.get("git_author_name") or row.contributor_identifier)
+                        else (
+                            matched_roster.display_name
+                            if matched_roster
+                            else (meta.get("git_author_name") or row.contributor_identifier)
+                        )
                     ),
                     "github_login": meta.get("github_author_login"),
                     "github_numeric_id": meta.get("github_author_id"),
@@ -751,10 +766,14 @@ class ContributionAttributionService:
                     "_raw_git_email": raw_email,
                     "contributor_type": effective_ctype,
                     "review_status": effective_rstatus,
-                    "match_method": row.match_method if matched_pm is not None or row.contributor_type != ContributorType.CONFIRMED_MEMBER.value else "member_removed",
+                    "match_method": row.match_method if has_match or row.contributor_type != ContributorType.CONFIRMED_MEMBER.value else "member_removed",
                     "match_confidence": row.match_confidence,
                     "matched_project_membership_id": effective_pm_id,
-                    "matched_member_name": matched_pm.user.full_name if matched_pm and matched_pm.user else None,
+                    "matched_member_name": (
+                        matched_pm.user.full_name
+                        if matched_pm and matched_pm.user
+                        else (f"{matched_roster.display_name} (Invited)" if matched_roster else None)
+                    ),
                     "suggested_project_membership_id": str(suggested_pm.id) if suggested_pm else None,
                     "suggested_member_name": suggested_pm.user.full_name if suggested_pm and suggested_pm.user else None,
                     "declared_responsibility": matched_pm.responsibility_description if matched_pm else None,
@@ -1088,7 +1107,7 @@ class ContributionAttributionService:
                 "selection_key": f"inv:{inv.id}",
                 "member_source": "invitation",
                 "membership_state": "invited",
-                "selectable_for_match": False,
+                "selectable_for_match": True,
                 "project_membership_id": None,
                 "user_id": None,
                 "invitation_id": inv.id,
@@ -1098,7 +1117,7 @@ class ContributionAttributionService:
                 "role_name": inv.role.name if getattr(inv, "role", None) else "invited_member",
                 "github_login": None,
                 "review_status": "invited",
-                "note": "Pending invitation · User must accept invitation before identity matching",
+                "note": "Pending invitation · Match records attribution only (does not grant project access)",
             })
 
         for tr in roster_rows:
@@ -1138,6 +1157,7 @@ class ContributionAttributionService:
         reviewer_user_id: uuid.UUID,
         project_membership_id: uuid.UUID | None = None,
         user_id: uuid.UUID | None = None,
+        invitation_id: uuid.UUID | None = None,
         roster_member_id: uuid.UUID | None = None,
         notes: str | None = None,
     ) -> dict[str, Any]:
@@ -1182,17 +1202,61 @@ class ContributionAttributionService:
         now = utc_now()
         membership: ProjectMembership | None = None
         if action == "match_member":
-            if project_membership_id is None:
+            if project_membership_id is not None:
+                membership = self._session.get(ProjectMembership, project_membership_id)
+                if membership is None or membership.project_id != project_id or membership.status != "active":
+                    from app.core.exceptions import NotFoundError
+
+                    raise NotFoundError("Active project membership not found.", code="MEMBERSHIP_NOT_FOUND")
+            elif invitation_id is not None:
+                inv = self._session.execute(
+                    select(OrganisationInvitation)
+                    .options(selectinload(OrganisationInvitation.role))
+                    .where(
+                        OrganisationInvitation.id == invitation_id,
+                        OrganisationInvitation.organisation_id == organisation_id,
+                        OrganisationInvitation.status == "pending",
+                        (OrganisationInvitation.project_id == project_id) | (OrganisationInvitation.project_id.is_(None)),
+                    )
+                ).scalar_one_or_none()
+                if inv is None:
+                    from app.core.exceptions import NotFoundError
+
+                    raise NotFoundError("Pending invitation not found.", code="INVITATION_NOT_FOUND")
+                # Record identity attribution via a project TeamRosterMember without accepting the invitation
+                # or creating a ProjectMembership (preserves project access boundary).
+                inv_email = (inv.email or "").strip().lower()
+                existing_roster = (
+                    self._session.execute(
+                        select(TeamRosterMember).where(
+                            TeamRosterMember.project_id == project_id,
+                            func.lower(TeamRosterMember.email) == inv_email,
+                        )
+                    ).scalar_one_or_none()
+                    if inv_email
+                    else None
+                )
+                if existing_roster is None:
+                    local_name = inv.email.split("@", 1)[0] if inv.email and "@" in inv.email else (inv.email or "Invited Member")
+                    existing_roster = TeamRosterMember(
+                        id=uuid.uuid4(),
+                        project_id=project_id,
+                        display_name=local_name,
+                        email=inv.email,
+                        role_title=inv.role.name if getattr(inv, "role", None) else "invited_member",
+                        notes="Linked from pending organisation invitation via Identity Review",
+                        created_by_id=reviewer_user_id,
+                    )
+                    self._session.add(existing_roster)
+                    self._session.flush()
+                roster_member_id = existing_roster.id
+                project_membership_id = None
+            else:
                 from app.core.exceptions import BadRequestError
 
                 raise BadRequestError(
-                    "Active project_membership_id is required. Identity matching cannot implicitly grant project membership; add the user via Project Team first."
+                    "Active project_membership_id or pending invitation_id is required. Identity matching cannot implicitly grant project membership."
                 )
-            membership = self._session.get(ProjectMembership, project_membership_id)
-            if membership is None or membership.project_id != project_id or membership.status != "active":
-                from app.core.exceptions import NotFoundError
-
-                raise NotFoundError("Active project membership not found.", code="MEMBERSHIP_NOT_FOUND")
             new_type = ContributorType.CONFIRMED_MEMBER.value
             new_status = ContributorReviewStatus.CONFIRMED.value
             new_method = "human_confirmed"

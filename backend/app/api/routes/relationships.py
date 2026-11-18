@@ -861,6 +861,7 @@ def review_contributor_identity(
         reviewer_user_id=project_ctx.principal.user_id,
         project_membership_id=payload.project_membership_id,
         user_id=payload.user_id,
+        invitation_id=payload.invitation_id,
         roster_member_id=payload.roster_member_id,
         notes=payload.notes,
     )

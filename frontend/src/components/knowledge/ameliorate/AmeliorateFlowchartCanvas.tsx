@@ -235,9 +235,16 @@ export function AmeliorateFlowchartCanvas({
 
       if (isFinalForFit && !hasFittedRef.current && updatedNodes.length > 0 && flowInstanceRef.current) {
         hasFittedRef.current = true;
-        requestAnimationFrame(() => {
-          flowInstanceRef.current?.fitView({ ...FIT_VIEW_OPTIONS, duration: 0 });
-        });
+        // Wait for React + React Flow to commit and measure the newly laid-out nodes
+        // before calling fitView so the camera centers on the final graph bounds.
+        setTimeout(() => {
+          if (cancelled) return;
+          requestAnimationFrame(() => {
+            if (!cancelled) {
+              flowInstanceRef.current?.fitView({ ...FIT_VIEW_OPTIONS, duration: 180 });
+            }
+          });
+        }, 50);
       }
     };
 

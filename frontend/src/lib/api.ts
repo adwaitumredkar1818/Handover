@@ -1260,6 +1260,7 @@ export const api = {
         action: "match_member" | "mark_external" | "mark_bot" | "leave_unidentified" | "reject_match" | "revert";
         project_membership_id?: string;
         user_id?: string;
+        invitation_id?: string;
         roster_member_id?: string;
         notes?: string;
       }

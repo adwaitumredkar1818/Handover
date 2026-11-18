@@ -428,6 +428,7 @@ class ContributorIdentityReviewRequest(BaseModel):
     )
     project_membership_id: uuid.UUID | None = None
     user_id: uuid.UUID | None = None
+    invitation_id: uuid.UUID | None = None
     roster_member_id: uuid.UUID | None = None
     notes: str | None = None
 

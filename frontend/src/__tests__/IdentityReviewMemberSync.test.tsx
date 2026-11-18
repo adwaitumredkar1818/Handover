@@ -169,7 +169,8 @@ describe("Relationship Explorer Identity Review People Selector", () => {
         selection_key: "inv:inv-1",
         member_source: "invitation",
         membership_state: "invited",
-        selectable_for_match: false,
+        selectable_for_match: true,
+        invitation_id: "inv-1",
         display_name: "invited.dev",
         email: "invited.dev@company.com",
         role_name: "project_contributor",
@@ -200,11 +201,12 @@ describe("Relationship Explorer Identity Review People Selector", () => {
       ).toBeGreaterThan(0);
     });
 
-    // Invited member and unassigned org member are visible and disabled
+    // Invited member is visible and selectable for attribution-only matching
     const invitedOpts = screen.getAllByRole("option", { name: /Invited \(Pending Acceptance\)/i });
     expect(invitedOpts.length).toBeGreaterThan(0);
-    expect((invitedOpts[0] as HTMLOptionElement).disabled).toBe(true);
+    expect((invitedOpts[0] as HTMLOptionElement).disabled).toBe(false);
 
+    // Unassigned org member remains disabled
     const orgOnlyOpts = screen.getAllByRole("option", { name: /Org Member \(Add to Project Team First\)/i });
     expect(orgOnlyOpts.length).toBeGreaterThan(0);
     expect((orgOnlyOpts[0] as HTMLOptionElement).disabled).toBe(true);

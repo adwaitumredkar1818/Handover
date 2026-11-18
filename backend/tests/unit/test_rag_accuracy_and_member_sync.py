@@ -267,7 +267,7 @@ class TestTeamMemberIdentitySync:
         assert by_key[f"pm:{pm_id}"]["membership_state"] == "active"
         assert by_key[f"org_user:{u2_id}"]["selectable_for_match"] is False
         assert by_key[f"org_user:{u2_id}"]["membership_state"] == "org_member_unassigned"
-        assert by_key[f"inv:{inv_id}"]["selectable_for_match"] is False
+        assert by_key[f"inv:{inv_id}"]["selectable_for_match"] is True
         assert by_key[f"inv:{inv_id}"]["membership_state"] == "invited"
         assert by_key[f"roster:{roster_id}"]["selectable_for_match"] is False
         assert by_key[f"roster:{roster_id}"]["membership_state"] == "roster_only"
@@ -326,7 +326,7 @@ class TestTeamMemberIdentitySync:
             )
             raise AssertionError("Expected BadRequestError when matching without active project_membership_id")
         except BadRequestError as exc:
-            assert "project_membership_id is required" in str(exc)
+            assert "cannot implicitly grant project membership" in str(exc)
         assert added_objects == []
 
     def test_review_contributor_identity_rejects_cross_project_membership(self):

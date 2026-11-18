@@ -376,6 +376,8 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
       selectable_for_match: boolean;
       project_membership_id?: string | null;
       user_id?: string | null;
+      invitation_id?: string | null;
+      roster_member_id?: string | null;
       display_name: string;
       email?: string | null;
       role_name: string;
@@ -1140,13 +1142,20 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
         (contributorItem?.matched_project_membership_id ? `pm:${contributorItem.matched_project_membership_id}` : "") ||
         (contributorItem?.suggested_project_membership_id ? `pm:${contributorItem.suggested_project_membership_id}` : "");
       const selectedTarget = selectableMembers.find((m) => m.selection_key === selectedVal);
-      if (action === "match_member" && (!selectedTarget || !selectedTarget.selectable_for_match || !selectedTarget.project_membership_id)) {
-        setError("Select an active project member before confirming identity match. Add organisation or invited members via Project Team first.");
+      if (
+        action === "match_member" &&
+        (!selectedTarget || !selectedTarget.selectable_for_match || (!selectedTarget.project_membership_id && !selectedTarget.invitation_id))
+      ) {
+        setError("Select an active project member or pending invitation before confirming identity match.");
         return;
       }
       await api.relationships.reviewContributor(projectId, contributorKey, {
         action,
         project_membership_id: action === "match_member" ? (selectedTarget?.project_membership_id ?? undefined) : undefined,
+        invitation_id:
+          action === "match_member" && !selectedTarget?.project_membership_id
+            ? (selectedTarget?.invitation_id ?? undefined)
+            : undefined,
         notes: `Reviewed in Relationship Explorer (${action})`,
       });
       invalidateGraphCache("rel_");
@@ -1703,7 +1712,11 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                           (c.matched_project_membership_id ? `pm:${c.matched_project_membership_id}` : "") ||
                           (c.suggested_project_membership_id ? `pm:${c.suggested_project_membership_id}` : "");
                         const selectedTarget = selectableMembers.find((m) => m.selection_key === currentSelectedKey);
-                        const canMatchTarget = Boolean(selectedTarget && selectedTarget.selectable_for_match && selectedTarget.project_membership_id);
+                        const canMatchTarget = Boolean(
+                          selectedTarget &&
+                            selectedTarget.selectable_for_match &&
+                            (selectedTarget.project_membership_id || selectedTarget.invitation_id)
+                        );
                         return (
                           <>
                       <select
