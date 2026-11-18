@@ -214,8 +214,8 @@ describe("Adaptive Graph Layouts, MiniMap & Fullscreen", () => {
     const layout1 = buildAmeliorateFlowchartElements(initialNodes, initialEdges, null);
 
     const existingPos = new Map<string, { x: number; y: number }>();
-    existingPos.set("n1", { x: 420, y: 180 });
-    existingPos.set("n2", { x: 760, y: 310 });
+    existingPos.set("n1", { x: 420, y: 20 });
+    existingPos.set("n2", { x: 760, y: 20 });
 
     const nextNodes = [makeNode("n1"), makeNode("n2"), makeNode("n3")];
     const nextEdges = [makeEdge("n1", "n2"), makeEdge("n2", "n3", 1)];
@@ -224,8 +224,8 @@ describe("Adaptive Graph Layouts, MiniMap & Fullscreen", () => {
 
     const p1 = resolved.find((n) => n.id === "n1")!.position;
     const p2 = resolved.find((n) => n.id === "n2")!.position;
-    expect(p1).toEqual({ x: 420, y: 180 });
-    expect(p2).toEqual({ x: 760, y: 310 });
+    expect(p1).toEqual({ x: 420, y: 20 });
+    expect(p2).toEqual({ x: 760, y: 20 });
     expect(layout1.nodes.length).toBe(2);
     assertNoNodeOverlaps(resolved);
   });

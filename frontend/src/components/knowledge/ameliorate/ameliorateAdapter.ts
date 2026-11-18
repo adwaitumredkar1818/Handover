@@ -828,25 +828,10 @@ export function resolveIncrementalNodePositions(
     }
   }
 
-  // Place new nodes near connected existing neighbors if available
+  // Use clean baseLayout position for newly arrived nodes (never collapse onto hub center)
   for (const id of addedIds) {
     const layoutFallback = newLayoutNodes.find((x) => x.id === id)?.position ?? { x: 80, y: 80 };
-    const neighborCoords: Array<{ x: number; y: number }> = [];
-    for (const e of edges) {
-      if (e.source === id && resultPositions.has(e.target)) {
-        neighborCoords.push(resultPositions.get(e.target)!);
-      } else if (e.target === id && resultPositions.has(e.source)) {
-        neighborCoords.push(resultPositions.get(e.source)!);
-      }
-    }
-
-    if (neighborCoords.length > 0) {
-      const avgX = neighborCoords.reduce((s, p) => s + p.x, 0) / neighborCoords.length;
-      const avgY = neighborCoords.reduce((s, p) => s + p.y, 0) / neighborCoords.length;
-      resultPositions.set(id, { x: Math.round(avgX + 40), y: Math.round(avgY + 210) });
-    } else {
-      resultPositions.set(id, layoutFallback);
-    }
+    resultPositions.set(id, layoutFallback);
   }
 
   // Always guarantee zero overlap across final positions (even if dimensions changed or stale cache existed)

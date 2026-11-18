@@ -65,6 +65,7 @@ export function AmeliorateFlowchartCanvas({
   const [isOverlayFullscreen, setIsOverlayFullscreen] = useState(false);
 
   const positionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const userDraggedIdsRef = useRef<Set<string>>(new Set());
   const measuredDimsRef = useRef<Map<string, { width: number; height: number }>>(new Map());
   const hasFittedRef = useRef(false);
   const savedViewportRef = useRef<Viewport | null>(null);
@@ -164,6 +165,9 @@ export function AmeliorateFlowchartCanvas({
       for (const change of changes) {
         if (change.type === "position" && change.position) {
           positionsRef.current.set(change.id, change.position);
+          if (change.dragging) {
+            userDraggedIdsRef.current.add(change.id);
+          }
         } else if (change.type === "dimensions" && change.dimensions) {
           measuredDimsRef.current.set(change.id, {
             width: change.dimensions.width,
@@ -175,8 +179,8 @@ export function AmeliorateFlowchartCanvas({
     [onNodesChange]
   );
 
-  // On base layout change (initial load or progressive new nodes arriving),
-  // preserve coordinates of previously positioned nodes on the same graph and recompute edge labels for final positions.
+  // On base layout change (initial load or progressive new nodes arriving):
+  // Preserve ONLY user-dragged coordinates so Ollama additions get the clean 2D adaptive layout without collapsing.
   useEffect(() => {
     const newIds = new Set(baseLayout.nodes.map((n) => n.id));
     if (positionsRef.current.size > 0 && newIds.size > 0) {
@@ -184,19 +188,26 @@ export function AmeliorateFlowchartCanvas({
       for (const id of newIds) {
         if (positionsRef.current.has(id)) overlapCount++;
       }
-      // If more than half of the graph changed (e.g. tab/project switch), reset stale positions & re-fit
       if (overlapCount / newIds.size < 0.5) {
         positionsRef.current.clear();
+        userDraggedIdsRef.current.clear();
         hasFittedRef.current = false;
       }
+    }
+
+    const draggedPositions = new Map<string, { x: number; y: number }>();
+    for (const id of userDraggedIdsRef.current) {
+      const pos = positionsRef.current.get(id);
+      if (pos) draggedPositions.set(id, pos);
     }
 
     const positionedNodes = resolveIncrementalNodePositions(
       baseLayout.nodes,
       baseLayout.edges,
-      positionsRef.current,
+      draggedPositions,
       measuredDimsRef.current
     );
+    positionsRef.current = new Map(positionedNodes.map((n) => [n.id, n.position]));
 
     const alignedEdges = recomputeEdgeLabelPositions(
       positionedNodes,
@@ -256,6 +267,7 @@ export function AmeliorateFlowchartCanvas({
 
   const handleReorganiseLayout = useCallback(() => {
     positionsRef.current.clear();
+    userDraggedIdsRef.current.clear();
     hasFittedRef.current = false;
     setLayoutEpoch((prev) => prev + 1);
   }, []);
