@@ -28,11 +28,12 @@ logger = logging.getLogger(__name__)
 _worker_wake_event = threading.Event()
 _worker_stop_event = threading.Event()
 _worker_thread: threading.Thread | None = None
+_worker_threads: list[threading.Thread] = []
 _worker_engine: Any | None = None
 
 
 def signal_worker_activity() -> None:
-    """Notify in-process background worker thread that new jobs are queued."""
+    """Notify in-process background worker lanes that new jobs are queued."""
     _worker_wake_event.set()
 
 
@@ -79,8 +80,9 @@ def _build_lifespan(
                 type(exc).__name__,
             )
 
-        # Launch lightweight background worker in a daemon thread (except isolated test suites)
-        global _worker_thread, _worker_engine
+        # Launch three independent background worker lanes in daemon threads
+        # (Lane A: Source Sync, Lane B: Document/Indexing Preparation, Lane C: Semantic Enrichment)
+        global _worker_thread, _worker_threads, _worker_engine
         if settings.app_env != "test":
             try:
                 from app.repositories.job import BackgroundJobRepository
@@ -96,32 +98,65 @@ def _build_lifespan(
                 from app.worker import build_worker_service
 
                 composite_worker, _worker_engine = build_worker_service(settings)
+                poll_interval = max(1.0, float(settings.ingestion.worker_poll_interval_seconds))
+                lane_events: dict[str, threading.Event] = {
+                    "IPKRHLaneA-Sync": threading.Event(),
+                    "IPKRHLaneB-Prep": threading.Event(),
+                    "IPKRHLaneC-Semantic": threading.Event(),
+                }
 
-                def _worker_runner() -> None:
-                    logger.info(
-                        "In-process background worker thread active (worker_id=%s)",
-                        composite_worker.worker_id,
+                def _make_lane_runner(lane_name: str, step_fn: Callable[[], bool]) -> Callable[[], None]:
+                    lane_ev = lane_events[lane_name]
+
+                    def _lane_runner() -> None:
+                        logger.info(
+                            "In-process background worker lane '%s' active (worker_id=%s)",
+                            lane_name,
+                            composite_worker.worker_id,
+                        )
+                        while not _worker_stop_event.is_set():
+                            try:
+                                did_work = step_fn()
+                                if did_work:
+                                    for ev in lane_events.values():
+                                        ev.set()
+                                    continue
+                            except Exception as loop_exc:
+                                logger.warning(
+                                    "Background worker lane '%s' transient loop error: %s",
+                                    lane_name,
+                                    loop_exc,
+                                )
+                            # Wait on either global wake or lane wake
+                            if _worker_wake_event.is_set():
+                                _worker_wake_event.clear()
+                                for ev in lane_events.values():
+                                    ev.set()
+                            lane_ev.wait(timeout=poll_interval)
+                            lane_ev.clear()
+                        logger.info("In-process background worker lane '%s' stopped.", lane_name)
+
+                    return _lane_runner
+
+                lane_specs = [
+                    ("IPKRHLaneA-Sync", composite_worker.process_sync_lane_job),
+                    ("IPKRHLaneB-Prep", composite_worker.process_preparation_lane_job),
+                    ("IPKRHLaneC-Semantic", composite_worker.process_semantic_lane_job),
+                ]
+                _worker_threads = []
+                for lane_name, step_fn in lane_specs:
+                    t = threading.Thread(
+                        target=_make_lane_runner(lane_name, step_fn),
+                        name=lane_name,
+                        daemon=True,
                     )
-                    poll_interval = max(1.0, float(settings.ingestion.worker_poll_interval_seconds))
-                    while not _worker_stop_event.is_set():
-                        try:
-                            did_work = composite_worker.process_next_job()
-                            if did_work:
-                                continue
-                        except Exception as loop_exc:
-                            logger.warning("Background worker transient loop error: %s", loop_exc)
-                        _worker_wake_event.wait(timeout=poll_interval)
-                        _worker_wake_event.clear()
-                    logger.info("In-process background worker thread stopped.")
+                    t.start()
+                    _worker_threads.append(t)
 
-                _worker_thread = threading.Thread(
-                    target=_worker_runner,
-                    name="IPKRHBackgroundWorker",
-                    daemon=True,
-                )
-                _worker_thread.start()
+                _worker_thread = _worker_threads[0]
                 app.state.worker_thread = _worker_thread
-                logger.info("IPKRH in-process background worker thread launched successfully.")
+                app.state.worker_threads = _worker_threads
+                logger.info("IPKRH 3-lane background worker threads launched successfully.")
             except Exception as worker_init_exc:
                 logger.warning(
                     "Could not initialize in-process background worker thread: %s",
@@ -133,6 +168,9 @@ def _build_lifespan(
         finally:
             _worker_stop_event.set()
             _worker_wake_event.set()
+            for t in _worker_threads:
+                if t.is_alive():
+                    t.join(timeout=2.0)
             if _worker_thread is not None and _worker_thread.is_alive():
                 _worker_thread.join(timeout=2.0)
             if _worker_engine is not None:

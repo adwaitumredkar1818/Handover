@@ -434,12 +434,24 @@ class IndexingWorkerService:
                             ev_item.metadata_json = meta
                             item_session.commit()
 
-                            # Run progressive relationship reconstruction ONLY when new non-outline fast items were created
+                            # Run progressive relationship reconstruction when new non-outline fast items were created
+                            # or when a high-value item (manifest, repo, PR, issue, doc) was indexed without graph update yet
+                            from app.services.technology_manifest_parser import is_manifest_path
+
                             has_non_outline_fast_items = any(
                                 not (it.structured_payload or {}).get("is_document_outline")
                                 for it in (fast_items or [])
                             )
-                            if has_non_outline_fast_items:
+                            needs_initial_graph_projection = (
+                                k_count > 0
+                                and meta.get("lifecycle_stage") != "graph_updated"
+                                and (
+                                    ev_item.category in ("design_document", "project_document", "pull_request", "issue", "architecture")
+                                    or is_manifest_path(ev_item.title)
+                                    or meta.get("github_item_type") == "repository"
+                                )
+                            )
+                            if has_non_outline_fast_items or needs_initial_graph_projection:
                                 try:
                                     from app.services.knowledge_graphs import invalidate_knowledge_graph_cache
                                     from app.services.relationship_coordinator import RelationshipCoordinatorService

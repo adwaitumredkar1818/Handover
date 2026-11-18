@@ -216,6 +216,26 @@ class CompositeWorkerService:
         """Primary worker identifier recorded on claimed leases."""
         return self.ingestion_worker.worker_id
 
+    def process_sync_lane_job(self) -> bool:
+        """Lane A: Source synchronization (GitHub, Jira, Slack) without blocking indexing/LLM."""
+        return self.sync_worker.process_next_job()
+
+    def process_preparation_lane_job(self) -> bool:
+        """Lane B: Document ingestion, chunking, and vector indexing."""
+        if self.ingestion_worker.process_next_job():
+            return True
+        if self.indexing_worker is not None and self.indexing_worker.process_next_job():
+            return True
+        return False
+
+    def process_semantic_lane_job(self) -> bool:
+        """Lane C: Bounded Qwen3 semantic enrichment and relationship reconstruction."""
+        if self.reconstruction_worker is not None and self.reconstruction_worker.process_next_job():
+            return True
+        if self.relationship_worker is not None and self.relationship_worker.process_next_job():
+            return True
+        return False
+
     def process_next_job(self) -> bool:
         """Claim one job across ingestion, sync, reconstruction, indexing,
         and relationship queues, alternating indexing and reconstruction so neither starves."""
