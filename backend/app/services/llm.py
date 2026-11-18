@@ -62,6 +62,16 @@ class LLMGenerationRequest:
     temperature: float | None = None
 
 
+OLLAMA_EXTRACTION_MODEL = "qwen3:8b"
+
+EXTRACTION_OPTIONS = {
+    "temperature": 0.1,
+    "top_p": 0.8,
+    "num_ctx": 2048,
+    "num_predict": 1200,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class LLMGenerationResult:
     """Structured response carrying parsed JSON dict and model runtime telemetry."""
@@ -74,6 +84,11 @@ class LLMGenerationResult:
     duration_ms: int
     done_reason: str | None
     truncated: bool
+    total_duration_ns: int = 0
+    load_duration_ns: int = 0
+    prompt_eval_duration_ns: int = 0
+    eval_duration_ns: int = 0
+    tokens_per_second: float | None = None
 
 
 @runtime_checkable
@@ -141,12 +156,14 @@ class OllamaLLMClient:
         self,
         *,
         base_url: str,
-        model: str = "qwen3:8b",
-        num_ctx: int = 8192,
-        num_predict: int = 2048,
+        model: str = OLLAMA_EXTRACTION_MODEL,
+        num_ctx: int = 4096,
+        num_predict: int = 1200,
         temperature: float = 0.1,
+        top_p: float = 0.8,
         timeout_seconds: float | None = None,
         think: bool = False,
+        keep_alive: str = "3m",
         http_client: httpx.Client | None = None,
         http_transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -155,10 +172,12 @@ class OllamaLLMClient:
         self._num_ctx = max(2048, int(num_ctx))
         self._num_predict = max(256, int(num_predict))
         self._temperature = float(temperature)
+        self._top_p = float(top_p)
         self._timeout_seconds = (
             None if timeout_seconds is None or timeout_seconds <= 0 else float(timeout_seconds)
         )
         self._think = bool(think)
+        self._keep_alive = keep_alive
         self._http_client = http_client
         self._http_transport = http_transport
 
@@ -190,7 +209,8 @@ class OllamaLLMClient:
                 {"role": "user", "content": request.user_prompt},
             ],
             "stream": False,
-            "think": self._think,
+            "think": False,
+            "keep_alive": self._keep_alive,
             "format": request.json_schema if request.json_schema is not None else "json",
             "options": {
                 "num_ctx": request.num_ctx or self._num_ctx,
@@ -198,6 +218,7 @@ class OllamaLLMClient:
                 "temperature": (
                     self._temperature if request.temperature is None else request.temperature
                 ),
+                "top_p": self._top_p,
             },
         }
 
@@ -290,7 +311,17 @@ class OllamaLLMClient:
                 completion_tokens=completion_tokens,
             ) from exc
 
-        logger.debug(
+        total_duration_ns = max(0, int(raw_json.get("total_duration") or 0))
+        load_duration_ns = max(0, int(raw_json.get("load_duration") or 0))
+        prompt_eval_duration_ns = max(0, int(raw_json.get("prompt_eval_duration") or 0))
+        eval_duration_ns = max(0, int(raw_json.get("eval_duration") or 0))
+        tokens_per_second = (
+            round(completion_tokens / (eval_duration_ns / 1e9), 2)
+            if eval_duration_ns > 0 and completion_tokens > 0
+            else None
+        )
+
+        logger.info(
             "Completed structured JSON generation via Ollama.",
             extra={
                 "llm_model": self._model,
@@ -298,6 +329,7 @@ class OllamaLLMClient:
                 "completion_tokens": completion_tokens,
                 "duration_ms": elapsed_ms,
                 "done_reason": done_reason,
+                "tokens_per_second": tokens_per_second,
             },
         )
         return LLMGenerationResult(
@@ -309,6 +341,11 @@ class OllamaLLMClient:
             duration_ms=elapsed_ms,
             done_reason=done_reason,
             truncated=truncated,
+            total_duration_ns=total_duration_ns,
+            load_duration_ns=load_duration_ns,
+            prompt_eval_duration_ns=prompt_eval_duration_ns,
+            eval_duration_ns=eval_duration_ns,
+            tokens_per_second=tokens_per_second,
         )
 
 
