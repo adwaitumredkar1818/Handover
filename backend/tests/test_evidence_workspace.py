@@ -319,21 +319,25 @@ def test_evidence_workspace_complete_lifecycle(monkeypatch: pytest.MonkeyPatch) 
             _mock_sync,
         )
 
-        # Trigger sync
-        sync_trigger = client.post(
-            f"/api/v1/projects/{proj_id}/sources/mappings/{mapping_id}/sync",
-            headers=alice_hdr,
-        )
-        assert sync_trigger.status_code == 202
-        assert "id" in sync_trigger.json()
-
-        # Run background worker pass
+        # Run background worker pass for the automatically enqueued initial sync job
         from app.worker import SyncWorker
 
         worker = SyncWorker(
             session_factory=ctx.app.state.session_factory,
             settings=ctx.app.state.settings,
         )
+        worker.run_once()
+
+        # Trigger sync
+        sync_trigger = client.post(
+            f"/api/v1/projects/{proj_id}/sources/mappings/{mapping_id}/sync",
+            headers=alice_hdr,
+        )
+        print("SYNC TRIGGER STATUS:", sync_trigger.status_code, sync_trigger.json())
+        assert sync_trigger.status_code == 202
+        assert "id" in sync_trigger.json()
+
+        # Run background worker pass for manual sync
         processed = worker.run_once()
         assert processed == 1
 

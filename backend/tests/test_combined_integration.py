@@ -196,10 +196,11 @@ def test_combined_multi_user_handover_lifecycle(
             org_id = org_resp.json()["id"]
 
             for u in (bob, charlie, diana):
+                role_name = "org_admin" if u == bob else "org_member"
                 inv = client.post(
                     f"/api/v1/organisations/{org_id}/invitations",
                     headers=alice.headers,
-                    json={"email": u.email, "role_name": "org_member"},
+                    json={"email": u.email, "role_name": role_name},
                 )
                 assert inv.status_code == 201
                 raw_token = inv.json()["development_invitation_token"]

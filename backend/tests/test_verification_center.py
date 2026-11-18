@@ -770,6 +770,7 @@ def test_verification_api_queue_and_actions(monkeypatch: pytest.MonkeyPatch) -> 
             session.add(case)
             session.commit()
             case_id_str = str(case.id)
+            item_id_str = str(item.id)
 
         # 1. GET /queue
         res_queue = client.get(
@@ -827,3 +828,22 @@ def test_verification_api_queue_and_actions(monkeypatch: pytest.MonkeyPatch) -> 
         assert res_elig.status_code == 200
         elig_body = res_elig.json()
         assert elig_body["is_eligible"] is True
+
+        # 7. POST /findings/{finding_id}/review (Fast direct verify/flag endpoint)
+        res_direct = client.post(
+            f"/api/v1/projects/{proj_id}/verification/findings/{item_id_str}/review",
+            headers=owner.headers,
+            json={"action": "flag", "notes": "Direct flag test"},
+        )
+        assert res_direct.status_code == 200
+        direct_body = res_direct.json()
+        assert direct_body["case_status"] in ("unresolved", "flagged", "needs_clarification")
+
+        # 8. Direct approve
+        res_direct_app = client.post(
+            f"/api/v1/projects/{proj_id}/verification/findings/{item_id_str}/review",
+            headers=owner.headers,
+            json={"action": "approve", "notes": "Direct approve test"},
+        )
+        assert res_direct_app.status_code == 200
+        assert res_direct_app.json()["case_status"] == "verified"

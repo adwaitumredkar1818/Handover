@@ -102,6 +102,7 @@ def test_ollama_llm_client_sends_structured_chat_payload_and_strips_wrappers() -
         "temperature": 0.05,
         "num_ctx": 4096,
         "num_predict": 1024,
+        "top_p": 0.8,
     }
     assert result.parsed_json == {"items": [{"title": "Use PostgreSQL"}]}
     assert result.prompt_tokens == 320
@@ -205,7 +206,7 @@ def test_chunk_batching_and_injection_safe_prompt_rendering() -> None:
 
     rendered = format_evidence_chunks_block([chunks[3]])
     assert "</evidence_chunk_escaped>" in rendered
-    assert rendered.count("</evidence_chunk>") == 1
+    assert "[/CHUNK]" in rendered
 
     for category in KnowledgeCategory:
         built = build_category_extraction_prompt(category=category, chunks=[chunks[0]])
