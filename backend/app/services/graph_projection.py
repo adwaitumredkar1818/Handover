@@ -12,7 +12,7 @@ import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.cache.local_cache import local_response_cache
@@ -37,6 +37,7 @@ from app.schemas.relationship import (
     KnowledgeRelationshipResponse,
     NodeDetailResponse,
 )
+from app.services.knowledge_graphs import get_project_graph_stamp
 from app.services.relationship_taxonomy import get_display_label
 
 logger = logging.getLogger("app.services.graph_projection")
@@ -65,8 +66,9 @@ class GraphProjectionService:
     ) -> GraphProjectionResponse:
         """Generate a React Flow-compatible projection of the accessible project knowledge graph."""
         bind_id = id(self._session.get_bind())
+        graph_stamp = get_project_graph_stamp(self._session, project_id)
         cache_key = (
-            f"rel_graph:{project_id}:{bind_id}:{viewer_user_id}:{int(has_project_manage)}:"
+            f"rel_graph:{project_id}:{bind_id}:{graph_stamp}:{viewer_user_id}:{int(has_project_manage)}:"
             f"{center_node_id or ''}:{depth}:{entity_type_filter or ''}:"
             f"{verification_status_filter or ''}:{limit_nodes}:{limit_edges}"
         )
@@ -88,6 +90,7 @@ class GraphProjectionService:
         # without duplicating KnowledgeEntity rows or downloading RelationshipEvidenceLink excerpts.
         rel_filters: list[Any] = [
             KnowledgeRelationship.project_id == project_id,
+            KnowledgeRelationship.is_stale.is_(False),
             acl_clause,
             EvidenceItem.deleted_at.is_(None),
             EvidenceItem.processing_status != EvidenceProcessingStatus.DELETED.value,
@@ -96,6 +99,15 @@ class GraphProjectionService:
             rel_filters.append(
                 KnowledgeRelationship.verification_status == verification_status_filter
             )
+        rel_priority = case(
+            (
+                KnowledgeRelationship.relationship_type.in_(
+                    ["BELONGS_TO_WORK_CLUSTER", "AUTHORED_BY", "CONFIGURED_IN"]
+                ),
+                2,
+            ),
+            else_=1,
+        )
         rel_rows = list(
             self._session.execute(
                 select(
@@ -129,7 +141,7 @@ class GraphProjectionService:
                     KnowledgeRelationship.is_bidirectional_display,
                     KnowledgeRelationship.created_at,
                 )
-                .order_by(KnowledgeRelationship.created_at.desc())
+                .order_by(rel_priority.asc(), KnowledgeRelationship.created_at.desc())
                 .limit(limit_edges)
             ).all()
         )
@@ -148,6 +160,7 @@ class GraphProjectionService:
                     KnowledgeEntity.id.in_(chunk),
                     KnowledgeEntity.project_id == project_id,
                     KnowledgeEntity.is_deleted.is_(False),
+                    KnowledgeEntity.is_stale.is_(False),
                 )
                 if entity_type_filter:
                     stmt = stmt.where(KnowledgeEntity.entity_type == entity_type_filter)
@@ -199,6 +212,7 @@ class GraphProjectionService:
             extra_filters: list[Any] = [
                 KnowledgeEntity.project_id == project_id,
                 KnowledgeEntity.is_deleted.is_(False),
+                KnowledgeEntity.is_stale.is_(False),
             ]
             if seen_ep_ids:
                 extra_filters.append(KnowledgeEntity.id.notin_(list(seen_ep_ids)))
@@ -264,6 +278,8 @@ class GraphProjectionService:
         # Build GraphNodeProjections
         nodes: list[GraphNodeProjection] = []
         for ent in entity_map.values():
+            ent_meta = ent.metadata_json or {}
+            ver_status = str(ent_meta.get("verification_status") or "pending_review")
             nodes.append(
                 GraphNodeProjection(
                     id=str(ent.id),
@@ -273,9 +289,9 @@ class GraphProjectionService:
                     entity_type=ent.entity_type,
                     status=ent.resolution_status,
                     source_provider=ent.source_provider,
-                    verification_status=ent.resolution_status,
+                    verification_status=ver_status,
                     confidence=float(ent.confidence_score),
-                    metadata=ent.metadata_json or {},
+                    metadata=ent_meta,
                 )
             )
 
