@@ -185,24 +185,29 @@ export function EvidenceCenterView() {
   const [expandedChunkIds, setExpandedChunkIds] = useState<Record<string, boolean>>({});
   const [syncingMappingId, setSyncingMappingId] = useState<string | null>(null);
   const initialEvidenceProjectRef = React.useRef<string | null>(null);
-  const lastFetchedTotalRef = React.useRef<number | null>(null);
+  const lastStatusSignatureRef = React.useRef<string | null>(null);
 
   useEffect(() => {
     if (!activeProject?.id) return;
     if (initialEvidenceProjectRef.current !== activeProject.id) {
       initialEvidenceProjectRef.current = activeProject.id;
-      lastFetchedTotalRef.current = null;
+      lastStatusSignatureRef.current = null;
       void refreshEvidence();
     }
   }, [activeProject?.id, refreshEvidence]);
 
   useEffect(() => {
     if (!activeProject?.id || !projectStatus) return;
-    if (
-      projectStatus.total_evidence_count > evidenceList.length &&
-      projectStatus.total_evidence_count !== lastFetchedTotalRef.current
-    ) {
-      lastFetchedTotalRef.current = projectStatus.total_evidence_count;
+    const nextSig = `${projectStatus.total_evidence_count}:${projectStatus.processed_evidence_count}:${projectStatus.deterministic_ready}:${projectStatus.semantic_extracting}:${projectStatus.semantic_ready}:${projectStatus.knowledge_item_count}:${projectStatus.is_processing}`;
+    if (lastStatusSignatureRef.current === null) {
+      lastStatusSignatureRef.current = nextSig;
+      if (projectStatus.total_evidence_count > evidenceList.length) {
+        void refreshEvidence();
+      }
+      return;
+    }
+    if (nextSig !== lastStatusSignatureRef.current) {
+      lastStatusSignatureRef.current = nextSig;
       void refreshEvidence();
     }
   }, [activeProject?.id, projectStatus, evidenceList.length, refreshEvidence]);
@@ -770,7 +775,7 @@ export function EvidenceCenterView() {
               <div className="p-3 rounded-lg bg-[#F0FAF8] border border-[#249E91]/30 text-xs">
                 <div className="flex items-center gap-1.5 font-bold text-[#249E91] text-[11px] mb-1">
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Verified Canonical Evidence</span>
+                  <span>Canonical Source Evidence (SHA-256)</span>
                 </div>
                 <div className="text-[11px] text-[#25334B] font-mono flex items-center justify-between gap-2 mt-1">
                   <span className="truncate">SHA-256: {selectedEvidence.content_hash}</span>

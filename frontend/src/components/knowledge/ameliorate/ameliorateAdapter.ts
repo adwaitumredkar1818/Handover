@@ -276,7 +276,7 @@ export function resolveAmeliorateNodeTheme(node: HandoverGraphNode): AmeliorateN
   if (type === "pull_request" || cat === "pull_request") return ENTITY_THEME_MAP["pull_request"]!;
   if (type === "issue" || cat === "issue") return ENTITY_THEME_MAP["issue"]!;
 
-  if (type === "project" || canon === "skillspassport") return ENTITY_THEME_MAP["project"] ?? FALLBACK_THEME;
+  if (type === "project") return ENTITY_THEME_MAP["project"] ?? FALLBACK_THEME;
   if (canon.includes("next") || canon.includes("react") || cat === "frontend") return ENTITY_THEME_MAP["frontend"] ?? FALLBACK_THEME;
   if (canon.includes("fastapi") || cat === "backend") return ENTITY_THEME_MAP["backend"] ?? FALLBACK_THEME;
   if (canon.includes("postgres") || canon.includes("sqlalchemy") || cat === "database") return ENTITY_THEME_MAP["database"] ?? FALLBACK_THEME;
@@ -298,7 +298,7 @@ export function resolveNodeTier(node: HandoverGraphNode): number {
   const cat = (node.category || "").toLowerCase();
 
   // Tier 0: Project root / System client entry / Confirmed Project Members
-  if (type === "project" || canon === "skillspassport") return 0;
+  if (type === "project") return 0;
   if (canon === "browser" || canon.includes("web client")) return 0;
   if (type === "confirmed_member" || cat === "confirmed_member" || type === "project_member") return 0;
 

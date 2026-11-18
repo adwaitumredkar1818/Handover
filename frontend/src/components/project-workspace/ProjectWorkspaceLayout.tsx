@@ -36,7 +36,17 @@ export function ProjectWorkspaceLayout({
 }: ProjectWorkspaceLayoutProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { activeProject, setActiveProject, overview: ctxOverview } = useLiveApp();
+  const { activeProject, setActiveProject, overview: ctxOverview, projects } = useLiveApp();
+
+  const resolvedProjectId = React.useMemo(() => {
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId)) {
+      return projectId;
+    }
+    const matched = (projects || []).find(
+      (p) => p.slug === projectId || p.name.toLowerCase() === projectId.toLowerCase()
+    );
+    return matched ? matched.id : null;
+  }, [projectId, projects]);
 
   const tabParam = searchParams.get("tab") as ProjectTabItem["id"] | null;
   const activeTab: ProjectTabItem["id"] =
@@ -59,25 +69,32 @@ export function ProjectWorkspaceLayout({
   // Load project details
   useEffect(() => {
     let mounted = true;
+    const targetId = resolvedProjectId;
 
-    if (activeProject && activeProject.id === projectId && ctxOverview) {
+    if (!targetId) {
+      setError("Project not found or invalid project identifier.");
+      setIsLoading(false);
+      return;
+    }
+
+    if (activeProject && activeProject.id === targetId && ctxOverview) {
       setProject(activeProject);
       setOverview(ctxOverview);
       setIsLoading(false);
-      api.projects.getTransition(projectId).then((tr) => {
+      api.projects.getTransition(targetId).then((tr) => {
         if (mounted) setTransition(tr);
       }).catch(() => null);
       return;
     }
 
     Promise.all([
-      activeProject && activeProject.id === projectId
+      activeProject && activeProject.id === targetId
         ? Promise.resolve(activeProject)
-        : api.projects.get(projectId),
-      ctxOverview && activeProject?.id === projectId
+        : api.projects.get(targetId),
+      ctxOverview && activeProject?.id === targetId
         ? Promise.resolve(ctxOverview)
-        : api.projects.getOverview(projectId).catch(() => null),
-      api.projects.getTransition(projectId).catch(() => null),
+        : api.projects.getOverview(targetId).catch(() => null),
+      api.projects.getTransition(targetId).catch(() => null),
     ])
       .then(([proj, ov, tr]) => {
         if (!mounted) return;
@@ -103,7 +120,7 @@ export function ProjectWorkspaceLayout({
     return () => {
       mounted = false;
     };
-  }, [projectId, activeProject, ctxOverview, setActiveProject]);
+  }, [resolvedProjectId, activeProject, ctxOverview, setActiveProject]);
 
   const handleTabChange = (tabId: ProjectTabItem["id"]) => {
     router.replace(`/projects/${projectId}?tab=${tabId}`, { scroll: false });

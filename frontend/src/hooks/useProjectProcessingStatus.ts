@@ -16,6 +16,7 @@ export function useProjectProcessingStatus(
   const [retrying, setRetrying] = useState<boolean>(false);
   const wasProcessingRef = useRef<boolean>(false);
   const lastGraphVersionRef = useRef<string | null>(null);
+  const lastGraphCountsRef = useRef<string | null>(null);
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
@@ -26,7 +27,14 @@ export function useProjectProcessingStatus(
       setStatus(res);
 
       // Progressive graph update detection: invalidate graph cache whenever new knowledge/entities/relationships land
-      if (res.graph_version && lastGraphVersionRef.current && res.graph_version !== lastGraphVersionRef.current) {
+      const nextCountsSig = `${res.knowledge_item_count}:${res.entity_count}:${res.relationship_count}`;
+      const versionChanged = Boolean(
+        res.graph_version && lastGraphVersionRef.current && res.graph_version !== lastGraphVersionRef.current
+      );
+      const countsChanged = Boolean(
+        lastGraphCountsRef.current && nextCountsSig !== lastGraphCountsRef.current
+      );
+      if (versionChanged || countsChanged) {
         invalidateGraphCache(`ki_graph:${projectId}:`);
         invalidateGraphCache(`ki_domains:${projectId}:`);
         invalidateGraphCache(`rel_contribs:${projectId}:`);
@@ -36,6 +44,7 @@ export function useProjectProcessingStatus(
         }
       }
       lastGraphVersionRef.current = res.graph_version ?? null;
+      lastGraphCountsRef.current = nextCountsSig;
 
       // Detect transition from processing -> ready/completed
       if (wasProcessingRef.current && !res.is_processing) {
