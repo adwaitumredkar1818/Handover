@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections import defaultdict
 from datetime import UTC
 from typing import Any
 
@@ -21,6 +22,7 @@ from app.models.enums import (
     ResponsibilityAlignment,
 )
 from app.models.evidence import EvidenceItem
+from app.models.integration import UserSourceAuthorisation
 from app.models.project import ProjectMembership
 from app.models.team_roster import ContributionAttribution, TeamRosterMember
 from app.services.integrations.github_sync import is_bot_identity
@@ -343,9 +345,31 @@ class ContributionAttributionService:
                 if r_ident not in prior_by_ident:
                     prior_by_ident[r_ident] = row
 
+        user_ids = [m.user_id for m in memberships if m.user_id]
+        auth_rows = []
+        if user_ids:
+            auth_rows = list(
+                self._session.execute(
+                    select(UserSourceAuthorisation).where(
+                        UserSourceAuthorisation.user_id.in_(user_ids),
+                        UserSourceAuthorisation.provider == "github",
+                        UserSourceAuthorisation.status == "active",
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        gh_login_to_pm: dict[str, ProjectMembership] = {}
+        for a in auth_rows:
+            if a.external_username:
+                matching_pm = next((m for m in memberships if m.user_id == a.user_id), None)
+                if matching_pm:
+                    gh_login_to_pm[a.external_username.strip().lower()] = matching_pm
+
         cached = {
             "roster_members": roster_members,
             "memberships": memberships,
+            "gh_login_to_pm": gh_login_to_pm,
             "by_ev": by_ev,
             "prior_by_key": prior_by_key,
             "prior_by_ident": prior_by_ident,
@@ -435,6 +459,12 @@ class ContributionAttributionService:
                         match_method = IdentityMatchMethod.EXACT_GITHUB_USERNAME.value
                         match_confidence = 1.0
                         break
+                if not matched_member and not matched_membership:
+                    gh_login_to_pm = proj_cache.get("gh_login_to_pm") or {}
+                    if gh_login.lower() in gh_login_to_pm:
+                        matched_membership = gh_login_to_pm[gh_login.lower()]
+                        match_method = "github_authorisation_mapping"
+                        match_confidence = 1.0
 
             # 3. Exact verified Git commit email match (roster or active ProjectMembership user)
             if not matched_member and git_email:
@@ -523,6 +553,11 @@ class ContributionAttributionService:
                 + explanation
             )
 
+        gh_login_to_pm = proj_cache.get("gh_login_to_pm") or {}
+        repo_name = str(meta.get("repository") or "")
+        repo_owner = repo_name.split("/")[0].strip().lower() if "/" in repo_name else None
+        directed_by_pm: ProjectMembership | None = gh_login_to_pm.get(repo_owner) if repo_owner else None
+
         attr_meta = {
             "title": evidence.title,
             "contributor_key": contributor_key,
@@ -541,6 +576,13 @@ class ContributionAttributionService:
             "suggested_roster_member_id": suggested_member_id,
             "suggested_project_membership_id": suggested_membership_id,
         }
+        if is_bot:
+            attr_meta["attribution_classification"] = "tool_associated"
+            if directed_by_pm:
+                attr_meta["directed_by_pm_id"] = str(directed_by_pm.id)
+                attr_meta["directed_by_name"] = directed_by_pm.user.full_name if directed_by_pm.user else repo_owner
+                attr_meta["directed_by_login"] = repo_owner
+                attr_meta["human_director"] = attr_meta["directed_by_name"]
 
         by_ev: dict[uuid.UUID, ContributionAttribution] = proj_cache["by_ev"]
         existing_attr: ContributionAttribution | None = by_ev.get(evidence.id)
@@ -646,7 +688,7 @@ class ContributionAttributionService:
         memberships = list(
             self._session.execute(
                 select(ProjectMembership)
-                .options(selectinload(ProjectMembership.user))
+                .options(selectinload(ProjectMembership.user), selectinload(ProjectMembership.role))
                 .where(ProjectMembership.project_id == project_id, ProjectMembership.status == "active")
             )
             .scalars()
@@ -712,6 +754,134 @@ class ContributionAttributionService:
                     entry["work_areas"].add(str(wa))
             entry["evidence_ids"].append(str(row.evidence_item_id))
 
+            if row.contributor_type == ContributorType.BOT.value or is_bot_identity(
+                login=meta.get("github_author_login"),
+                name=meta.get("git_author_name"),
+                email=meta.get("git_author_email"),
+            )[0]:
+                raw_name = (meta.get("git_author_name") or row.contributor_identifier).lower()
+                if "lovable" in raw_name or "gpt-engineer" in raw_name or "lovable" in ckey.lower():
+                    clean_display = "Lovable (AI Tool)"
+                elif "[bot]" in raw_name:
+                    clean_display = f"{meta.get('git_author_name') or row.contributor_identifier} (AI Tool)"
+                else:
+                    clean_display = f"{meta.get('git_author_name') or row.contributor_identifier} (Bot)"
+                entry["display_name"] = clean_display
+                entry["contributor_type"] = ContributorType.BOT.value
+                entry["review_status"] = ContributorReviewStatus.MARKED_BOT.value
+                entry["identity_note"] = "Tool-Associated Code Generation (AI Assistant)"
+
+        # Tier A — Confirmed project members must always be represented even with 0 direct commits
+        matched_pm_ids: set[uuid.UUID] = set()
+        for row in rows:
+            if row.matched_project_membership_id is not None:
+                matched_pm_ids.add(row.matched_project_membership_id)
+        for entry in grouped.values():
+            mid = entry.get("matched_project_membership_id")
+            if mid:
+                try:
+                    matched_pm_ids.add(uuid.UUID(str(mid)))
+                except (ValueError, TypeError):
+                    pass
+
+        user_ids = [m.user_id for m in memberships if m.user_id]
+        auth_rows = list(
+            self._session.execute(
+                select(UserSourceAuthorisation).where(
+                    UserSourceAuthorisation.user_id.in_(user_ids),
+                    UserSourceAuthorisation.provider == "github",
+                    UserSourceAuthorisation.status == "active",
+                )
+            )
+            .scalars()
+            .all()
+        ) if user_ids else []
+        user_to_gh = {a.user_id: a.external_username.strip() for a in auth_rows if a.external_username}
+
+        # Collect assisted / directed work for confirmed members
+        directed_stats_by_pm: dict[uuid.UUID, dict[str, Any]] = defaultdict(lambda: {
+            "assisted_commits": 0,
+            "work_areas": set(),
+            "repositories": set(),
+            "evidence_ids": [],
+        })
+        for row in rows:
+            if row.evidence_item_id not in accessible_evidence_ids:
+                continue
+            meta = row.metadata_json or {}
+            d_pm_id = meta.get("directed_by_pm_id")
+            if not d_pm_id:
+                repo = str(meta.get("repository") or "")
+                repo_owner = repo.split("/")[0].strip().lower() if "/" in repo else None
+                for pm_candidate in memberships:
+                    cand_gh = (user_to_gh.get(pm_candidate.user_id) or "").strip().lower()
+                    if cand_gh and cand_gh == repo_owner:
+                        d_pm_id = str(pm_candidate.id)
+                        break
+            if d_pm_id:
+                try:
+                    pm_uuid = uuid.UUID(str(d_pm_id))
+                    stats = directed_stats_by_pm[pm_uuid]
+                    stats["assisted_commits"] += 1
+                    if meta.get("repository"):
+                        stats["repositories"].add(str(meta["repository"]))
+                    for wa in meta.get("work_areas") or []:
+                        stats["work_areas"].add(str(wa))
+                    stats["evidence_ids"].append(str(row.evidence_item_id))
+                except (ValueError, TypeError):
+                    pass
+
+        for pm in memberships:
+            ckey = f"member:{pm.id}"
+            gh_handle = user_to_gh.get(pm.user_id)
+            if pm.id not in matched_pm_ids or ckey not in grouped:
+                raw_email = pm.user.email if pm.user else None
+                role_name = pm.role.name if getattr(pm, "role", None) else "project_member"
+                role_label = role_name.replace("_", " ").title()
+                entry = grouped.get(ckey)
+                if entry is None:
+                    entry = {
+                        "contributor_key": ckey,
+                        "display_name": pm.user.full_name if pm.user else f"Member {pm.id}",
+                        "github_login": gh_handle,
+                        "github_numeric_id": None,
+                        "git_author_name": None,
+                        "git_author_email": raw_email if has_project_manage else mask_email(raw_email),
+                        "contributor_type": ContributorType.CONFIRMED_MEMBER.value,
+                        "review_status": ContributorReviewStatus.CONFIRMED.value,
+                        "match_method": "direct_membership",
+                        "match_confidence": 1.0,
+                        "matched_project_membership_id": str(pm.id),
+                        "matched_member_name": pm.user.full_name if pm.user else None,
+                        "suggested_project_membership_id": None,
+                        "suggested_member_name": None,
+                        "declared_responsibility": pm.responsibility_description or (f"{role_label} · GitHub @{gh_handle}" if gh_handle else f"{role_label} · GitHub identity not linked"),
+                        "contribution_count": 0,
+                        "commits_count": 0,
+                        "prs_count": 0,
+                        "issues_count": 0,
+                        "repositories": set(),
+                        "work_areas": {pm.responsibility_description} if pm.responsibility_description else {"Unassigned"},
+                        "evidence_ids": [],
+                        "review_history": [],
+                        "identity_note": f"Confirmed Member · GitHub @{gh_handle}" if gh_handle else "Project member · GitHub identity not linked",
+                    }
+                    grouped[ckey] = entry
+
+            entry = grouped.get(ckey)
+            if entry is not None and pm.id in directed_stats_by_pm:
+                d_stats = directed_stats_by_pm[pm.id]
+                entry["assisted_commits_count"] = d_stats["assisted_commits"]
+                entry["contribution_count"] = entry.get("commits_count", 0) + d_stats["assisted_commits"]
+                entry["repositories"] = entry["repositories"] | d_stats["repositories"]
+                entry["work_areas"] = (entry["work_areas"] - {"Unassigned"}) | d_stats["work_areas"]
+                entry["evidence_ids"] = list(set(entry["evidence_ids"] + d_stats["evidence_ids"]))
+                if gh_handle:
+                    entry["github_login"] = gh_handle
+                entry["declared_responsibility"] = "Repository Owner & Technical Lead (Human-Directed / AI-Assisted)"
+                entry["identity_note"] = f"Confirmed Member · Directed {d_stats['assisted_commits']} AI-assisted contributions"
+                entry["attribution_category"] = "human_directed"
+
         results: list[dict[str, Any]] = []
         for entry in grouped.values():
             if contributor_type_filter and entry["contributor_type"] != contributor_type_filter:
@@ -751,11 +921,21 @@ class ContributionAttributionService:
             .scalars()
             .all()
         )
+        ckey_lower = contributor_key.lower()
         matching = [
             r
             for r in rows
             if (r.metadata_json or {}).get("contributor_key") == contributor_key
-            or r.contributor_identifier.lower() == contributor_key.lower()
+            or r.contributor_identifier.lower() == ckey_lower
+            or f"id:{r.contributor_identifier.lower()}" == ckey_lower
+            or (
+                (r.metadata_json or {}).get("github_author_id")
+                and f"ghid:{(r.metadata_json or {}).get('github_author_id')}" == ckey_lower
+            )
+            or (
+                (r.metadata_json or {}).get("github_author_login")
+                and (r.metadata_json or {}).get("github_author_login").lower() == ckey_lower
+            )
         ]
         if not matching:
             from app.core.exceptions import NotFoundError
@@ -825,6 +1005,7 @@ class ContributionAttributionService:
         roster_member = self._session.get(TeamRosterMember, roster_member_id) if roster_member_id else None
         for row in matching:
             meta = dict(row.metadata_json or {})
+            meta["contributor_key"] = contributor_key
             history = list(meta.get("review_history") or [])
             history.append(
                 {

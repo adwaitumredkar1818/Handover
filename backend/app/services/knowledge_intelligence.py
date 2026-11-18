@@ -269,7 +269,7 @@ class KnowledgeIntelligenceService:
         evidence_id: uuid.UUID | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
-        include_stale: bool = True,
+        include_stale: bool = False,
         stale_only: bool = False,
         include_synthetic: bool = False,
         limit: int = 20,

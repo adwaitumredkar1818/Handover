@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,7 @@ from app.models.enums import (
     EpistemicStatus,
     EvidenceProcessingStatus,
     EvidenceSourceType,
+    ExtractionRunScope,
     ExtractionRunStatus,
     IntegrationProvider,
     KnowledgeCategory,
@@ -29,6 +31,7 @@ from app.models.enums import (
 )
 from app.models.integration import SourceAccessPolicy, SourceConnection
 from app.models.job import BackgroundJob
+from app.models.knowledge import KnowledgeExtractionRun
 from app.models.organisation import OrganisationMembership
 from app.repositories.evidence import EvidenceRepository
 from app.repositories.job import BackgroundJobRepository
@@ -123,53 +126,55 @@ class ScriptedFakeLLMClient:
                 completion_tokens=12,
             )
 
-        chunk_ids: list[str] = []
-        marker = 'chunk_id="'
-        idx = 0
-        while True:
-            pos = request.user_prompt.find(marker, idx)
-            if pos == -1:
-                break
-            start = pos + len(marker)
-            end = request.user_prompt.find('"', start)
-            if end != -1:
-                chunk_ids.append(request.user_prompt[start:end])
-            idx = start
+        chunk_ids: list[str] = re.findall(r'\[CHUNK id=([a-f0-9\-]+)\]', request.user_prompt)
+        if not chunk_ids:
+            marker = 'chunk_id="'
+            idx = 0
+            while True:
+                pos = request.user_prompt.find(marker, idx)
+                if pos == -1:
+                    break
+                start = pos + len(marker)
+                end = request.user_prompt.find('"', start)
+                if end != -1:
+                    chunk_ids.append(request.user_prompt[start:end])
+                idx = start
 
         items: list[dict[str, object]] = []
         primary_cid = chunk_ids[0] if chunk_ids else str(uuid.uuid4())
         user_p = request.user_prompt
 
-        if "decisions_rationale" in user_p:
-            if "PostgreSQL 16 as our canonical store" in user_p:
-                items.append(
-                    {
-                        "title": "Select PostgreSQL 16 as canonical store",
-                        "description": "Team selected PostgreSQL 16 for durable records.",
-                        "decision_category": "architectural",
-                        "decision_maker": "Alex Chen",
-                        "decision_date": "2026-10-15",
-                        "rationale": "Strong relational integrity.",
-                        "alternatives_considered": ["Neo4j"],
-                        "chosen_approach": "PostgreSQL 16",
-                        "decision_status": "accepted",
-                        "is_interpretation": False,
-                        "is_uncertain": False,
-                        "confidence_level": "high",
-                        "evidence_refs": [
-                            {
-                                "chunk_id": primary_cid,
-                                "supporting_excerpt": (
-                                    "selected PostgreSQL 16 as our canonical store"
-                                ),
-                                "support_type": "direct",
-                            }
-                        ],
-                    }
-                )
+        if "PostgreSQL 16 as our canonical store" in user_p:
+            items.append(
+                {
+                    "category": "decisions_rationale",
+                    "title": "Select PostgreSQL 16 as canonical store",
+                    "description": "Team selected PostgreSQL 16 for durable records.",
+                    "decision_category": "architectural",
+                    "decision_maker": "Alex Chen",
+                    "decision_date": "2026-10-15",
+                    "rationale": "Strong relational integrity.",
+                    "alternatives_considered": ["Neo4j"],
+                    "chosen_approach": "PostgreSQL 16",
+                    "decision_status": "accepted",
+                    "is_interpretation": False,
+                    "is_uncertain": False,
+                    "confidence_level": "high",
+                    "evidence_refs": [
+                        {
+                            "chunk_id": primary_cid,
+                            "supporting_excerpt": (
+                                "selected PostgreSQL 16 as our canonical store"
+                            ),
+                            "support_type": "direct",
+                        }
+                    ],
+                }
+            )
             # Also inject an ungrounded hallucinated item that MUST be dropped
             items.append(
                 {
+                    "category": "decisions_rationale",
                     "title": "Hallucinated Redis decision",
                     "description": "Should be rejected by backend validator.",
                     "decision_status": "accepted",
@@ -183,77 +188,80 @@ class ScriptedFakeLLMClient:
                     ],
                 }
             )
-        elif "responsibilities_ownership" in user_p:
-            if "Priya Nair maintains the FastAPI ingestion worker" in user_p:
-                items.append(
-                    {
-                        "person_identity": "Priya Nair",
-                        "person_identifier_type": "display_name",
-                        "title": "FastAPI ingestion worker maintainer",
-                        "description": "Priya Nair maintains the FastAPI ingestion worker.",
-                        "component_or_workstream": "backend/app/services/ingestion_worker.py",
-                        "ownership_role": "maintainer",
-                        "ownership_basis": "explicitly_assigned",
-                        "ownership_status": "active",
-                        "confidence_level": "high",
-                        "evidence_refs": [
-                            {
-                                "chunk_id": primary_cid,
-                                "supporting_excerpt": (
-                                    "Priya Nair maintains the FastAPI ingestion worker"
-                                ),
-                                "support_type": "direct",
-                            }
-                        ],
-                    }
-                )
-            if "Secret Ops Key Rotation belongs to Security Lead" in user_p:
-                items.append(
-                    {
-                        "person_identity": "Security Lead",
-                        "person_identifier_type": "role_label",
-                        "title": "Secret Ops Key Rotation owner",
-                        "description": "Security Lead handles restricted key rotation.",
-                        "component_or_workstream": "secrets-vault",
-                        "ownership_role": "owner",
-                        "ownership_basis": "explicitly_assigned",
-                        "ownership_status": "active",
-                        "confidence_level": "high",
-                        "evidence_refs": [
-                            {
-                                "chunk_id": primary_cid,
-                                "supporting_excerpt": (
-                                    "Secret Ops Key Rotation belongs to Security Lead"
-                                ),
-                                "support_type": "direct",
-                            }
-                        ],
-                    }
-                )
-        elif "technical_architecture" in user_p:
-            if "POST /api/v1/projects/{project_id}/knowledge/extract" in user_p:
-                items.append(
-                    {
-                        "title": "Knowledge extract endpoint behavior",
-                        "description": "Endpoint dispatches background reconstruction job.",
-                        "technical_category": "api_behaviour",
-                        "exact_identifiers": [
-                            "POST /api/v1/projects/{project_id}/knowledge/extract"
-                        ],
-                        "components": ["knowledge-api"],
-                        "technical_status": "active",
-                        "confidence_level": "high",
-                        "evidence_refs": [
-                            {
-                                "chunk_id": primary_cid,
-                                "supporting_excerpt": (
-                                    "POST /api/v1/projects/{project_id}/knowledge/extract"
-                                ),
-                                "support_type": "direct",
-                            }
-                        ],
-                    }
-                )
+
+        if "Priya Nair maintains the FastAPI ingestion worker" in user_p:
+            items.append(
+                {
+                    "category": "responsibilities_ownership",
+                    "person_identity": "Priya Nair",
+                    "person_identifier_type": "display_name",
+                    "title": "FastAPI ingestion worker maintainer",
+                    "description": "Priya Nair maintains the FastAPI ingestion worker.",
+                    "component_or_workstream": "backend/app/services/ingestion_worker.py",
+                    "ownership_role": "maintainer",
+                    "ownership_basis": "explicitly_assigned",
+                    "ownership_status": "active",
+                    "confidence_level": "high",
+                    "evidence_refs": [
+                        {
+                            "chunk_id": primary_cid,
+                            "supporting_excerpt": (
+                                "Priya Nair maintains the FastAPI ingestion worker"
+                            ),
+                            "support_type": "direct",
+                        }
+                    ],
+                }
+            )
+        if "Secret Ops Key Rotation belongs to Security Lead" in user_p:
+            items.append(
+                {
+                    "category": "responsibilities_ownership",
+                    "person_identity": "Security Lead",
+                    "person_identifier_type": "role_label",
+                    "title": "Secret Ops Key Rotation owner",
+                    "description": "Security Lead handles restricted key rotation.",
+                    "component_or_workstream": "secrets-vault",
+                    "ownership_role": "owner",
+                    "ownership_basis": "explicitly_assigned",
+                    "ownership_status": "active",
+                    "confidence_level": "high",
+                    "evidence_refs": [
+                        {
+                            "chunk_id": primary_cid,
+                            "supporting_excerpt": (
+                                "Secret Ops Key Rotation belongs to Security Lead"
+                            ),
+                            "support_type": "direct",
+                        }
+                    ],
+                }
+            )
+
+        if "POST /api/v1/projects/{project_id}/knowledge/extract" in user_p:
+            items.append(
+                {
+                    "category": "technical_architecture",
+                    "title": "Knowledge extract endpoint behavior",
+                    "description": "Endpoint dispatches background reconstruction job.",
+                    "technical_category": "api_behaviour",
+                    "exact_identifiers": [
+                        "POST /api/v1/projects/{project_id}/knowledge/extract"
+                    ],
+                    "components": ["knowledge-api"],
+                    "technical_status": "active",
+                    "confidence_level": "high",
+                    "evidence_refs": [
+                        {
+                            "chunk_id": primary_cid,
+                            "supporting_excerpt": (
+                                "POST /api/v1/projects/{project_id}/knowledge/extract"
+                            ),
+                            "support_type": "direct",
+                        }
+                    ],
+                }
+            )
 
         return LLMGenerationResult(
             parsed_json={"items": items},
@@ -545,6 +553,7 @@ def test_knowledge_reconstruction_rbac_acl_grounding_and_filters(
             )
             assert trig_resp.status_code == 202
             trig_data = trig_resp.json()
+            print("DEBUG TRIG_DATA:", trig_data)
             assert trig_data["already_active"] is False
             run_id = trig_data["run"]["id"]
 
@@ -961,3 +970,130 @@ def test_worker_json_repair_transient_retry_permission_revocation_and_rechunk_st
             ).json()
             assert r2_after["status"] == ExtractionRunStatus.FAILED.value
             assert r2_after["error_code"] == "EXTRACTION_PERMISSION_REVOKED"
+
+
+def test_auto_extraction_scheduling_new_evidence_when_auto_reextract_on_update_is_false(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Step 1 Regression Test: A newly indexed eligible document MUST automatically queue Qwen3 extraction even when auto_reextract_on_update=False."""
+    fake_embed = InMemoryEmbeddingService(dims=64)
+    fake_chroma = InMemoryVectorStoreClient(expected_dimensions=64)
+
+    with isolated_auth_app(
+        monkeypatch,
+        upload_storage_path=tmp_path / "know_auto_uploads",
+        embedding_expected_dimensions=64,
+        extraction_auto_reextract_on_update=False,
+    ) as ctx:
+        assert ctx.settings.extraction.auto_reextract_on_update is False
+
+        indexing_worker = IndexingWorkerService(
+            session_factory=ctx.session_factory,
+            chunking_service=ChunkingService(settings=ctx.settings.chunking),
+            embedding_service=fake_embed,
+            vector_store=fake_chroma,
+            ingestion_settings=ctx.settings.ingestion,
+            extraction_settings=ctx.settings.extraction,
+            llm_model_name=ctx.settings.ollama.llm_model,
+        )
+
+        with TestClient(ctx.app) as client:
+            owner = register_and_login_user(
+                client, email="auto-owner@example.com", full_name="Auto Owner"
+            )
+            org = client.post(
+                "/api/v1/organisations",
+                headers=owner.headers,
+                json={"name": "Auto Org"},
+            ).json()
+            proj = client.post(
+                f"/api/v1/organisations/{org['id']}/projects",
+                headers=owner.headers,
+                json={"name": "Auto Proj", "status": "active", "visibility": "private"},
+            ).json()
+
+            oid = uuid.UUID(org["id"])
+            pid = uuid.UUID(proj["id"])
+            t_now = datetime(2026, 10, 15, tzinfo=UTC)
+
+            # Create brand-new eligible document
+            with ctx.session_factory() as session:
+                ev_repo = EvidenceRepository(session)
+                job_repo = BackgroundJobRepository(session)
+                doc_text = "ADR-100: Microservices communicate via gRPC with Protocol Buffers."
+                ev = ev_repo.create_evidence_item(
+                    organisation_id=oid,
+                    project_id=pid,
+                    uploaded_by_user_id=owner.user_id,
+                    source_type=EvidenceSourceType.DOCUMENT_UPLOAD.value,
+                    source_provider="local_upload",
+                    category="pdf_document",
+                    source_external_id="upload:adr-100",
+                    source_url=None,
+                    source_author_identity="Architect",
+                    title="adr-100.pdf",
+                    original_filename="adr-100.pdf",
+                    mime_type="application/pdf",
+                    file_size_bytes=512,
+                    content_hash="aa" * 32,
+                    storage_provider=None,
+                    storage_object_key=None,
+                    encryption_algorithm=None,
+                    encryption_key_id=None,
+                    acl_scope="project_members",
+                    source_created_at=t_now,
+                    source_updated_at=t_now,
+                    extracted_at=t_now,
+                    processing_status=EvidenceProcessingStatus.EXTRACTED.value,
+                    extraction_method="pymupdf",
+                    page_count=1,
+                    metadata_json={},
+                )
+                ev_repo.replace_extracted_content(
+                    evidence_id=ev.id,
+                    extracted_text=doc_text,
+                    warnings=(),
+                    pages=(_page(doc_text, section="S1"),),
+                )
+                job_repo.create_job(
+                    organisation_id=oid,
+                    project_id=pid,
+                    evidence_id=ev.id,
+                    triggered_by_user_id=owner.user_id,
+                    job_type=BackgroundJobType.EVIDENCE_INDEXING.value,
+                )
+                session.commit()
+
+            # Drain indexing worker
+            assert indexing_worker.drain_pending_jobs(max_jobs=5) == 1
+
+            # Verify that KNOWLEDGE_RECONSTRUCTION was AUTOMATICALLY scheduled despite auto_reextract_on_update=False!
+            with ctx.session_factory() as session:
+                recon_jobs = list(
+                    session.execute(
+                        select(BackgroundJob).where(
+                            BackgroundJob.project_id == pid,
+                            BackgroundJob.job_type == BackgroundJobType.KNOWLEDGE_RECONSTRUCTION.value,
+                            BackgroundJob.status == BackgroundJobStatus.QUEUED.value,
+                        )
+                    ).scalars().all()
+                )
+                assert len(recon_jobs) == 1
+                recon_job = recon_jobs[0]
+                assert recon_job.evidence_id == ev.id
+                assert recon_job.payload_json["trigger"] == "auto_new_evidence"
+
+                # Verify extraction run
+                runs = list(
+                    session.execute(
+                        select(KnowledgeExtractionRun).where(
+                            KnowledgeExtractionRun.project_id == pid,
+                            KnowledgeExtractionRun.evidence_id == ev.id,
+                        )
+                    ).scalars().all()
+                )
+                assert len(runs) == 1
+                assert runs[0].scope_type == ExtractionRunScope.EVIDENCE.value
+                assert runs[0].status == ExtractionRunStatus.QUEUED.value
+

@@ -515,6 +515,201 @@ class RelationshipDiscoveryEngine:
         return drafts
 
     # --------------------------------------------------------------------------
+    # Method 4: Grounded Architecture & System Context Discovery
+    # --------------------------------------------------------------------------
+
+    def discover_architecture_relationships(
+        self,
+        *,
+        project_id: uuid.UUID,
+        organisation_id: uuid.UUID,
+    ) -> list[DiscoveredRelationshipDraft]:
+        """Extract explicit service-to-service, component-to-component, and storage interactions
+        grounded in verbatim architecture and specification document chunks."""
+        drafts: list[DiscoveredRelationshipDraft] = []
+        _, entities_by_id = self._entity_repo._project_entities(project_id)
+        all_entities = list(entities_by_id.values())
+
+        arch_types = {
+            EntityType.TECHNICAL_COMPONENT.value,
+            EntityType.ARCHITECTURE_COMPONENT.value,
+            EntityType.COMPONENT.value,
+            EntityType.SERVICE.value,
+            EntityType.API.value,
+            EntityType.DATABASE.value,
+        }
+        components = [e for e in all_entities if e.entity_type in arch_types]
+        if not components:
+            return []
+
+        comp_by_norm: dict[str, KnowledgeEntity] = {}
+        for c in components:
+            comp_by_norm[c.canonical_name.strip().lower()] = c
+            # Index aliases
+            for a in getattr(c, "aliases", []) or []:
+                if hasattr(a, "alias_value") and a.alias_value:
+                    comp_by_norm[a.alias_value.strip().lower()] = c
+
+        # Load chunks from specification/architecture evidence items
+        doc_chunks = list(
+            self._session.execute(
+                select(EvidenceChunk)
+                .join(EvidenceItem, EvidenceItem.id == EvidenceChunk.evidence_id)
+                .where(
+                    EvidenceChunk.project_id == project_id,
+                    EvidenceItem.deleted_at.is_(None),
+                )
+                .order_by(EvidenceChunk.chunk_index)
+            )
+            .scalars()
+            .all()
+        )
+
+        seen_pairs: set[tuple[uuid.UUID, uuid.UUID, str]] = set()
+
+        for chunk in doc_chunks:
+            text = chunk.chunk_text
+            if not text or len(text.strip()) < 20:
+                continue
+
+            # Split into individual sentences (preserving semicolons so coordinate clauses share context)
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n{2,}", text) if len(s.strip()) > 15]
+
+            for s in sentences:
+                s_lower = s.lower()
+
+                # Find which components are mentioned in this sentence
+                mentioned: list[tuple[str, KnowledgeEntity]] = []
+                for norm_name, comp in comp_by_norm.items():
+                    pattern = r"\b" + re.escape(norm_name) + r"\b"
+                    if re.search(pattern, s_lower):
+                        mentioned.append((norm_name, comp))
+
+                if len(mentioned) < 2:
+                    continue
+
+                # Deduplicate mentioned components by entity ID
+                unique_mentioned: list[KnowledgeEntity] = []
+                seen_ent_ids = set()
+                for _, ent in mentioned:
+                    if ent.id not in seen_ent_ids:
+                        seen_ent_ids.add(ent.id)
+                        unique_mentioned.append(ent)
+
+                if len(unique_mentioned) < 2:
+                    continue
+
+                for src_ent in unique_mentioned:
+                    src_norm = src_ent.canonical_name.strip().lower()
+                    for dst_ent in unique_mentioned:
+                        if src_ent.id == dst_ent.id:
+                            continue
+                        dst_norm = dst_ent.canonical_name.strip().lower()
+
+                        r_type: str | None = None
+
+                        # 0. Subsystem & component hierarchy (PART_OF)
+                        if ("route" in src_norm and "fastapi" in dst_norm and "route" not in dst_norm):
+                            r_type = RelationshipType.PART_OF.value
+                        elif ("auth" in src_norm and "supabase" in src_norm and dst_norm == "supabase"):
+                            r_type = RelationshipType.PART_OF.value
+                        elif (("model" in src_norm or "embedding" in src_norm) and "ollama" in src_norm and dst_norm == "ollama"):
+                            r_type = RelationshipType.PART_OF.value
+
+                        # 1. CALLS: client/browser -> routes/api, routes -> backend
+                        elif (
+                            ("browser" in src_norm or "client" in src_norm)
+                            and ("route" in dst_norm or "api" in dst_norm)
+                            and any(w in s_lower for w in ["call", "request", "endpoint", "on protected", "interface"])
+                        ):
+                            r_type = RelationshipType.CALLS.value
+                        elif (
+                            ("route" in src_norm or "api" in src_norm)
+                            and ("fastapi" in dst_norm or "backend" in dst_norm or "service" in dst_norm)
+                            and any(w in s_lower for w in ["call", "handle", "under", "route", "service"])
+                        ):
+                            r_type = RelationshipType.CALLS.value
+                        elif (
+                            ("fastapi" in src_norm or "backend" in src_norm)
+                            and ("worker" in dst_norm)
+                            and any(w in s_lower for w in ["dispatch", "async", "task", "job", "queue", "worker", "process", "service"])
+                        ):
+                            r_type = RelationshipType.SENDS_TO.value
+
+                        # 2. STORES_IN / READS_FROM / WRITES_TO
+                        elif (
+                            ("postgres" in dst_norm or "database" in dst_norm)
+                            and ("fastapi" in src_norm or "worker" in src_norm or "backend" in src_norm or "route" in src_norm)
+                            and any(w in s_lower for w in ["model", "relational", "metadata", "postgres", "sql", "persist", "store", "quer", "depend"])
+                        ):
+                            r_type = RelationshipType.READS_FROM.value
+                        elif (
+                            ("storage" in dst_norm or "bucket" in dst_norm)
+                            and ("fastapi" in src_norm or "backend" in src_norm or "worker" in src_norm or "route" in src_norm)
+                            and any(w in s_lower for w in ["object storage", "bucket", "binary", "binaries", "store", "upload", "file", "depend"])
+                        ):
+                            r_type = RelationshipType.STORES_IN.value
+                        elif (
+                            ("chroma" in dst_norm or "vector" in dst_norm)
+                            and ("worker" in src_norm or "fastapi" in src_norm or "backend" in src_norm)
+                            and any(w in s_lower for w in ["chroma", "index", "vector", "chunk", "retrieval", "embed", "retrieval aid", "depend"])
+                        ):
+                            r_type = RelationshipType.STORES_IN.value
+
+                        # 3. AUTHENTICATES_WITH
+                        elif (
+                            ("auth" in dst_norm or "supabase" in dst_norm)
+                            and ("fastapi" in src_norm or "route" in src_norm or "backend" in src_norm)
+                            and any(w in s_lower for w in ["auth", "token", "session", "credential", "protected", "depend"])
+                        ):
+                            r_type = RelationshipType.AUTHENTICATES_WITH.value
+
+                        # 4. USES_MODEL
+                        elif (
+                            ("ollama" in dst_norm or "model" in dst_norm or "qwen" in dst_norm)
+                            and ("worker" in src_norm or "backend" in src_norm or "fastapi" in src_norm)
+                            and any(w in s_lower for w in ["model", "ollama", "embed", "infer", "extract", "depend"])
+                        ):
+                            r_type = RelationshipType.USES_MODEL.value
+
+                        # 5. INTEGRATES_WITH
+                        elif (
+                            ("github" in dst_norm or "jira" in dst_norm)
+                            and ("fastapi" in src_norm or "worker" in src_norm or "backend" in src_norm)
+                            and any(w in s_lower for w in ["sync", "connect", "provider", "select", "repo", "issue", "integrate", "route family"])
+                        ):
+                            r_type = RelationshipType.INTEGRATES_WITH.value
+
+                        if r_type:
+                            valid, _ = validate_relationship_endpoints(
+                                r_type, src_ent.entity_type, dst_ent.entity_type
+                            )
+                            if valid:
+                                pair_key = (src_ent.id, dst_ent.id, r_type)
+                                if pair_key not in seen_pairs:
+                                    seen_pairs.add(pair_key)
+                                    drafts.append(
+                                        DiscoveredRelationshipDraft(
+                                            source_entity_id=src_ent.id,
+                                            target_entity_id=dst_ent.id,
+                                            relationship_type=r_type,
+                                            relationship_basis=RelationshipBasis.EXPLICIT.value,
+                                            confidence_score=0.95,
+                                            discovery_method="architecture_evidence",
+                                            evidence_id=chunk.evidence_id,
+                                            evidence_chunk_id=chunk.id,
+                                            knowledge_item_id=None,
+                                            supporting_excerpt=s[:500],
+                                            source_location_json={
+                                                "chunk_index": chunk.chunk_index,
+                                                "section": chunk.section_title,
+                                            },
+                                        )
+                                    )
+
+        return drafts
+
+    # --------------------------------------------------------------------------
     # Method 5: Qwen3 8B LLM-Assisted Candidate Extraction
     # --------------------------------------------------------------------------
 
@@ -574,8 +769,10 @@ class RelationshipDiscoveryEngine:
             "MANDATORY RULES:\n"
             "1. ONLY extract relationships that have a DIRECT verbatim quote in the text chunk.\n"
             "2. NEVER invent or hallucinate relationships without evidence.\n"
-            "3. Choose relationship_type strictly from: DECIDED_BY, INFLUENCED_BY, IMPLEMENTED_BY, AFFECTS_COMPONENT, "
-            "BLOCKS, DEPENDS_ON, OWNS, ASSIGNED_TO, DISCUSSED_IN, DOCUMENTED_IN, REFERENCES, MITIGATES_RISK.\n"
+            "3. Choose relationship_type strictly from: CALLS, READS_FROM, WRITES_TO, AUTHENTICATES_WITH, "
+            "STORES_IN, USES_MODEL, INTEGRATES_WITH, SENDS_TO, DEPENDS_ON, DECIDED_BY, INFLUENCED_BY, "
+            "IMPLEMENTED_BY, AFFECTS_COMPONENT, BLOCKS, OWNS, ASSIGNED_TO, DISCUSSED_IN, DOCUMENTED_IN, "
+            "REFERENCES, MITIGATES_RISK.\n"
             "4. Return a JSON object with a single key 'relationships' containing a list of objects:\n"
             "   {\n"
             "     'source_name': str,\n"

@@ -60,27 +60,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Synchronise route project ID into activeProject if navigating /projects/[id]
-  useEffect(() => {
-    if (!isMounted || !pathname) return;
-    const match = pathname.match(/^\/projects\/([0-9a-fA-F-]+)/);
-    if (match && match[1]) {
-      const routeProjId = match[1];
-      if (activeProject?.id !== routeProjId) {
-        const found = projects.find((p) => p.id === routeProjId);
-        if (found) {
-          setActiveProject(found);
-        } else {
-          api.projects
-            .get(routeProjId)
-            .then((p) => {
-              setActiveProject(p);
-            })
-            .catch(() => {});
-        }
-      }
-    }
-  }, [isMounted, pathname, projects, activeProject?.id, setActiveProject]);
+  // Synchronise route project ID into activeProject is handled centrally by LiveAppContext
 
   const handleToggleCollapse = () => {
     setCollapsed((prev) => {

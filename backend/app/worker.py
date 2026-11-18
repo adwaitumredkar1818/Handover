@@ -67,25 +67,7 @@ class SyncWorker:
             ).scalars().first()
 
             if job is None:
-                try:
-                    worker = SourceSyncWorkerService(
-                        session_factory=self.session_factory,
-                        settings=self.settings,
-                    )
-                    return 1 if worker.process_next_job() else 0
-                except Exception:
-                    return 0
-
-            # If payload has "sync_run_id", delegate to full SourceSyncWorkerService
-            if (job.payload_json or {}).get("sync_run_id"):
-                try:
-                    worker = SourceSyncWorkerService(
-                        session_factory=self.session_factory,
-                        settings=self.settings,
-                    )
-                    return 1 if worker.process_next_job() else 0
-                except Exception:
-                    return 0
+                return 0
 
             job.status = BackgroundJobStatus.RUNNING.value
             job.attempt_count = (job.attempt_count or 0) + 1
@@ -106,7 +88,7 @@ class SyncWorker:
                 return 0
 
             from app.models.integration import UserSourceAuthorisation
-            from app.services.token_encryption import LocalTokenEncryptionService
+            from app.services.token_encryption import LocalTokenEncryptionService, TokenKind
 
             auth = session.execute(
                 select(UserSourceAuthorisation).where(
@@ -121,7 +103,13 @@ class SyncWorker:
                     enc_svc = LocalTokenEncryptionService(
                         token_encryption_key=self.settings.security.token_encryption_key.get_secret_value()
                     )
-                    token = enc_svc.decrypt_token(auth.encrypted_access_token)
+                    token = enc_svc.decrypt_token(
+                        ciphertext=auth.encrypted_access_token,
+                        organisation_id=mapping.organisation_id,
+                        user_id=auth.user_id,
+                        provider=mapping.source_connection.source_provider,
+                        token_kind=TokenKind.ACCESS_TOKEN.value,
+                    )
                 except Exception as exc:
                     logger.warning("Failed to decrypt access token for mapping %s: %s", mapping.id, exc)
 
@@ -139,6 +127,22 @@ class SyncWorker:
                 chash = rec.content_hash
                 if len(chash) != 64:
                     chash = hashlib.sha256(chash.encode("utf-8")).hexdigest()
+
+                existing_item = session.execute(
+                    select(EvidenceItem).where(
+                        EvidenceItem.project_id == mapping.project_id,
+                        EvidenceItem.deleted_at.is_(None),
+                        (EvidenceItem.content_hash == chash)
+                        | (
+                            (EvidenceItem.source_type == rec.source_platform)
+                            & (EvidenceItem.source_external_id == rec.source_original_id)
+                        ),
+                    )
+                ).scalars().first()
+
+                if existing_item is not None:
+                    existing_item.last_synced_at = utc_now()
+                    continue
 
                 item = EvidenceItem(
                     organisation_id=mapping.organisation_id,
@@ -159,11 +163,30 @@ class SyncWorker:
                     source_connection_id=mapping.source_connection_id,
                     source_access_policy_id=mapping.source_access_policy_id,
                     uploaded_by_user_id=job.triggered_by_user_id,
+                    metadata_json={
+                        "lifecycle_stage": "imported",
+                        "semantic_status": "not_applicable",
+                        "knowledge_count": 0,
+                    },
                 )
                 session.add(item)
 
             job.status = BackgroundJobStatus.SUCCEEDED.value
             job.completed_at = utc_now()
+            raw_sync_id = (job.payload_json or {}).get("sync_run_id")
+            if raw_sync_id:
+                try:
+                    from app.models.enums import SourceSyncRunStatus
+                    from app.models.integration import SourceSyncRun
+
+                    run = session.execute(
+                        select(SourceSyncRun).where(SourceSyncRun.id == uuid.UUID(str(raw_sync_id)))
+                    ).scalar_one_or_none()
+                    if run is not None:
+                        run.status = SourceSyncRunStatus.SUCCEEDED.value
+                        run.completed_at = utc_now()
+                except Exception:
+                    pass
             session.commit()
             return 1
 
@@ -186,31 +209,55 @@ class CompositeWorkerService:
         self.indexing_worker = indexing_worker
         self.reconstruction_worker = reconstruction_worker
         self.relationship_worker = relationship_worker
+        self._turn_counter = 0
 
     @property
     def worker_id(self) -> str:
         """Primary worker identifier recorded on claimed leases."""
         return self.ingestion_worker.worker_id
 
-    def process_next_job(self) -> bool:
-        """Claim one job across reconstruction, ingestion, sync, relationship,
-        and indexing queues so background batch indexing never starves interactive AI reconstruction.
-        """
-        if (
-            self.reconstruction_worker is not None
-            and self.reconstruction_worker.process_next_job()
-        ):
+    def process_sync_lane_job(self) -> bool:
+        """Lane A: Source synchronization (GitHub, Jira, Slack) without blocking indexing/LLM."""
+        return self.sync_worker.process_next_job()
+
+    def process_preparation_lane_job(self) -> bool:
+        """Lane B: Document ingestion, chunking, and vector indexing."""
+        if self.ingestion_worker.process_next_job():
             return True
+        if self.indexing_worker is not None and self.indexing_worker.process_next_job():
+            return True
+        return False
+
+    def process_semantic_lane_job(self) -> bool:
+        """Lane C: Bounded Qwen3 semantic enrichment and relationship reconstruction."""
+        if self.reconstruction_worker is not None and self.reconstruction_worker.process_next_job():
+            return True
+        if self.relationship_worker is not None and self.relationship_worker.process_next_job():
+            return True
+        return False
+
+    def process_next_job(self) -> bool:
+        """Claim one job across ingestion, sync, reconstruction, indexing,
+        and relationship queues, alternating indexing and reconstruction so neither starves."""
         if self.ingestion_worker.process_next_job():
             return True
         if self.sync_worker.process_next_job():
+            return True
+
+        self._turn_counter += 1
+        first_worker, second_worker = (
+            (self.reconstruction_worker, self.indexing_worker)
+            if self._turn_counter % 2 == 1
+            else (self.indexing_worker, self.reconstruction_worker)
+        )
+        if first_worker is not None and first_worker.process_next_job():
+            return True
+        if second_worker is not None and second_worker.process_next_job():
             return True
         if (
             self.relationship_worker is not None
             and self.relationship_worker.process_next_job()
         ):
-            return True
-        if self.indexing_worker is not None and self.indexing_worker.process_next_job():
             return True
         return False
 
@@ -233,6 +280,18 @@ def build_worker_service(
     """Assemble isolated engine, storage, encryption, OCR adapter, and composite workers."""
     engine = create_db_engine(settings)
     session_factory = create_session_factory(engine)
+
+    try:
+        from app.repositories.job import BackgroundJobRepository
+
+        with session_factory() as startup_session:
+            recovered = BackgroundJobRepository(startup_session).recover_orphaned_jobs()
+            startup_session.commit()
+            if recovered > 0:
+                logger.info("Worker startup recovered %d orphaned running background jobs.", recovered)
+    except Exception as exc:
+        logger.warning("Could not recover orphaned jobs on worker startup: %s", exc)
+
     redis_mgr = RedisConnectionManager(settings)
     redis_mgr.initialize()
     cache_service = CacheService(settings, redis_mgr=redis_mgr)

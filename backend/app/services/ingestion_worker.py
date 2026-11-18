@@ -79,6 +79,8 @@ class IngestionWorkerService:
             organisation_id,
             project_id,
             category,
+            mime_type,
+            original_filename,
             storage_key,
             key_id,
             expected_plaintext_size,
@@ -99,7 +101,8 @@ class IngestionWorkerService:
             extracted = self._extraction.extract_document(
                 category=category,
                 raw_bytes=raw_bytes,
-                document_title=title,
+                document_title=original_filename or title,
+                mime_type=mime_type,
             )
             elapsed_ms = int((time.perf_counter() - started_perf) * 1000)
             self._complete_success(
@@ -236,6 +239,8 @@ class IngestionWorkerService:
                 evidence.organisation_id,
                 evidence.project_id,
                 evidence.category,
+                evidence.mime_type,
+                evidence.original_filename,
                 evidence.storage_object_key,
                 evidence.encryption_key_id,
                 evidence.file_size_bytes,
@@ -402,6 +407,12 @@ class IngestionWorkerService:
             )
             session.add(notif)
             session.commit()
+            try:
+                from app.main import signal_worker_activity
+
+                signal_worker_activity()
+            except Exception:
+                pass
 
     def _complete_failure(
         self,

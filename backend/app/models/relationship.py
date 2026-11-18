@@ -31,7 +31,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship as sa_relationship
 from sqlalchemy.types import JSON
 
 from app.db.base import Base
@@ -126,16 +126,16 @@ class KnowledgeEntity(Base):
     )
 
     # Relationships
-    aliases: Mapped[list[EntityAlias]] = relationship(
+    aliases: Mapped[list[EntityAlias]] = sa_relationship(
         back_populates="entity",
         cascade="all, delete-orphan",
     )
-    outbound_relationships: Mapped[list[KnowledgeRelationship]] = relationship(
+    outbound_relationships: Mapped[list[KnowledgeRelationship]] = sa_relationship(
         foreign_keys="[KnowledgeRelationship.source_entity_id]",
         back_populates="source_entity",
         cascade="all, delete-orphan",
     )
-    inbound_relationships: Mapped[list[KnowledgeRelationship]] = relationship(
+    inbound_relationships: Mapped[list[KnowledgeRelationship]] = sa_relationship(
         foreign_keys="[KnowledgeRelationship.target_entity_id]",
         back_populates="target_entity",
         cascade="all, delete-orphan",
@@ -190,7 +190,7 @@ class EntityAlias(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    entity: Mapped[KnowledgeEntity] = relationship(back_populates="aliases")
+    entity: Mapped[KnowledgeEntity] = sa_relationship(back_populates="aliases")
 
 
 class IdentityResolutionCandidate(Base):
@@ -338,13 +338,13 @@ class KnowledgeRelationship(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
-    source_entity: Mapped[KnowledgeEntity] = relationship(
+    source_entity: Mapped[KnowledgeEntity] = sa_relationship(
         foreign_keys=[source_entity_id], back_populates="outbound_relationships"
     )
-    target_entity: Mapped[KnowledgeEntity] = relationship(
+    target_entity: Mapped[KnowledgeEntity] = sa_relationship(
         foreign_keys=[target_entity_id], back_populates="inbound_relationships"
     )
-    evidence_links: Mapped[list[RelationshipEvidenceLink]] = relationship(
+    evidence_links: Mapped[list[RelationshipEvidenceLink]] = sa_relationship(
         back_populates="relationship", cascade="all, delete-orphan"
     )
 
@@ -394,7 +394,9 @@ class RelationshipEvidenceLink(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    relationship: Mapped[KnowledgeRelationship] = relationship(back_populates="evidence_links")
+    relationship: Mapped[KnowledgeRelationship] = sa_relationship(back_populates="evidence_links")
+    evidence_item = sa_relationship("EvidenceItem", foreign_keys=[evidence_id])
+    evidence_chunk = sa_relationship("EvidenceChunk", foreign_keys=[evidence_chunk_id])
 
 
 class DecisionTraceabilityChain(Base):

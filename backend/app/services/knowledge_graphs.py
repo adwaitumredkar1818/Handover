@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable
 from typing import Literal
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.cache.local_cache import local_response_cache
@@ -57,14 +57,14 @@ _GRAPH_ALLOWED_ENTITY_TYPES: dict[str, set[str]] = {
         EntityType.SERVICE.value,
         EntityType.API.value,
         EntityType.DATABASE.value,
+        EntityType.REPOSITORY.value,
+        EntityType.TECHNOLOGY.value,
     },
     "features-workflows": {
+        EntityType.PROJECT.value,
         EntityType.FEATURE.value,
         EntityType.REQUIREMENT.value,
         EntityType.OPERATIONAL_PROCEDURE.value,
-        EntityType.WORK_ITEM.value,
-        EntityType.TECHNICAL_COMPONENT.value,
-        EntityType.ARCHITECTURE_COMPONENT.value,
     },
 }
 
@@ -72,6 +72,42 @@ _GRAPH_ALLOWED_ENTITY_TYPES: dict[str, set[str]] = {
 def _chunked(items: Iterable[uuid.UUID], size: int = 500) -> list[list[uuid.UUID]]:
     seq = list(items)
     return [seq[i : i + size] for i in range(0, len(seq), size)]
+
+
+def invalidate_knowledge_graph_cache(project_id: uuid.UUID) -> int:
+    """Invalidate all cached Knowledge Intelligence graph projections for a project."""
+    return local_response_cache.invalidate_prefix(f"ki_graph:{project_id}:")
+
+
+def get_project_graph_stamp(session: Session, project_id: uuid.UUID) -> str:
+    """Return a lightweight DB freshness token for graph cache keys."""
+    row = session.execute(
+        select(
+            select(func.count(KnowledgeEntity.id))
+            .where(
+                KnowledgeEntity.project_id == project_id,
+                KnowledgeEntity.is_deleted.is_(False),
+                KnowledgeEntity.is_stale.is_(False),
+            )
+            .scalar_subquery(),
+            select(func.max(KnowledgeEntity.updated_at))
+            .where(KnowledgeEntity.project_id == project_id)
+            .scalar_subquery(),
+            select(func.count(KnowledgeRelationship.id))
+            .where(
+                KnowledgeRelationship.project_id == project_id,
+                KnowledgeRelationship.is_stale.is_(False),
+            )
+            .scalar_subquery(),
+            select(func.max(KnowledgeRelationship.updated_at))
+            .where(KnowledgeRelationship.project_id == project_id)
+            .scalar_subquery(),
+        )
+    ).one()
+    e_cnt, e_max, r_cnt, r_max = row
+    e_ts = e_max.isoformat() if e_max else ""
+    r_ts = r_max.isoformat() if r_max else ""
+    return f"{e_cnt or 0}:{e_ts}:{r_cnt or 0}:{r_ts}"
 
 
 class KnowledgeGraphProjectionService:
@@ -157,10 +193,15 @@ class KnowledgeGraphProjectionService:
             if knowledge_item is not None
             else (ki_status[1] if ki_status is not None else None)
         )
+        raw_meta_ver = str(meta.get("verification_status") or "").lower()
         ver_status = (
             review_status
             if review_status is not None
-            else str(meta.get("verification_status") or ent.resolution_status or "pending")
+            else (
+                raw_meta_ver
+                if raw_meta_ver in {"approved", "pending_review", "rejected", "flagged"}
+                else "pending_review"
+            )
         )
         if graph_type == "technology-stack":
             cat = str(meta.get("technology_category") or ent.entity_type)
@@ -216,8 +257,9 @@ class KnowledgeGraphProjectionService:
         project_id = project_ctx.project.id
         viewer_id = project_ctx.principal.user_id
         has_manage = project_ctx.has_permission("project.manage")
+        graph_stamp = get_project_graph_stamp(self._session, project_id)
         cache_key = (
-            f"ki_graph:{project_id}:{viewer_id}:{int(has_manage)}:"
+            f"ki_graph:{project_id}:{viewer_id}:{int(has_manage)}:{graph_stamp}:"
             f"{graph_type}:{search or ''}:{status or ''}:{source_type or ''}:"
             f"{verification_state or ''}:{limit}:{cursor or ''}:{int(include_suggested)}"
         )
@@ -419,16 +461,22 @@ class KnowledgeGraphProjectionService:
             e.canonical_name.strip().lower() for e in entities if e.entity_type in arch_component_types
         }
 
-        # Identify which components have explicit technology links for pure technology-stack views
+        # Identify components linked to technologies and technologies linked to non-project components
         tech_entity_ids: set[uuid.UUID] = {e.id for e in entities if e.entity_type in tech_node_types}
+        arch_comp_ids: set[uuid.UUID] = {e.id for e in entities if e.entity_type in arch_component_types}
         comp_ids_with_tech_links: set[uuid.UUID] = set()
+        tech_ids_with_comp_links: set[uuid.UUID] = set()
         for edge in valid_edges:
             src_is_tech = edge.source in tech_entity_ids
             dst_is_tech = edge.target in tech_entity_ids
             if src_is_tech and not dst_is_tech:
                 comp_ids_with_tech_links.add(edge.target)
+                if edge.target in arch_comp_ids:
+                    tech_ids_with_comp_links.add(edge.source)
             elif dst_is_tech and not src_is_tech:
                 comp_ids_with_tech_links.add(edge.source)
+                if edge.source in arch_comp_ids:
+                    tech_ids_with_comp_links.add(edge.target)
 
         _NOISE_FEATURE_TOKENS = {
             "feat", "fix", "chore", "docs", "refactor", "style", "test", "perf", "ci", "build", "merge"
@@ -476,15 +524,51 @@ class KnowledgeGraphProjectionService:
                 # Prefer component/service/database over generic duplicate technology entity
                 if ent.entity_type in tech_node_types and norm_name in comp_canon_names:
                     continue
+                # Exclude leaf library dependencies unless core infrastructure/db/storage/ai_ml or component-linked
+                ent_meta = ent.metadata_json or {}
+                if (
+                    ent.entity_type in {EntityType.TECHNOLOGY.value, EntityType.LIBRARY.value}
+                    and ent_meta.get("usage_basis") == "declared_dependency"
+                    and ent_meta.get("technology_category") not in {"database", "infrastructure", "storage", "ai_ml"}
+                    and ent.id not in tech_ids_with_comp_links
+                ):
+                    continue
             elif graph_type == "features-workflows":
+                # Reject document section outlines, raw commit headers, and PR titles as features
+                if (
+                    norm_name in {"commit", "document section"}
+                    or norm_name.startswith(("document section", "section:", "commit:"))
+                    or "section_title" in (ent.metadata_json or {})
+                ):
+                    continue
                 # Reject conventional commit noise, raw PR titles, and commit hashes as features
                 if norm_name in _NOISE_FEATURE_TOKENS:
                     continue
                 if norm_name.startswith("pr ") and "#" in norm_name:
                     continue
+                if norm_name.startswith("commit ") or "commit:" in norm_name:
+                    continue
+                if any(norm_name.startswith(f"{p}:") or norm_name.startswith(f"{p}(") for p in _NOISE_FEATURE_TOKENS):
+                    continue
                 if "@" in norm_name and len(norm_name.split("@")[-1]) >= 7:
                     continue
                 if "/" in norm_name and " " not in norm_name:
+                    continue
+                # Reject generic document section headings that are not actual user-facing features or workflows
+                _DOC_SECTION_HEADINGS = {
+                    "problem and opportunity statement",
+                    "risks and release readiness",
+                    "project scope and priorities",
+                    "product and purpose overview",
+                    "executive summary",
+                    "table of contents",
+                    "appendix",
+                    "background and context",
+                }
+                if norm_name in _DOC_SECTION_HEADINGS:
+                    continue
+                # Reject internal technical implementation tasks and bug notes
+                if "implementation task" in norm_name or "bug fix" in norm_name:
                     continue
 
             # Prevent duplicate entities with identical lowercased canonical names in the same graph
@@ -511,8 +595,8 @@ class KnowledgeGraphProjectionService:
                 continue
             candidate_nodes.append(node)
 
-        # Include Project root only when there are non-project nodes in Technology Stack / Architecture
-        if project_root_node is not None and candidate_nodes and graph_type in {"technology-stack", "system-architecture"}:
+        # Include Project root only when there are non-project nodes in graph
+        if project_root_node is not None and candidate_nodes:
             candidate_nodes.insert(0, project_root_node)
 
         offset = int(cursor) if cursor and cursor.isdigit() else 0
@@ -521,24 +605,73 @@ class KnowledgeGraphProjectionService:
 
         visible_ids = {n.id for n in sliced_nodes}
         node_name_by_id = {n.id: n.label.strip().lower() for n in sliced_nodes}
+        ent_id_to_norm_name = {
+            e.id: e.canonical_name.strip().lower() for e in entities
+        }
+        canon_to_visible_node = {
+            n.label.strip().lower(): n for n in sliced_nodes
+        }
 
         # Filter out self-loops (including cross-entity duplicates) and deduplicate parallel edges
         filtered_edges: list[KnowledgeGraphEdge] = []
         seen_edge_pairs: set[tuple[str, str]] = set()
 
         for e in valid_edges:
-            if e.source not in visible_ids or e.target not in visible_ids:
+            src_id = (
+                e.source
+                if e.source in visible_ids
+                else (
+                    canon_to_visible_node[ent_id_to_norm_name[e.source]].id
+                    if ent_id_to_norm_name.get(e.source) in canon_to_visible_node
+                    else None
+                )
+            )
+            dst_id = (
+                e.target
+                if e.target in visible_ids
+                else (
+                    canon_to_visible_node[ent_id_to_norm_name[e.target]].id
+                    if ent_id_to_norm_name.get(e.target) in canon_to_visible_node
+                    else None
+                )
+            )
+            if not src_id or not dst_id or src_id == dst_id:
                 continue
-            src_name = node_name_by_id.get(e.source)
-            dst_name = node_name_by_id.get(e.target)
+            src_name = node_name_by_id.get(src_id)
+            dst_name = node_name_by_id.get(dst_id)
             if src_name and dst_name and src_name == dst_name:
                 # Disallow self-loops
                 continue
-            pair_key = (f"{e.source}:{e.target}", e.relationship_type)
+            pair_key = (f"{src_id}:{dst_id}", e.relationship_type)
             if pair_key in seen_edge_pairs:
                 continue
             seen_edge_pairs.add(pair_key)
-            filtered_edges.append(e)
+            filtered_edges.append(
+                KnowledgeGraphEdge(
+                    id=e.id,
+                    source=src_id,
+                    target=dst_id,
+                    relationship_type=e.relationship_type,
+                    label=e.label,
+                    evidence_basis=e.evidence_basis,
+                    verification_status=e.verification_status,
+                    confidence_score=e.confidence_score,
+                    evidence_ids=e.evidence_ids,
+                )
+            )
+
+        # Generic project-root edge pruning across all graph modes:
+        # If a downstream component, feature, or technology already has inbound edges from
+        # intermediate services, features, or components, do not let generic Project -> integrates_with edges dominate.
+        if project_root_node:
+            p_id = project_root_node.id
+            nodes_with_inbound_from_others = {
+                e.target for e in filtered_edges if e.source != p_id
+            }
+            filtered_edges = [
+                edge for edge in filtered_edges
+                if not (edge.source == p_id and edge.target in nodes_with_inbound_from_others)
+            ]
 
         cat_counts = Counter(n.category or n.entity_type for n in sliced_nodes)
         resp = KnowledgeGraphProjectionResponse(
@@ -553,7 +686,7 @@ class KnowledgeGraphProjectionService:
             ),
             next_cursor=next_cursor,
         )
-        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=60)
+        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=300)
         return resp
 
     def _collect_entity_metadata_maps(

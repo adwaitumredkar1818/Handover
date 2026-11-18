@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import and_, select
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.rbac_catalog import SYSTEM_PERMISSIONS, SYSTEM_ROLES
 from app.models.enums import RoleScopeType
@@ -22,48 +22,47 @@ class RbacRepository:
         stmt = (
             select(Role)
             .where(Role.name == name)
-            .options(selectinload(Role.role_permissions).selectinload(RolePermission.permission))
+            .options(joinedload(Role.role_permissions).joinedload(RolePermission.permission))
         )
-        return self._session.scalar(stmt)
+        return self._session.scalars(stmt).unique().first()
 
     def list_roles(self) -> list[Role]:
         stmt = (
             select(Role)
-            .options(selectinload(Role.role_permissions).selectinload(RolePermission.permission))
+            .options(joinedload(Role.role_permissions).joinedload(RolePermission.permission))
             .order_by(Role.scope_type.asc(), Role.name.asc())
         )
-        return list(self._session.scalars(stmt).all())
+        return list(self._session.scalars(stmt).unique().all())
 
     def get_user_platform_roles_and_permissions(
         self,
         user_id: uuid.UUID,
     ) -> tuple[list[str], frozenset[str]]:
         """Return strictly platform-scoped role names and permission codes for a user."""
-        role_stmt = (
-            select(Role.name)
+        stmt = (
+            select(Role.name, Permission.code)
             .join(UserRole, UserRole.role_id == Role.id)
+            .outerjoin(RolePermission, RolePermission.role_id == Role.id)
+            .outerjoin(
+                Permission,
+                and_(
+                    Permission.id == RolePermission.permission_id,
+                    Permission.scope_type == RoleScopeType.PLATFORM.value,
+                ),
+            )
             .where(
                 UserRole.user_id == user_id,
                 Role.scope_type == RoleScopeType.PLATFORM.value,
             )
-            .order_by(Role.name.asc())
         )
-        role_names = list(self._session.scalars(role_stmt).all())
-
-        perm_stmt = (
-            select(Permission.code)
-            .join(RolePermission, RolePermission.permission_id == Permission.id)
-            .join(Role, Role.id == RolePermission.role_id)
-            .join(UserRole, UserRole.role_id == Role.id)
-            .where(
-                UserRole.user_id == user_id,
-                Role.scope_type == RoleScopeType.PLATFORM.value,
-                Permission.scope_type == RoleScopeType.PLATFORM.value,
-            )
-            .distinct()
-        )
-        permissions = frozenset(self._session.scalars(perm_stmt).all())
-        return role_names, permissions
+        role_set: set[str] = set()
+        permission_set: set[str] = set()
+        for role_name, perm_code in self._session.execute(stmt).all():
+            if role_name:
+                role_set.add(role_name)
+            if perm_code:
+                permission_set.add(perm_code)
+        return sorted(role_set), frozenset(permission_set)
 
     def assign_role(
         self,

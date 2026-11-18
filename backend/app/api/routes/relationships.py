@@ -81,6 +81,8 @@ def _invalidate_project_graph_caches(project_id: uuid.UUID) -> None:
     local_response_cache.invalidate_prefix(f"ki_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"rel_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"contrib_graph:{project_id}:")
+    local_response_cache.invalidate_prefix(f"rel_contributors:{project_id}:")
+    local_response_cache.invalidate_prefix(f"work_clusters:{project_id}:")
 
 
 # ==============================================================================
@@ -731,8 +733,20 @@ def list_contributors(
     review_status: Annotated[str | None, Query()] = None,
 ) -> list[ContributorIdentitySummaryResponse]:
     """List contributor identities strictly filtered by accessible evidence."""
-    wg_service = WorkGroupingService(db_session)
     has_manage = project_ctx.has_permission("project.manage")
+    bind_id = id(db_session.get_bind())
+    cache_key = (
+        f"rel_contributors:{project_ctx.project.id}:{bind_id}:{project_ctx.principal.user_id}:"
+        f"{int(has_manage)}:{contributor_type or ''}:{review_status or ''}"
+    )
+    cached = local_response_cache.get(cache_key)
+    if isinstance(cached, list):
+        try:
+            return [ContributorIdentitySummaryResponse.model_validate(r) for r in cached]
+        except Exception:
+            local_response_cache.delete(cache_key)
+
+    wg_service = WorkGroupingService(db_session)
     accessible_ids = wg_service._accessible_evidence_ids(
         project_id=project_ctx.project.id,
         viewer_user_id=project_ctx.principal.user_id,
@@ -746,7 +760,11 @@ def list_contributors(
         contributor_type_filter=contributor_type,
         review_status_filter=review_status,
     )
-    return [ContributorIdentitySummaryResponse.model_validate(r) for r in rows]
+    result = [ContributorIdentitySummaryResponse.model_validate(r) for r in rows]
+    local_response_cache.set(
+        cache_key, [r.model_dump(mode="json") for r in result], ttl_seconds=60
+    )
+    return result
 
 
 @router.get(
@@ -823,13 +841,29 @@ def list_work_clusters(
     db_session: Annotated[Session, Depends(get_db_session)],
 ) -> list[WorkClusterResponse]:
     """List ACL-filtered technical work area clusters."""
+    has_manage = project_ctx.has_permission("project.manage")
+    bind_id = id(db_session.get_bind())
+    cache_key = (
+        f"work_clusters:{project_ctx.project.id}:{bind_id}:{project_ctx.principal.user_id}:{int(has_manage)}"
+    )
+    cached = local_response_cache.get(cache_key)
+    if isinstance(cached, list):
+        try:
+            return [WorkClusterResponse.model_validate(c) for c in cached]
+        except Exception:
+            local_response_cache.delete(cache_key)
+
     service = WorkGroupingService(db_session)
     clusters = service.list_work_clusters(
         project_id=project_ctx.project.id,
         viewer_user_id=project_ctx.principal.user_id,
-        has_project_manage=project_ctx.has_permission("project.manage"),
+        has_project_manage=has_manage,
     )
-    return [WorkClusterResponse.model_validate(c) for c in clusters]
+    result = [WorkClusterResponse.model_validate(c) for c in clusters]
+    local_response_cache.set(
+        cache_key, [c.model_dump(mode="json") for c in result], ttl_seconds=60
+    )
+    return result
 
 
 @router.get(

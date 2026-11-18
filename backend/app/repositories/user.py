@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.enums import UserStatus
 from app.models.rbac import UserRole
@@ -23,35 +23,35 @@ class UserRepository:
         stmt = (
             select(User)
             .where(User.id == user_id)
-            .options(selectinload(User.user_roles).selectinload(UserRole.role))
+            .options(joinedload(User.user_roles).joinedload(UserRole.role))
         )
-        return self._session.scalar(stmt)
+        return self._session.scalars(stmt).unique().first()
 
     def get_by_email(self, normalised_email: str) -> User | None:
         stmt = (
             select(User)
             .where(User.email == normalised_email)
-            .options(selectinload(User.user_roles).selectinload(UserRole.role))
+            .options(joinedload(User.user_roles).joinedload(UserRole.role))
         )
-        return self._session.scalar(stmt)
+        return self._session.scalars(stmt).unique().first()
 
     def get_by_supabase_auth_id(self, supabase_auth_id: str) -> User | None:
         stmt = (
             select(User)
             .where(User.supabase_auth_id == supabase_auth_id)
-            .options(selectinload(User.user_roles).selectinload(UserRole.role))
+            .options(joinedload(User.user_roles).joinedload(UserRole.role))
         )
-        return self._session.scalar(stmt)
+        return self._session.scalars(stmt).unique().first()
 
     def list_users(self, *, limit: int = 50, offset: int = 0) -> list[User]:
         stmt = (
             select(User)
-            .options(selectinload(User.user_roles).selectinload(UserRole.role))
+            .options(joinedload(User.user_roles).joinedload(UserRole.role))
             .order_by(User.created_at.desc(), User.id.asc())
             .offset(offset)
             .limit(limit)
         )
-        return list(self._session.scalars(stmt).all())
+        return list(self._session.scalars(stmt).unique().all())
 
     def count_users(self) -> int:
         stmt = select(func.count(User.id))

@@ -95,6 +95,9 @@ class EvidenceSummaryResponse(BaseSchema):
     index_version: str | None = None
     index_error_code: str | None = None
     index_error_message: str | None = None
+    lifecycle_stage: str = "imported"
+    semantic_status: str | None = None
+    knowledge_count: int = 0
     metadata_json: dict[str, Any]
     latest_job: BackgroundJobResponse | None = None
     latest_indexing_job: BackgroundJobResponse | None = None
@@ -103,35 +106,26 @@ class EvidenceSummaryResponse(BaseSchema):
 
     @model_validator(mode="before")
     @classmethod
-    def _populate_provider(cls, data: Any) -> Any:
+    def _populate_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            meta = data.get("metadata_json") or {}
+            if "lifecycle_stage" in meta and ("lifecycle_stage" not in data or data["lifecycle_stage"] == "imported"):
+                data["lifecycle_stage"] = meta["lifecycle_stage"]
+            if "semantic_status" in meta and "semantic_status" not in data:
+                data["semantic_status"] = meta["semantic_status"]
+            if "knowledge_count" in meta and ("knowledge_count" not in data or data["knowledge_count"] == 0):
+                data["knowledge_count"] = meta["knowledge_count"]
             if not data.get("provider"):
                 cat = str(data.get("category") or "")
-                src_prov = str(data.get("source_provider") or "")
                 if cat == "pdf_document":
                     data["provider"] = "pdf"
                 elif cat == "docx_document":
                     data["provider"] = "docx"
-                elif src_prov in ("github", "jira", "slack"):
-                    data["provider"] = src_prov
+                elif data.get("source_provider") in ("github", "jira", "slack"):
+                    data["provider"] = data.get("source_provider")
                 else:
-                    data["provider"] = src_prov or "upload"
+                    data["provider"] = data.get("source_provider") or "upload"
         return data
-
-    @model_validator(mode="after")
-    def _ensure_provider_set(self) -> EvidenceSummaryResponse:
-        if not self.provider:
-            cat = str(self.category or "")
-            src_prov = str(self.source_provider or "")
-            if cat == "pdf_document":
-                self.provider = "pdf"
-            elif cat == "docx_document":
-                self.provider = "docx"
-            elif src_prov in ("github", "jira", "slack"):
-                self.provider = src_prov
-            else:
-                self.provider = src_prov or "upload"
-        return self
 
 
 class EvidenceChunkDetailResponse(BaseSchema):
@@ -167,6 +161,9 @@ class EvidenceDetailResponse(EvidenceSummaryResponse):
     can_download: bool = False
     download_url: str | None = None
     chunks: list[EvidenceChunkDetailResponse] = Field(default_factory=list)
+    linked_knowledge_items: list[dict[str, Any]] = Field(default_factory=list)
+    linked_entities: list[dict[str, Any]] = Field(default_factory=list)
+    linked_relationships: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class EvidenceListResponse(BaseSchema):

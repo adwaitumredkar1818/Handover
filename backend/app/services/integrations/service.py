@@ -784,6 +784,70 @@ class SourceIntegrationService:
             total=len(mappings),
         )
 
+    def _enqueue_initial_sync_job(
+        self,
+        *,
+        mapping: ProjectSourceMapping,
+        auth: UserSourceAuthorisation,
+        project_ctx: ProjectContext,
+        sync_mode: str = "initial",
+    ) -> BackgroundJob | None:
+        """Atomically persist initial SOURCE_SYNC background job and sync run for a newly mapped source."""
+        if self._repo.has_active_sync_run_for_mapping(mapping.id) or self._job_repo.has_active_source_sync_job(
+            project_id=project_ctx.project.id,
+            mapping_id=mapping.id,
+        ):
+            return None
+
+        job = self._job_repo.create_job(
+            organisation_id=project_ctx.organisation.id,
+            project_id=project_ctx.project.id,
+            evidence_id=None,
+            triggered_by_user_id=project_ctx.principal.user.id,
+            job_type=BackgroundJobType.SOURCE_SYNC.value,
+            max_attempts=self._settings.ingestion.worker_max_attempts,
+            priority=2,  # High priority so initial source sync runs immediately
+            payload_json={
+                "mapping_id": str(mapping.id),
+                "source_connection_id": str(mapping.source_connection_id),
+                "authorisation_id": str(auth.id),
+                "provider": mapping.provider,
+                "sync_mode": sync_mode,
+            },
+        )
+        sync_run = self._repo.create_sync_run(
+            organisation_id=project_ctx.organisation.id,
+            project_id=project_ctx.project.id,
+            project_source_mapping_id=mapping.id,
+            source_connection_id=mapping.source_connection_id,
+            background_job_id=job.id,
+            triggered_by_user_id=project_ctx.principal.user.id,
+            provider=mapping.provider,
+            sync_mode=sync_mode,
+            cursor_before_json=dict(mapping.sync_cursor_json or {}),
+        )
+        updated_payload = dict(job.payload_json or {})
+        updated_payload["sync_run_id"] = str(sync_run.id)
+        job.payload_json = updated_payload
+
+        self._audit.record_event(
+            event_type="integration.sync_queued",
+            resource_type="source_sync_run",
+            actor_user_id=project_ctx.principal.user.id,
+            organisation_id=project_ctx.organisation.id,
+            project_id=project_ctx.project.id,
+            resource_id=str(sync_run.id),
+            metadata={
+                "mapping_id": str(mapping.id),
+                "provider": mapping.provider,
+                "sync_mode": sync_mode,
+                "job_id": str(job.id),
+                "initial_sync": True,
+            },
+            message=f"Queued initial {mapping.provider} source sync job on connection.",
+        )
+        return job
+
     def create_github_mapping(
         self,
         *,
@@ -1227,6 +1291,25 @@ class SourceIntegrationService:
                             None,
                         )
                         if matched:
+                            if matched.last_synced_at is None:
+                                auth = self._repo.get_active_authorisation(
+                                    source_connection_id=matched.source_connection_id,
+                                    user_id=project_ctx.principal.user.id,
+                                )
+                                if auth:
+                                    self._enqueue_initial_sync_job(
+                                        mapping=matched,
+                                        auth=auth,
+                                        project_ctx=project_ctx,
+                                        sync_mode="initial",
+                                    )
+                                    self._session.commit()
+                                    try:
+                                        from app.main import signal_worker_activity
+
+                                        signal_worker_activity()
+                                    except Exception:
+                                        pass
                             created.append(ProjectSourceMappingResponse.model_validate(matched))
                         else:
                             raise
@@ -1259,6 +1342,25 @@ class SourceIntegrationService:
                             None,
                         )
                         if matched:
+                            if matched.last_synced_at is None:
+                                auth = self._repo.get_active_authorisation(
+                                    source_connection_id=matched.source_connection_id,
+                                    user_id=project_ctx.principal.user.id,
+                                )
+                                if auth:
+                                    self._enqueue_initial_sync_job(
+                                        mapping=matched,
+                                        auth=auth,
+                                        project_ctx=project_ctx,
+                                        sync_mode="initial",
+                                    )
+                                    self._session.commit()
+                                    try:
+                                        from app.main import signal_worker_activity
+
+                                        signal_worker_activity()
+                                    except Exception:
+                                        pass
                             created.append(ProjectSourceMappingResponse.model_validate(matched))
                         else:
                             raise
@@ -1288,6 +1390,25 @@ class SourceIntegrationService:
                             None,
                         )
                         if matched:
+                            if matched.last_synced_at is None:
+                                auth = self._repo.get_active_authorisation(
+                                    source_connection_id=matched.source_connection_id,
+                                    user_id=project_ctx.principal.user.id,
+                                )
+                                if auth:
+                                    self._enqueue_initial_sync_job(
+                                        mapping=matched,
+                                        auth=auth,
+                                        project_ctx=project_ctx,
+                                        sync_mode="initial",
+                                    )
+                                    self._session.commit()
+                                    try:
+                                        from app.main import signal_worker_activity
+
+                                        signal_worker_activity()
+                                    except Exception:
+                                        pass
                             created.append(ProjectSourceMappingResponse.model_validate(matched))
                         else:
                             raise
@@ -1491,6 +1612,15 @@ class SourceIntegrationService:
 
         auth.last_verified_at = now
         self._session.commit()
+        try:
+            from app.core.cache import CacheKeys, cache_service
+            from app.core.cache.local_cache import local_response_cache
+
+            local_response_cache.invalidate_prefix(f"dash:overview:proj:{project_ctx.project.id}")
+            cache_service.invalidate_prefix(f"dash:overview:proj:{project_ctx.project.id}")
+            cache_service.delete(CacheKeys.dashboard_overview(project_ctx.project.id, project_ctx.principal.user.id))
+        except Exception:
+            pass
         return VerifySourceAccessResponse(
             mapping_id=mapping.id,
             policy_id=policy.id,
@@ -1588,6 +1718,12 @@ class SourceIntegrationService:
         self._session.commit()
         self._session.refresh(sync_run)
         self._session.refresh(job)
+        try:
+            from app.main import signal_worker_activity
+
+            signal_worker_activity()
+        except Exception:
+            pass
         return TriggerSyncResponse(
             sync_run=to_sync_run_response(sync_run),
             job=to_background_job_response(job),

@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 
 from app.api.deps import (
+    get_db_session,
     get_project_service,
     require_organisation_permission,
     require_project_permission,
     resolve_project_read_context,
+)
+from sqlalchemy.orm import Session
+from app.services.pipeline_coordinator import (
+    _STATUS_CACHE,
+    _STATUS_CACHE_TTL_SECONDS,
+    PipelineCoordinatorService,
+    ProjectProcessingStatus,
+    invalidate_project_status_cache,
 )
 from app.core.exceptions import NotFoundError
 from app.models.enums import InvitationStatus, ProjectMembershipStatus, ProjectStatus
@@ -356,3 +366,48 @@ def revoke_project_invitation(
     if project_ctx.project.organisation_id != organisation_id:
         raise NotFoundError("Project was not found in this organisation.", code="PROJECT_NOT_FOUND")
     return project_service.revoke_project_invitation(ctx=project_ctx, invitation_id=invitation_id)
+
+
+@router.get(
+    "/projects/{project_id}/processing-status",
+    response_model=ProjectProcessingStatus,
+    status_code=status.HTTP_200_OK,
+    summary="Get real-time pipeline processing and reconstruction status for a project",
+)
+def get_project_processing_status(
+    project_ctx: Annotated[ProjectContext, Depends(resolve_project_read_context)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> ProjectProcessingStatus:
+    """Fast indexed lookup of background jobs, evidence states, and reconstruction progress."""
+    now_m = time.monotonic()
+    cached = _STATUS_CACHE.get(project_ctx.project.id)
+    if cached is not None and (now_m - cached[0]) < _STATUS_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    coordinator = PipelineCoordinatorService(session)
+    st = coordinator.get_status(project_ctx.project.id)
+    _STATUS_CACHE[project_ctx.project.id] = (now_m, st)
+    return st
+
+
+@router.post(
+    "/projects/{project_id}/processing-status/retry",
+    response_model=ProjectProcessingStatus,
+    status_code=status.HTTP_200_OK,
+    summary="Retry or trigger automatic evidence-to-knowledge pipeline for a project",
+)
+def retry_project_processing_pipeline(
+    project_ctx: Annotated[ProjectContext, Depends(resolve_project_read_context)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> ProjectProcessingStatus:
+    """Enqueue missing or failed indexing and knowledge reconstruction jobs."""
+    invalidate_project_status_cache(project_ctx.project.id)
+    coordinator = PipelineCoordinatorService(session)
+    coordinator.trigger_auto_pipeline(
+        project_id=project_ctx.project.id,
+        triggered_by_user_id=project_ctx.principal.user_id,
+        force_reextract=False,
+    )
+    st = coordinator.get_status(project_ctx.project.id)
+    _STATUS_CACHE[project_ctx.project.id] = (time.monotonic(), st)
+    return st

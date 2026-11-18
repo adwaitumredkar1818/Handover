@@ -367,8 +367,8 @@ class OllamaSettings(BaseModel):
     embedding_model: str = Field(min_length=1)
     ocr_model: str = Field(min_length=1)
     health_timeout_seconds: float = Field(default=2.0, gt=0.1, le=30.0)
-    llm_num_ctx: int = Field(default=8192, ge=2048, le=40960)
-    llm_num_predict: int = Field(default=-1, ge=-1, le=16384)
+    llm_num_ctx: int = Field(default=2048, ge=1024, le=40960)
+    llm_num_predict: int = Field(default=1200, ge=256, le=8192)
     llm_temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     llm_timeout_seconds: float | None = Field(default=None, ge=0.0)
     llm_think: bool = False
@@ -387,11 +387,11 @@ class ExtractionSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    prompt_version: str = Field(default="p2.6-v1", min_length=1, max_length=64)
+    prompt_version: str = Field(default="p2.6-v3-fast", min_length=1, max_length=64)
     max_retries: int = Field(default=2, ge=0, le=5)
-    max_chunks_per_batch: int = Field(default=6, ge=1, le=20)
-    max_chars_per_batch: int = Field(default=5500, ge=1000, le=24000)
-    auto_reextract_on_update: bool = False
+    max_chunks_per_batch: int = Field(default=3, ge=1, le=20)
+    max_chars_per_batch: int = Field(default=4000, ge=1000, le=24000)
+    auto_reextract_on_update: bool = True
 
 
 class IngestionSettings(BaseModel):
@@ -635,7 +635,7 @@ class Settings(BaseSettings):
     ollama_embedding_model: str = Field(default="nomic-embed-text", min_length=1)
     ollama_ocr_model: str = Field(default="glm-ocr:latest", min_length=1)
     ollama_llm_num_ctx: int = Field(default=8192, ge=2048, le=40960)
-    ollama_llm_num_predict: int = Field(default=-1, ge=-1, le=16384)
+    ollama_llm_num_predict: int = Field(default=2048, ge=256, le=8192)
     ollama_llm_temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     ollama_llm_timeout_seconds: float | None = Field(default=None, ge=0.0)
     ollama_llm_think: bool = False
@@ -661,7 +661,7 @@ class Settings(BaseSettings):
     extraction_max_retries: int = Field(default=2, ge=0, le=5)
     extraction_max_chunks_per_batch: int = Field(default=6, ge=1, le=20)
     extraction_max_chars_per_batch: int = Field(default=5500, ge=1000, le=24000)
-    extraction_auto_reextract_on_update: bool = False
+    extraction_auto_reextract_on_update: bool = True
 
     # Document ingestion, OCR triage & lightweight worker fields (`settings.ingestion`)
     max_upload_size_mb: int = Field(default=50, ge=1, le=500)

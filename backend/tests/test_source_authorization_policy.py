@@ -8,7 +8,8 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.models.integration import SourceConnection
+from app.models.enums import BackgroundJobStatus, SourceSyncRunStatus
+from app.models.integration import SourceConnection, SourceSyncRun
 from app.models.job import BackgroundJob
 from tests.conftest import isolated_auth_app, register_and_login_user
 
@@ -252,7 +253,13 @@ def test_project_source_sync_least_privilege_and_duplicate_prevention(
 
         with ctx.session_factory() as db:
             jobs = db.execute(select(BackgroundJob)).scalars().all()
-            assert len(jobs) == 0
+            assert len(jobs) == 1
+            assert jobs[0].job_type == "source_sync"
+            assert (jobs[0].payload_json or {}).get("sync_mode") == "initial"
+            jobs[0].status = BackgroundJobStatus.SUCCEEDED.value
+            for run in db.execute(select(SourceSyncRun)).scalars().all():
+                run.status = SourceSyncRunStatus.SUCCEEDED.value
+            db.commit()
 
         # Project contributor CAN trigger sync
         contrib_sync = client.post(

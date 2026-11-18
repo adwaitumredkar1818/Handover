@@ -172,6 +172,11 @@ export function SuccessorOnboardingWorkspace({
   const loadWorkspaceData = useCallback(async () => {
     if (!projectId) return;
     setIsLoading(true);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId)) {
+      setErrorMessage("Invalid project identifier.");
+      setIsLoading(false);
+      return;
+    }
     setErrorMessage(null);
     try {
       const [

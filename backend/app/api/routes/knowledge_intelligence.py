@@ -114,7 +114,7 @@ def list_knowledge_findings(
     evidence_id: Annotated[uuid.UUID | None, Query()] = None,
     date_from: Annotated[datetime | None, Query()] = None,
     date_to: Annotated[datetime | None, Query()] = None,
-    include_stale: Annotated[bool, Query()] = True,
+    include_stale: Annotated[bool, Query()] = False,
     stale_only: Annotated[bool, Query()] = False,
     include_synthetic: Annotated[bool, Query()] = False,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,

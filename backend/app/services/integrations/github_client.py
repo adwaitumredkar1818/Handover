@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import base64
 import re
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
+
+import httpx
 
 from app.core.config import Settings
 from app.schemas.integrations import GitHubRepositoryCandidate
@@ -29,8 +34,23 @@ _DOC_PATH_KEYWORDS = (
     "playbook",
     "onboarding",
     "handover",
-    "changelog",
-    "contributing",
+    "prd",
+    "trd",
+    "requirement",
+    "requirements",
+    "spec",
+    "specification",
+    "deployment",
+    "render_deployment",
+    "overview",
+    "roadmap",
+    "guide",
+    "report",
+    "reports/",
+    "research",
+    "system",
+    "security",
+    "api",
     "docs/",
     "doc/",
 )
@@ -72,6 +92,17 @@ _EXCLUDED_PATH_DIRS = frozenset(
         ".turbo",
         ".idea",
         ".vscode",
+        ".agents",
+        ".claude",
+        ".cursor",
+        ".gemini",
+        ".windsurf",
+        ".codex",
+        ".vite",
+        ".cache",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
     }
 )
 _EXCLUDED_BINARY_OR_GENERATED_SUFFIXES = (
@@ -200,8 +231,37 @@ _TECHNICAL_MANIFEST_NAMES = frozenset(
         "compose.yml",
         "docker-compose.yml",
         "docker-compose.yaml",
+        "render.yaml",
+        "cargo.toml",
+        "go.mod",
+        "pom.xml",
     }
 )
+
+_LOW_VALUE_BOILERPLATE_FILENAMES = frozenset(
+    {
+        "changelog.md",
+        "contributing.md",
+        "code_of_conduct.md",
+        "license.md",
+        "security.md",
+        "_contributing.md",
+        "_template.md",
+        "_sections.md",
+        "skill.md",
+        "skill-feedback.md",
+        "feedback-issue-template.md",
+    }
+)
+
+
+def _is_low_value_boilerplate_doc(lowered_path: str) -> bool:
+    basename = lowered_path.split("/")[-1]
+    if basename in _LOW_VALUE_BOILERPLATE_FILENAMES:
+        return True
+    if ".github/issue_template" in lowered_path or ".github/pull_request_template" in lowered_path:
+        return True
+    return False
 
 
 def _is_candidate_doc_path(
@@ -221,12 +281,52 @@ def _is_candidate_doc_path(
     if basename in {"dockerfile", "makefile", "procfile", "caddyfile"}:
         return include_code
     if lowered.endswith(_DOC_EXTENSIONS):
+        if not include_code and _is_low_value_boilerplate_doc(lowered):
+            return False
         if not include_code and lowered.count("/") == 0:
             return any(kw in lowered for kw in _DOC_PATH_KEYWORDS)
         return True
     if include_code and lowered.endswith(_CODE_EXTENSIONS):
         return True
     return False
+
+
+class _ResilientGitHubHttpClient:
+    """Thin wrapper bounding individual GitHub GET calls against transient network/timeout stalls."""
+
+    def __init__(self, inner: Any, *, max_retries: int = 1) -> None:
+        self._inner = inner
+        self._max_retries = max(0, int(max_retries))
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        attempt = 0
+        while True:
+            try:
+                return self._inner.get(url, **kwargs)
+            except httpx.TimeoutException as exc:
+                if attempt < self._max_retries:
+                    attempt += 1
+                    time.sleep(0.5 * attempt)
+                    continue
+                raise IntegrationProviderError(
+                    provider="github",
+                    code="GITHUB_TIMEOUT",
+                    message=f"GitHub API request timed out: {exc}",
+                    status_code=504,
+                    retryable=True,
+                ) from exc
+            except httpx.RequestError as exc:
+                if attempt < self._max_retries:
+                    attempt += 1
+                    time.sleep(0.5 * attempt)
+                    continue
+                raise IntegrationProviderError(
+                    provider="github",
+                    code="GITHUB_NETWORK_ERROR",
+                    message=f"GitHub API network error: {type(exc).__name__}",
+                    status_code=503,
+                    retryable=True,
+                ) from exc
 
 
 class GitHubClient:
@@ -241,6 +341,35 @@ class GitHubClient:
         self._gh = settings.integrations.github
         self._timeout = settings.integrations.http_timeout_seconds
         self._transport = transport
+        self._shared_client: Any = None
+
+    def __enter__(self) -> GitHubClient:
+        if self._shared_client is None or getattr(self._shared_client, "is_closed", True):
+            self._shared_client = create_integration_http_client(
+                timeout_seconds=self._timeout,
+                transport=self._transport,
+            )
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self._shared_client is not None:
+            try:
+                self._shared_client.close()
+            except Exception:
+                pass
+            self._shared_client = None
+
+    @contextmanager
+    def _get_http_client(self) -> Iterator[Any]:
+        """Provide a pooled HTTP client wrapped with bounded timeout/retry handling."""
+        if self._shared_client is not None and not getattr(self._shared_client, "is_closed", False):
+            yield _ResilientGitHubHttpClient(self._shared_client, max_retries=1)
+        else:
+            with create_integration_http_client(
+                timeout_seconds=self._timeout,
+                transport=self._transport,
+            ) as client:
+                yield _ResilientGitHubHttpClient(client, max_retries=1)
 
     def _headers(self, access_token: str, *, etag: str | None = None) -> dict[str, str]:
         headers = {
@@ -262,10 +391,7 @@ class GitHubClient:
         access_token: str,
     ) -> dict[str, Any]:
         """Validate PAT and retrieve authenticated user profile and rate-limit metadata."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/user",
                 headers=self._headers(access_token),
@@ -298,10 +424,7 @@ class GitHubClient:
         max_branches: int = 50,
     ) -> list[dict[str, Any]]:
         """Fetch accessible branches for repository."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/branches",
                 headers=self._headers(access_token),
@@ -324,10 +447,7 @@ class GitHubClient:
         sha: str,
     ) -> dict[str, Any] | None:
         """Fetch individual commit detail including stats and changed files."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/commits/{sha}",
                 headers=self._headers(access_token),
@@ -348,10 +468,7 @@ class GitHubClient:
         max_items: int = 50,
     ) -> list[dict[str, Any]]:
         """Fetch supplementary contributor list and statistics."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/contributors",
                 headers=self._headers(access_token),
@@ -375,10 +492,7 @@ class GitHubClient:
         max_commits: int = 100,
     ) -> list[str]:
         """Fetch commit SHAs associated with a pull request."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/pulls/{pr_number}/commits",
                 headers=self._headers(access_token),
@@ -404,10 +518,7 @@ class GitHubClient:
         per_page: int = 30,
     ) -> tuple[list[GitHubRepositoryCandidate], bool]:
         """List explicitly accessible repositories for the calling authenticated user."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/user/repos",
                 headers=self._headers(access_token),
@@ -437,10 +548,7 @@ class GitHubClient:
         repo: str,
     ) -> tuple[bool, GitHubRepositoryCandidate | None]:
         """Verify whether the caller's delegated token can inspect `{owner}/{repo}`."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}",
                 headers=self._headers(access_token),
@@ -497,10 +605,7 @@ class GitHubClient:
         page = 1
         per_page = min(100, max(1, max_items))
 
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             while len(collected) < max_items:
                 params: dict[str, Any] = {
                     "state": "all",
@@ -560,10 +665,7 @@ class GitHubClient:
         issue_number: int,
         max_items: int = 50,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/issues/{issue_number}/comments",
                 headers=self._headers(access_token),
@@ -597,10 +699,7 @@ class GitHubClient:
         review_comments: list[dict[str, Any]] = []
         files: list[dict[str, Any]] = []
 
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             headers = self._headers(access_token)
             detail_resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/pulls/{pr_number}",
@@ -661,10 +760,7 @@ class GitHubClient:
         page = 1
         per_page = min(100, max(1, max_items))
 
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             while len(collected) < max_items:
                 params: dict[str, Any] = {
                     "per_page": min(per_page, max_items - len(collected)),
@@ -724,10 +820,7 @@ class GitHubClient:
         warnings: list[str] = []
         seen_paths: set[str] = set()
 
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             headers = self._headers(access_token)
             readme_resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/readme",
@@ -774,33 +867,61 @@ class GitHubClient:
                 ]
 
                 def _path_priority(p: str) -> tuple[int, str]:
-                    low = p.lower()
+                    low = p.lower().strip("/")
                     basename = low.split("/")[-1]
-                    if "readme" in low:
+                    if low in {"readme.md", "readme.mdx", "readme.rst", "readme.txt", "readme"}:
                         return (0, p)
                     if basename in _TECHNICAL_MANIFEST_NAMES or basename.startswith("dockerfile."):
                         return (1, p)
-                    if any(kw in low for kw in ("architecture", "adr", "design", "decision", "handover", "onboarding")):
+                    if any(
+                        kw in low
+                        for kw in ("architecture", "adr", "decision", "system-design", "system_design")
+                    ):
                         return (2, p)
-                    if low.startswith("docs/") or "/docs/" in low:
+                    if any(
+                        kw in low
+                        for kw in (
+                            "prd",
+                            "trd",
+                            "requirement",
+                            "design",
+                            "spec",
+                            "handover",
+                            "onboarding",
+                            "runbook",
+                            "playbook",
+                            "deployment",
+                            "data_quality_report",
+                        )
+                    ):
                         return (3, p)
-                    if "/src/" in low or low.startswith("src/"):
+                    if "readme" in low or low.startswith(("docs/", "doc/", "reports/")):
                         return (4, p)
-                    if "/app/" in low or low.startswith("app/"):
+                    if low.endswith(_DOC_EXTENSIONS):
                         return (5, p)
-                    if "/lib/" in low or low.startswith("lib/"):
+                    if "/src/" in low or low.startswith("src/"):
                         return (6, p)
-                    if "test" in low:
+                    if "/app/" in low or low.startswith("app/"):
+                        return (7, p)
+                    if "/lib/" in low or low.startswith("lib/"):
                         return (8, p)
-                    return (7, p)
+                    if "test" in low:
+                        return (10, p)
+                    return (9, p)
 
                 candidate_paths.sort(key=_path_priority)
                 for path in candidate_paths[: max(0, max_docs - len(docs))]:
-                    file_resp = client.get(
-                        f"{self._base()}/repos/{owner}/{repo}/contents/{path}",
-                        headers=headers,
-                        params={"ref": tree_ref} if default_branch else None,
-                    )
+                    try:
+                        file_resp = client.get(
+                            f"{self._base()}/repos/{owner}/{repo}/contents/{path}",
+                            headers=headers,
+                            params={"ref": tree_ref} if default_branch else None,
+                        )
+                    except IntegrationProviderError as exc:
+                        if exc.code in {"GITHUB_TIMEOUT", "GITHUB_NETWORK_ERROR"} and docs:
+                            warnings.append(f"Skipped '{path}' due to transient network timeout.")
+                            continue
+                        raise
                     if file_resp.status_code == 200 and isinstance(file_resp.json(), dict):
                         file_obj = file_resp.json()
                         decoded = self._decode_content_payload(file_obj)
@@ -842,10 +963,7 @@ class GitHubClient:
         max_items: int = 50,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """Fetch repository discussions when enabled/supported without failing disabled repos."""
-        with create_integration_http_client(
-            timeout_seconds=self._timeout,
-            transport=self._transport,
-        ) as client:
+        with self._get_http_client() as client:
             resp = client.get(
                 f"{self._base()}/repos/{owner}/{repo}/discussions",
                 headers=self._headers(access_token),

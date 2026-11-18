@@ -260,14 +260,28 @@ class LocalPrivateStorageBackend:
 
         normalized = validate_storage_object_key(storage_object_key)
         candidates: list[Path] = []
+        
+        # 1. Check relative to root_path parent directories
         parts = self._root_path.parts
         if "backend" in parts:
             idx = parts.index("backend")
             repo_root = Path(*parts[:idx])
             candidates.append(repo_root / "data" / "uploads" / normalized)
-        else:
-            candidates.append(self._root_path.parent / "backend" / "data" / "uploads" / normalized)
-            candidates.append(self._root_path / "backend" / "data" / "uploads" / normalized)
+            candidates.append(repo_root / "backend" / "data" / "uploads" / normalized)
+        elif "data" in parts:
+            idx = parts.index("data")
+            repo_root = Path(*parts[:idx])
+            candidates.append(repo_root / "backend" / "data" / "uploads" / normalized)
+            candidates.append(repo_root / "data" / "uploads" / normalized)
+
+        # 2. Check current working directory and repo root
+        cwd = Path.cwd()
+        candidates.extend([
+            cwd / "backend" / "data" / "uploads" / normalized,
+            cwd / "data" / "uploads" / normalized,
+            Path(__file__).resolve().parents[3] / "backend" / "data" / "uploads" / normalized,
+            Path(__file__).resolve().parents[3] / "data" / "uploads" / normalized,
+        ])
 
         for candidate in candidates:
             try:

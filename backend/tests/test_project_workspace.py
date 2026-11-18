@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import isolated_auth_app
+from tests.conftest import isolated_auth_app, register_and_login_user
 
 _PASSWORD = "Handover!Project2026#Secure"
 
@@ -16,19 +16,14 @@ def _register_and_login(
     full_name: str,
     email: str,
 ) -> tuple[str, str]:
-    reg = client.post(
-        "/api/v1/auth/register",
-        json={"full_name": full_name, "email": email, "password": _PASSWORD},
+    session = register_and_login_user(
+        client,
+        email=email,
+        full_name=full_name,
+        password=_PASSWORD,
+        verified=True,
     )
-    assert reg.status_code == 201
-    user_id = str(reg.json()["user"]["id"])
-
-    login = client.post(
-        "/api/v1/auth/login",
-        json={"email": email, "password": _PASSWORD},
-    )
-    assert login.status_code == 200
-    return user_id, str(login.json()["access_token"])
+    return str(session.user_id), session.access_token
 
 
 def test_project_workspace_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:

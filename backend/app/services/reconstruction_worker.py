@@ -44,12 +44,20 @@ from app.services.extraction_prompts import (
     build_category_extraction_prompt,
     build_chunk_prompt_input,
     build_json_repair_prompt,
+    build_multi_domain_extraction_prompt,
+    build_multi_domain_json_repair_prompt,
     partition_chunks_into_batches,
 )
 from app.services.integrations.access_policy import SourceAccessPolicyService
 from app.services.knowledge_validator import (
     KnowledgeCandidateValidator,
     get_category_response_json_schema,
+    get_multi_domain_response_json_schema,
+)
+from app.services.ollama_live_log import (
+    record_ollama_batch_completed,
+    record_ollama_batch_failed,
+    record_ollama_batch_started,
 )
 from app.services.llm import (
     LLMExecutionError,
@@ -383,6 +391,8 @@ class ReconstructionWorkerService:
                 acc.prompt_tokens += exc.prompt_tokens
                 acc.completion_tokens += exc.completion_tokens
                 last_exc = exc
+                if exc.code == "LLM_TRUNCATED" and len(batch) > 1:
+                    raise
                 is_json_repairable = exc.code in {
                     "LLM_INVALID_JSON",
                     "LLM_EMPTY_RESPONSE",
@@ -407,6 +417,62 @@ class ReconstructionWorkerService:
             raise RuntimeError("Unreachable LLM retry state.")
         raise last_exc
 
+    def _call_llm_multi_domain_with_retry(
+        self,
+        *,
+        batch: Sequence[ChunkPromptInput],
+        acc: _RunAccumulator,
+    ) -> LLMGenerationResult:
+        prompt = build_multi_domain_extraction_prompt(
+            chunks=batch,
+            prompt_version=self._extraction_settings.prompt_version,
+        )
+        json_schema = get_multi_domain_response_json_schema()
+        req = LLMGenerationRequest(
+            system_prompt=prompt.system_prompt,
+            user_prompt=prompt.user_prompt,
+            json_schema=json_schema,
+        )
+        max_attempts = 1 + max(0, int(self._extraction_settings.max_retries))
+        last_exc: LLMExecutionError | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                res = self._llm.generate_json(req)
+                acc.batches_executed += 1
+                acc.prompt_tokens += res.prompt_tokens
+                acc.completion_tokens += res.completion_tokens
+                return res
+            except LLMExecutionError as exc:
+                acc.batches_executed += 1
+                acc.prompt_tokens += exc.prompt_tokens
+                acc.completion_tokens += exc.completion_tokens
+                last_exc = exc
+                if exc.code == "LLM_TRUNCATED" and len(batch) > 1:
+                    raise
+                is_json_repairable = exc.code in {
+                    "LLM_INVALID_JSON",
+                    "LLM_EMPTY_RESPONSE",
+                    "LLM_TRUNCATED",
+                }
+                if is_json_repairable and attempt < max_attempts:
+                    repair = build_multi_domain_json_repair_prompt(
+                        chunks=batch,
+                        prior_error=exc.code,
+                        prompt_version=self._extraction_settings.prompt_version,
+                    )
+                    req = LLMGenerationRequest(
+                        system_prompt=repair.system_prompt,
+                        user_prompt=repair.user_prompt,
+                        json_schema=json_schema,
+                    )
+                    continue
+                raise
+
+        if last_exc is None:
+            raise RuntimeError("Unreachable LLM retry state.")
+        raise last_exc
+
     def _renew_job_lease(self, job_id: uuid.UUID) -> None:
         """Heartbeat renewal of job lease so it does not expire while waiting on Ollama."""
         now = utc_now()
@@ -415,7 +481,7 @@ class ReconstructionWorkerService:
                 job_repo = BackgroundJobRepository(session)
                 job = job_repo.get_by_id(job_id)
                 if job is not None and job.status == BackgroundJobStatus.RUNNING.value:
-                    lease_secs = max(3600, self._ingestion_settings.worker_lease_seconds)
+                    lease_secs = max(300, self._ingestion_settings.worker_lease_seconds)
                     job.lease_expires_at = now + timedelta(seconds=lease_secs)
                     job.locked_at = now
                     session.commit()
@@ -451,12 +517,41 @@ class ReconstructionWorkerService:
                 idx,
                 total_ev,
             )
-            # 1. Load authorised snapshot strictly for ONE evidence item at a time.
+            # Check durable extraction fingerprint and existing extracted knowledge for unchanged inputs
+            with self._session_factory() as fp_session:
+                ev_check = EvidenceRepository(fp_session).get_by_id(evidence_id, include_deleted=False)
+                if ev_check is not None:
+                    ev_meta = ev_check.metadata_json or {}
+                    if not claimed.force_rerun and ev_meta.get("semantic_status") == "not_applicable":
+                        logger.info(
+                            "Evidence item %s is marked semantic_status=not_applicable; skipping Ollama inference.",
+                            evidence_id,
+                        )
+                        acc.processed_items += 1
+                        continue
+
+                    k_repo = KnowledgeRepository(fp_session)
+                    is_already_done = k_repo.is_evidence_extracted(
+                        ev_check,
+                        model_name=self._llm.model_name,
+                        prompt_version=self._extraction_settings.prompt_version,
+                    )
+                    if not claimed.force_rerun and is_already_done:
+                        logger.info(
+                            "Evidence item %s already has valid extraction fingerprint or knowledge; skipping Ollama inference.",
+                            evidence_id,
+                        )
+                        acc.processed_items += 1
+                        continue
+
+            # Load authorised snapshot strictly for ONE evidence item at a time for Qwen3 semantic extraction.
             with self._session_factory() as session:
                 ev = EvidenceRepository(session).get_by_id(evidence_id, include_deleted=False)
                 if ev is None or ev.project_id != claimed.project_id:
                     acc.skipped_items += 1
                     continue
+                ev_title = str(ev.title or "")
+                ev_id_str = str(ev.id)
                 if ev.processing_status not in _ELIGIBLE_EVIDENCE_STATUSES:
                     acc.skipped_items += 1
                     continue
@@ -522,80 +617,229 @@ class ReconstructionWorkerService:
                 max_chars_per_batch=self._extraction_settings.max_chars_per_batch,
             )
 
-            accepted_drafts: list[Any] = []
-            evidence_had_error = False
-            for b_idx, batch in enumerate(batches, start=1):
-                for category in claimed.categories:
-                    self._renew_job_lease(claimed.job_id)
-                    logger.info(
-                        "Calling Ollama %s for category '%s' (batch %d/%d, %d chunks)...",
-                        self._llm.model_name,
-                        category.value,
-                        b_idx,
-                        len(batches),
-                        len(batch),
-                    )
-                    try:
-                        llm_res = self._call_llm_with_json_retry(
-                            category=category,
-                            batch=batch,
-                            acc=acc,
-                        )
-                    except LLMExecutionError as exc:
-                        evidence_had_error = True
-                        if exc.retryable:
-                            acc.last_retryable_error = exc
-                        else:
-                            acc.last_fatal_error = exc
-                        warn_tag = f"{category.value}:{exc.code}"
-                        if warn_tag not in acc.warnings and len(acc.warnings) < 25:
-                            acc.warnings.append(warn_tag)
-                        continue
+            # Mark item as currently undergoing semantic extraction in real-time
+            try:
+                from app.services.pipeline_coordinator import invalidate_project_status_cache
 
-                    val_report = self._validator.validate_batch_response(
-                        category=category,
-                        parsed_json=llm_res.parsed_json,
-                        supplied_chunks=batch,
-                        is_synthetic=is_synthetic,
-                    )
-                    logger.info(
-                        "Ollama category '%s' returned %d candidate(s), %d grounded & validated.",
-                        category.value,
-                        val_report.candidates_received,
-                        len(val_report.accepted_items),
-                    )
-                    acc.candidates_generated += val_report.candidates_received
-                    acc.claims_rejected_ungrounded += (
-                        val_report.rejected_schema_count + val_report.rejected_ungrounded_count
-                    )
-                    for reason in val_report.rejection_reasons:
-                        if reason not in acc.warnings and len(acc.warnings) < 25:
-                            acc.warnings.append(reason)
-                    accepted_drafts.extend(val_report.accepted_items)
+                with self._session_factory() as stage_session:
+                    ev_stage = EvidenceRepository(stage_session).get_by_id(evidence_id, include_deleted=False)
+                    if ev_stage is not None:
+                        sm = dict(ev_stage.metadata_json or {})
+                        sm["lifecycle_stage"] = "extracting"
+                        sm["semantic_status"] = "running"
+                        ev_stage.metadata_json = sm
+                        stage_session.commit()
+                invalidate_project_status_cache(claimed.project_id)
+            except Exception as stage_exc:
+                logger.debug("Could not update stage to extracting: %s", stage_exc)
 
-            # 2. Persist validated drafts atomically for this evidence item
-            with self._session_factory() as session:
-                knowledge_repo = KnowledgeRepository(session)
-                if claimed.force_rerun and not evidence_had_error:
-                    knowledge_repo.mark_stale_for_evidence(
+            if claimed.force_rerun:
+                with self._session_factory() as stale_session:
+                    KnowledgeRepository(stale_session).mark_stale_for_evidence(
                         evidence_id=evidence_id,
                         reason="superseded_by_reextraction",
                         exclude_run_id=claimed.run_id,
                     )
-                for draft in accepted_drafts:
-                    _item, merged = knowledge_repo.upsert_validated_draft(
-                        organisation_id=claimed.organisation_id,
-                        project_id=claimed.project_id,
-                        extraction_run_id=claimed.run_id,
-                        model_name=self._llm.model_name,
-                        prompt_version=self._extraction_settings.prompt_version,
-                        draft=draft,
+                    stale_session.commit()
+
+            batch_queue: list[list[ChunkPromptInput]] = [list(b) for b in batches]
+            accepted_drafts: list[Any] = []
+            evidence_had_error = False
+            b_count = 0
+            requested_categories = (
+                set(claimed.categories) if claimed.categories else set(ALL_EXTRACTION_CATEGORIES)
+            )
+
+            while batch_queue:
+                batch = batch_queue.pop(0)
+                b_count += 1
+                self._renew_job_lease(claimed.job_id)
+
+                logger.info(
+                    "Calling Ollama %s for unified multi-domain extraction (batch %d, %d chunks)...",
+                    self._llm.model_name,
+                    b_count,
+                    len(batch),
+                )
+                record_ollama_batch_started(
+                    model_name=self._llm.model_name,
+                    batch_num=b_count,
+                    chunks_count=len(batch),
+                    evidence_id=ev_id_str,
+                    evidence_title=ev_title,
+                    project_id=str(claimed.project_id),
+                )
+                try:
+                    llm_res = self._call_llm_multi_domain_with_retry(
+                        batch=batch,
+                        acc=acc,
                     )
-                    if merged:
-                        acc.duplicates_merged += 1
+                except LLMExecutionError as exc:
+                    record_ollama_batch_failed(
+                        model_name=self._llm.model_name,
+                        batch_num=b_count,
+                        chunks_count=len(batch),
+                        evidence_id=ev_id_str,
+                        evidence_title=ev_title,
+                        project_id=str(claimed.project_id),
+                        error_message=str(exc),
+                    )
+                    if exc.code == "LLM_TRUNCATED" and len(batch) > 1:
+                        logger.warning(
+                            "Batch of %d chunks failed with LLM_TRUNCATED. Splitting in half for adaptive recovery.",
+                            len(batch),
+                        )
+                        mid = len(batch) // 2
+                        batch_queue.insert(0, batch[mid:])
+                        batch_queue.insert(0, batch[:mid])
+                        continue
+
+                    evidence_had_error = True
+                    if exc.retryable:
+                        acc.last_retryable_error = exc
                     else:
-                        acc.claims_persisted += 1
+                        acc.last_fatal_error = exc
+                    warn_tag = f"multi_domain:{exc.code}"
+                    if warn_tag not in acc.warnings and len(acc.warnings) < 25:
+                        acc.warnings.append(warn_tag)
+                    continue
+
+                if getattr(llm_res, "truncated", False) and len(batch) > 1:
+                    logger.warning(
+                        "Batch of %d chunks returned truncated response. Splitting in half for adaptive recovery.",
+                        len(batch),
+                    )
+                    mid = len(batch) // 2
+                    batch_queue.insert(0, batch[mid:])
+                    batch_queue.insert(0, batch[:mid])
+                    continue
+
+                val_report = self._validator.validate_multi_domain_response(
+                    parsed_json=llm_res.parsed_json,
+                    supplied_chunks=batch,
+                    is_synthetic=is_synthetic,
+                )
+                logger.info(
+                    "Ollama multi-domain extraction returned %d candidate(s), %d grounded & validated across 8 domains.",
+                    val_report.candidates_received,
+                    len(val_report.accepted_items),
+                )
+                record_ollama_batch_completed(
+                    model_name=self._llm.model_name,
+                    batch_num=b_count,
+                    chunks_count=len(batch),
+                    evidence_id=ev_id_str,
+                    evidence_title=ev_title,
+                    project_id=str(claimed.project_id),
+                    duration_ms=getattr(llm_res, "duration_ms", 0.0),
+                    candidates_count=val_report.candidates_received,
+                    accepted_items=val_report.accepted_items,
+                    rejected_items=getattr(val_report, "rejected_items", []),
+                )
+                for it in val_report.accepted_items:
+                    ex = it.evidence_links[0].supporting_excerpt if it.evidence_links else ""
+                    quote_prev = (ex[:100] + "...") if len(ex) > 100 else ex
+                    conf_val = float((it.confidence_metadata or {}).get("confidence_score", 0.75))
+                    logger.info(
+                        "  [OLLAMA EXTRACTED] [ACCEPTED] [%s] '%s' (conf=%.2f, links=%d) quote: '%s'",
+                        it.category.value if hasattr(it.category, "value") else str(it.category),
+                        it.title,
+                        conf_val,
+                        len(it.evidence_links),
+                        quote_prev,
+                    )
+                for rej in getattr(val_report, "rejected_items", []):
+                    logger.info(
+                        "  [OLLAMA EXTRACTED] [REJECTED] [%s] '%s' -> %s",
+                        rej.get("category", "unknown"),
+                        rej.get("title", "untitled"),
+                        rej.get("reason", "unknown"),
+                    )
+                acc.candidates_generated += val_report.candidates_received
+                acc.claims_rejected_ungrounded += (
+                    val_report.rejected_schema_count + val_report.rejected_ungrounded_count
+                )
+                for reason in val_report.rejection_reasons:
+                    if reason not in acc.warnings and len(acc.warnings) < 25:
+                        acc.warnings.append(reason)
+
+                batch_accepted = [
+                    item for item in val_report.accepted_items
+                    if item.category in requested_categories
+                ]
+
+                # Immediate persistence for this batch
+                if batch_accepted:
+                    with self._session_factory() as persist_session:
+                        knowledge_repo = KnowledgeRepository(persist_session)
+                        for draft in batch_accepted:
+                            _item, merged = knowledge_repo.upsert_validated_draft(
+                                organisation_id=claimed.organisation_id,
+                                project_id=claimed.project_id,
+                                extraction_run_id=claimed.run_id,
+                                model_name=self._llm.model_name,
+                                prompt_version=self._extraction_settings.prompt_version,
+                                draft=draft,
+                            )
+                            if merged:
+                                acc.duplicates_merged += 1
+                            else:
+                                acc.claims_persisted += 1
+                        persist_session.commit()
+
+                    accepted_drafts.extend(batch_accepted)
+
+                    # Progressive graph update: update canonical entities and invalidate caches immediately
+                    try:
+                        from app.services.knowledge_graphs import invalidate_knowledge_graph_cache
+                        from app.services.pipeline_coordinator import invalidate_project_status_cache
+                        from app.services.relationship_coordinator import RelationshipCoordinatorService
+
+                        with self._session_factory() as rel_session:
+                            RelationshipCoordinatorService(rel_session, llm_client=self._llm).run_reconstruction(
+                                organisation_id=claimed.organisation_id,
+                                project_id=claimed.project_id,
+                                include_llm_suggestions=False,
+                            )
+                            rel_session.commit()
+                        invalidate_knowledge_graph_cache(claimed.project_id)
+                        invalidate_project_status_cache(claimed.project_id)
+                    except Exception as rel_exc:
+                        logger.warning(
+                            "Incremental batch relationship update failed for project %s: %s",
+                            claimed.project_id,
+                            rel_exc,
+                        )
+
+            # Record durable extraction fingerprint & progressive lifecycle stage on evidence item
+            with self._session_factory() as session:
+                ev_to_update = EvidenceRepository(session).get_by_id(evidence_id, include_deleted=False)
+                if ev_to_update is not None:
+                    ev_meta = dict(ev_to_update.metadata_json or {})
+                    if not evidence_had_error:
+                        ev_meta["extraction_fingerprint"] = {
+                            "content_hash": ev_to_update.content_hash,
+                            "model_name": self._llm.model_name,
+                            "prompt_version": self._extraction_settings.prompt_version,
+                            "schema_version": "v1",
+                            "extracted_at": utc_now().isoformat(),
+                            "items_count": len(accepted_drafts),
+                        }
+                        ev_meta["knowledge_count"] = ev_meta.get("knowledge_count", 0) + len(accepted_drafts)
+                        ev_meta["lifecycle_stage"] = "graph_updated"
+                        ev_meta["semantic_status"] = "succeeded"
+                        ev_to_update.processing_status = EvidenceProcessingStatus.EXTRACTED.value
+                    else:
+                        ev_meta["lifecycle_stage"] = "failed"
+                        ev_meta["semantic_status"] = "failed"
+                    ev_to_update.metadata_json = ev_meta
                 session.commit()
+            try:
+                from app.services.pipeline_coordinator import invalidate_project_status_cache
+
+                invalidate_project_status_cache(claimed.project_id)
+            except Exception:
+                pass
 
             if evidence_had_error:
                 acc.failed_items += 1
@@ -612,10 +856,18 @@ class ReconstructionWorkerService:
             acc.chunks_evaluated,
         )
         self._finalize_run(claimed=claimed, acc=acc, duration_ms=elapsed_ms)
+        try:
+            from app.services.pipeline_coordinator import invalidate_project_status_cache
+
+            invalidate_project_status_cache(claimed.project_id)
+        except Exception:
+            pass
 
         # Synchronize downstream canonical graph entities & relationships when knowledge updates
-        if acc.claims_persisted > 0 or acc.duplicates_merged > 0:
+        if acc.claims_persisted > 0 or acc.duplicates_merged > 0 or acc.candidates_generated > 0:
             try:
+                from app.services.knowledge_graphs import invalidate_knowledge_graph_cache
+                from app.services.pipeline_coordinator import invalidate_project_status_cache
                 from app.services.relationship_coordinator import RelationshipCoordinatorService
 
                 with self._session_factory() as rel_session:
@@ -625,6 +877,8 @@ class ReconstructionWorkerService:
                         include_llm_suggestions=False,
                     )
                     rel_session.commit()
+                invalidate_knowledge_graph_cache(claimed.project_id)
+                invalidate_project_status_cache(claimed.project_id)
             except Exception as rel_exc:
                 logger.warning(
                     "Post-extraction relationship synchronization failed for project %s: %s",
@@ -709,17 +963,17 @@ class ReconstructionWorkerService:
             }
 
             if run is not None:
-                run.processed_evidence_items = acc.processed_items
+                run.processed_evidence_items += acc.processed_items
                 run.failed_evidence_items = acc.failed_items
                 run.skipped_evidence_items = acc.skipped_items
-                run.total_chunks_evaluated = acc.chunks_evaluated
-                run.batches_executed = acc.batches_executed
-                run.candidates_generated = acc.candidates_generated
-                run.claims_persisted = acc.claims_persisted
-                run.claims_rejected_ungrounded = acc.claims_rejected_ungrounded
-                run.duplicates_merged = acc.duplicates_merged
-                run.prompt_tokens = acc.prompt_tokens
-                run.completion_tokens = acc.completion_tokens
+                run.total_chunks_evaluated += acc.chunks_evaluated
+                run.batches_executed += acc.batches_executed
+                run.candidates_generated += acc.candidates_generated
+                run.claims_persisted += acc.claims_persisted
+                run.claims_rejected_ungrounded += acc.claims_rejected_ungrounded
+                run.duplicates_merged += acc.duplicates_merged
+                run.prompt_tokens += acc.prompt_tokens
+                run.completion_tokens += acc.completion_tokens
                 merged_warnings = list(dict.fromkeys([*(run.warnings_json or []), *acc.warnings]))
                 run.warnings_json = merged_warnings[:30]
 

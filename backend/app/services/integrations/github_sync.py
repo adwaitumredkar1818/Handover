@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -28,7 +29,11 @@ from app.models.team_roster import ContributionAttribution
 from app.repositories.integration import IntegrationRepository
 from app.services.document_extraction import ExtractedPageData
 from app.services.integrations.access_policy import SourceAccessPolicyService
-from app.services.integrations.errors import IntegrationAuthError, IntegrationProviderError
+from app.services.integrations.errors import (
+    IntegrationAuthError,
+    IntegrationProviderError,
+    IntegrationRateLimitError,
+)
 from app.services.integrations.evidence_ingestor import (
     NormalizedSourceEvidence,
     SourceEvidenceIngestor,
@@ -36,6 +41,8 @@ from app.services.integrations.evidence_ingestor import (
 from app.services.integrations.github_client import GitHubClient
 from app.services.integrations.http_utils import parse_provider_datetime
 from app.services.technology_manifest_parser import is_manifest_path
+
+logger = logging.getLogger(__name__)
 
 _BOT_NAME_PATTERNS = (
     "[bot]",
@@ -45,6 +52,12 @@ _BOT_NAME_PATTERNS = (
     "codecov",
     "snyk-bot",
     "greenkeeper",
+    "lovable",
+    "gpt-engineer",
+    "copilot",
+    "cursor",
+    "invalid-email-address",
+    "lovable.dev",
 )
 
 
@@ -58,17 +71,11 @@ def is_bot_identity(
     """Detect automated bot accounts using provider account type first, then naming patterns."""
     if provider_type and provider_type.strip().lower() == "bot":
         return True, "provider_account_type"
-    # Never override an explicit provider 'User' account unless login explicitly carries '[bot]'
-    explicit_user = bool(provider_type and provider_type.strip().lower() == "user")
     for candidate in (login, name, email):
         if not candidate:
             continue
         low = candidate.strip().lower()
-        if "[bot]" in low:
-            return True, "bot_naming_pattern"
-        if not explicit_user and (
-            any(pat in low for pat in _BOT_NAME_PATTERNS) or low.endswith("-bot")
-        ):
+        if "[bot]" in low or any(pat in low for pat in _BOT_NAME_PATTERNS) or low.endswith("-bot"):
             return True, "bot_naming_pattern"
     return False, None
 
@@ -86,6 +93,7 @@ class SyncExecutionReport:
     items_created: int = 0
     items_updated: int = 0
     items_unchanged: int = 0
+    items_skipped: int = 0
     items_inaccessible: int = 0
     items_failed: int = 0
     warnings: list[str] = field(default_factory=list)
@@ -140,8 +148,36 @@ class GitHubSyncOrchestrator:
         self._repo = integration_repo
         self._ingestor = ingestor
         self._policy_svc = access_policy_service
+        self._active_sync_run: Any = None
 
     def execute_sync(
+        self,
+        *,
+        mapping: ProjectSourceMapping,
+        policy: SourceAccessPolicy,
+        access_token: str,
+        actor_user_id: uuid.UUID,
+        external_user_id: str,
+        external_username: str | None,
+        sync_mode: str,
+        sync_run: Any = None,
+    ) -> SyncExecutionReport:
+        self._active_sync_run = sync_run
+        try:
+            with self._client:
+                return self._execute_sync_internal(
+                    mapping=mapping,
+                    policy=policy,
+                    access_token=access_token,
+                    actor_user_id=actor_user_id,
+                    external_user_id=external_user_id,
+                    external_username=external_username,
+                    sync_mode=sync_mode,
+                )
+        finally:
+            self._active_sync_run = None
+
+    def _execute_sync_internal(
         self,
         *,
         mapping: ProjectSourceMapping,
@@ -172,6 +208,12 @@ class GitHubSyncOrchestrator:
         seen_external_ids: set[str] = set()
         reconciled_categories: set[str] = set()
         had_collection_warning = False
+
+        if hasattr(self._ingestor, "prefetch_project_state"):
+            self._ingestor.prefetch_project_state(
+                project_id=mapping.project_id,
+                source_type=EvidenceSourceType.GITHUB.value,
+            )
 
         # 1. Fail-closed verification that caller's token can read this repository right now
         allowed, repo_candidate = self._client.verify_repository_access(
@@ -238,7 +280,13 @@ class GitHubSyncOrchestrator:
             else None
         )
 
-        # 2. Ingest repository overview record
+        # 2. Ingest repository overview record first
+        self._update_sync_progress(
+            mapping=mapping,
+            report=report,
+            phase="repository_metadata",
+            checkpoint=f"repo:{owner_repo}",
+        )
         repo_overview_text = "\n".join(
             line
             for line in (
@@ -285,16 +333,112 @@ class GitHubSyncOrchestrator:
 
         latest_seen_dt = parse_provider_datetime(since_cursor)
 
-        # 3. Issues and Pull Requests
-        if config.get("include_issues", True) or config.get("include_pull_requests", True):
-            issues_res = self._client.fetch_issues_and_prs(
-                access_token=access_token,
-                owner=owner,
-                repo=repo_name,
-                since=since_cursor,
-                etag=issues_etag,
-                max_items=max_items,
+        # 3. Prioritise README, manifests, architecture docs, ADRs, PRD/TRD, and design docs FIRST
+        # so Lane B (indexing/embeddings) and Lane C (Qwen3) can start immediately without waiting for commit history.
+        include_code = bool(config.get("include_code", False))
+        if config.get("include_docs", True) and report.items_discovered < max_items:
+            docs_limit = min(
+                max(self._settings.integrations.default_github_docs_limit, 150)
+                if include_code
+                else self._settings.integrations.default_github_docs_limit,
+                max_items - report.items_discovered,
             )
+            self._update_sync_progress(
+                mapping=mapping,
+                report=report,
+                phase="documentation_and_manifests",
+                checkpoint="fetching_docs_and_manifests",
+            )
+            try:
+                docs, doc_warns = self._client.fetch_readme_and_docs(
+                    access_token=access_token,
+                    owner=owner,
+                    repo=repo_name,
+                    default_branch=repo_candidate.default_branch,
+                    max_docs=docs_limit,
+                    include_code=include_code,
+                )
+            except (IntegrationRateLimitError, IntegrationProviderError) as exc:
+                self._update_sync_progress(
+                    mapping=mapping,
+                    report=report,
+                    phase="documentation_and_manifests",
+                    checkpoint="docs_error",
+                    rate_limit_status=f"{exc.code}: {exc.message[:160]}",
+                    commit=True,
+                )
+                if exc.retryable:
+                    raise
+                docs = []
+                doc_warns = [f"Documentation phase skipped: {exc.message}"]
+                report.partial = True
+            report.warnings.extend(doc_warns)
+            if doc_warns:
+                report.partial = True
+            for doc in docs:
+                if report.items_discovered >= max_items:
+                    break
+                doc_path = str(doc.get("path") or "doc")
+                self._update_sync_progress(
+                    mapping=mapping,
+                    report=report,
+                    phase="documentation_and_manifests",
+                    checkpoint=f"doc:{doc_path}",
+                )
+                record = self._normalize_doc(
+                    repo_id=repo_id,
+                    owner_repo=owner_repo,
+                    mapping_id=mapping.id,
+                    policy_id=policy.id,
+                    acl_scope=acl_scope,
+                    doc=doc,
+                    repo_updated_at=repo_candidate.updated_at,
+                )
+                self._record_upsert(
+                    report=report,
+                    mapping=mapping,
+                    triggered_by_user_id=actor_user_id,
+                    now=now,
+                    seen_external_ids=seen_external_ids,
+                    record=record,
+                )
+            self._update_sync_progress(
+                mapping=mapping,
+                report=report,
+                phase="documentation_and_manifests",
+                checkpoint=f"docs_completed:{len(docs)}",
+                commit=True,
+            )
+
+        # 4. Pull Requests and Issues
+        if (
+            config.get("include_issues", True) or config.get("include_pull_requests", True)
+        ) and report.items_discovered < max_items:
+            self._update_sync_progress(
+                mapping=mapping,
+                report=report,
+                phase="issues_and_pull_requests",
+                checkpoint="fetching_issues_and_prs",
+            )
+            try:
+                issues_res = self._client.fetch_issues_and_prs(
+                    access_token=access_token,
+                    owner=owner,
+                    repo=repo_name,
+                    since=since_cursor,
+                    etag=issues_etag,
+                    max_items=max_items,
+                )
+            except (IntegrationRateLimitError, IntegrationProviderError) as exc:
+                self._update_sync_progress(
+                    mapping=mapping,
+                    report=report,
+                    phase="issues_and_pull_requests",
+                    checkpoint="issues_prs_error",
+                    rate_limit_status=f"{exc.code}: {exc.message[:160]}",
+                    commit=True,
+                )
+                raise
             report.warnings.extend(issues_res.warnings)
             if issues_res.warnings:
                 report.partial = True
@@ -319,16 +463,20 @@ class GitHubSyncOrchestrator:
 
                 is_pr = isinstance(item.get("pull_request"), dict)
                 if is_pr and not config.get("include_pull_requests", True):
+                    report.items_skipped += 1
                     continue
                 if not is_pr and not config.get("include_issues", True):
+                    report.items_skipped += 1
                     continue
 
                 pr_scope = str(config.get("pr_scope", "all")).lower()
                 issue_scope = str(config.get("issue_scope", "all")).lower()
                 item_state = str(item.get("state", "")).lower()
                 if is_pr and pr_scope == "open" and item_state != "open":
+                    report.items_skipped += 1
                     continue
                 if not is_pr and issue_scope == "open" and item_state != "open":
+                    report.items_skipped += 1
                     continue
 
                 item_updated = parse_provider_datetime(
@@ -339,6 +487,7 @@ class GitHubSyncOrchestrator:
 
                 number = int(item.get("number") or 0)
                 if number <= 0:
+                    report.items_skipped += 1
                     continue
 
                 item_warnings: list[str] = []
@@ -408,6 +557,12 @@ class GitHubSyncOrchestrator:
                             warnings=tuple(item_warnings),
                         )
 
+                    self._update_sync_progress(
+                        mapping=mapping,
+                        report=report,
+                        phase="issues_and_pull_requests",
+                        checkpoint=f"{'pr' if is_pr else 'issue'}:#{number}",
+                    )
                     self._record_upsert(
                         report=report,
                         mapping=mapping,
@@ -420,12 +575,27 @@ class GitHubSyncOrchestrator:
                     raise
                 except IntegrationProviderError as exc:
                     if exc.retryable:
+                        self._update_sync_progress(
+                            mapping=mapping,
+                            report=report,
+                            phase="issues_and_pull_requests",
+                            checkpoint=f"item_retryable_error:#{number}",
+                            rate_limit_status=f"{exc.code}: {exc.message[:160]}",
+                            commit=True,
+                        )
                         raise
                     report.items_failed += 1
                     report.partial = True
                     report.warnings.append(f"GitHub item #{number} failed: {exc.message}")
+            self._update_sync_progress(
+                mapping=mapping,
+                report=report,
+                phase="issues_and_pull_requests",
+                checkpoint=f"issues_prs_completed:{len(issues_res.items)}",
+                commit=True,
+            )
 
-        # 4. Commits (branch-aware extraction, duplicate SHA suppression, co-authors & stats)
+        # 5. Commits (branch-aware extraction, duplicate SHA suppression, co-authors & stats)
         if config.get("include_commits", True) and report.items_discovered < max_items:
             branch_scope = str(config.get("branch_scope", "default")).lower()
             selected_branches = [str(b) for b in config.get("selected_branches", []) if b]
@@ -457,17 +627,40 @@ class GitHubSyncOrchestrator:
                 else None
             )
 
+            self._update_sync_progress(
+                mapping=mapping,
+                report=report,
+                phase="commits",
+                checkpoint=f"fetching_commits:{len(branches_to_sync)}_branches",
+            )
             for branch_name in branches_to_sync:
                 commits_limit = self._settings.integrations.default_github_commits_limit
-                commits_res = self._client.fetch_commits(
-                    access_token=access_token,
-                    owner=owner,
-                    repo=repo_name,
-                    sha=branch_name,
-                    since=effective_commits_since,
-                    etag=commits_etag if branch_name == repo_candidate.default_branch else None,
-                    max_items=commits_limit,
-                )
+                try:
+                    commits_res = self._client.fetch_commits(
+                        access_token=access_token,
+                        owner=owner,
+                        repo=repo_name,
+                        sha=branch_name,
+                        since=effective_commits_since,
+                        etag=commits_etag if branch_name == repo_candidate.default_branch else None,
+                        max_items=commits_limit,
+                    )
+                except (IntegrationRateLimitError, IntegrationProviderError) as exc:
+                    self._update_sync_progress(
+                        mapping=mapping,
+                        report=report,
+                        phase="commits",
+                        checkpoint=f"commits_error:{branch_name or 'default'}",
+                        rate_limit_status=f"{exc.code}: {exc.message[:160]}",
+                        commit=True,
+                    )
+                    if exc.retryable:
+                        raise
+                    report.warnings.append(
+                        f"Commit history fetch failed on '{branch_name or 'default'}': {exc.message}"
+                    )
+                    report.partial = True
+                    continue
                 report.warnings.extend(commits_res.warnings)
                 if branch_name == repo_candidate.default_branch and commits_res.etag:
                     new_cursor["commits_etag"] = commits_res.etag
@@ -475,6 +668,7 @@ class GitHubSyncOrchestrator:
                 for commit in commits_res.items:
                     sha = str(commit.get("sha") or "")
                     if not sha:
+                        report.items_skipped += 1
                         continue
                     b_label = branch_name or repo_candidate.default_branch or "default"
                     if sha not in seen_shas_to_branches:
@@ -483,24 +677,11 @@ class GitHubSyncOrchestrator:
                     if sha not in unique_commits:
                         unique_commits[sha] = commit
 
-            for sha, commit in unique_commits.items():
+            commits_list = list(unique_commits.items())
+            total_commits_count = len(commits_list)
+            for idx, (sha, commit) in enumerate(commits_list):
                 if report.items_discovered >= max_items:
                     break
-                # Retrieve commit detail for changed_files metadata when absent
-                if not isinstance(commit.get("files"), list) and hasattr(
-                    self._client, "fetch_commit_detail"
-                ):
-                    try:
-                        detail = self._client.fetch_commit_detail(
-                            access_token=access_token,
-                            owner=owner,
-                            repo=repo_name,
-                            sha=sha,
-                        )
-                        if isinstance(detail, dict) and isinstance(detail.get("files"), list):
-                            commit = {**commit, "files": detail["files"]}
-                    except Exception:
-                        pass
                 record = self._normalize_commit(
                     repo_id=repo_id,
                     owner_repo=owner_repo,
@@ -510,6 +691,13 @@ class GitHubSyncOrchestrator:
                     commit=commit,
                     discovered_branches=sorted(list(seen_shas_to_branches[sha])),
                 )
+                do_flush = ((idx + 1) % 25 == 0) or ((idx + 1) == total_commits_count)
+                self._update_sync_progress(
+                    mapping=mapping,
+                    report=report,
+                    phase="commits",
+                    checkpoint=f"commit:{sha[:8]} ({idx + 1}/{total_commits_count})",
+                )
                 self._record_upsert(
                     report=report,
                     mapping=mapping,
@@ -517,10 +705,24 @@ class GitHubSyncOrchestrator:
                     now=now,
                     seen_external_ids=seen_external_ids,
                     record=record,
+                    flush=do_flush,
                 )
+            self._update_sync_progress(
+                mapping=mapping,
+                report=report,
+                phase="commits",
+                checkpoint=f"commits_completed:{total_commits_count}",
+                commit=True,
+            )
 
             # Bounded resumable backfill of historical commits missing changed_files metadata
-            self._backfill_commit_changed_files(
+            self._update_sync_progress(
+                mapping=mapping,
+                report=report,
+                phase="commit_backfill",
+                checkpoint="backfilling_changed_files",
+            )
+            backfilled = self._backfill_commit_changed_files(
                 mapping=mapping,
                 owner=owner,
                 repo_name=repo_name,
@@ -528,8 +730,21 @@ class GitHubSyncOrchestrator:
                 new_cursor=new_cursor,
                 limit=15,
             )
+            self._update_sync_progress(
+                mapping=mapping,
+                report=report,
+                phase="commit_backfill",
+                checkpoint=f"backfill_completed:{backfilled}",
+                commit=True,
+            )
 
-            # Supplementary Contributor Statistics
+            # Supplementary Contributor Statistics (optional - never block sync)
+            self._update_sync_progress(
+                mapping=mapping,
+                report=report,
+                phase="supplementary_metadata",
+                checkpoint="fetching_contributors",
+            )
             try:
                 contributors = self._client.fetch_contributors(
                     access_token=access_token,
@@ -539,74 +754,50 @@ class GitHubSyncOrchestrator:
                 )
                 if contributors:
                     new_cursor["contributors_count"] = len(contributors)
-            except Exception:
-                pass
+            except IntegrationAuthError:
+                raise
+            except Exception as exc:
+                logger.warning("GitHub contributors metadata skipped for %s: %s", owner_repo, exc)
+                report.warnings.append(f"Contributor statistics skipped: {exc}")
 
-        # 5. README, Markdown documentation, ADRs, and repository code files
-        include_code = bool(config.get("include_code", False))
-        if config.get("include_docs", True) and report.items_discovered < max_items:
-            docs_limit = min(
-                max(self._settings.integrations.default_github_docs_limit, 150)
-                if include_code
-                else self._settings.integrations.default_github_docs_limit,
-                max_items - report.items_discovered,
-            )
-            docs, doc_warns = self._client.fetch_readme_and_docs(
-                access_token=access_token,
-                owner=owner,
-                repo=repo_name,
-                default_branch=repo_candidate.default_branch,
-                max_docs=docs_limit,
-                include_code=include_code,
-            )
-            report.warnings.extend(doc_warns)
-            if doc_warns:
-                report.partial = True
-            for doc in docs:
-                record = self._normalize_doc(
-                    repo_id=repo_id,
-                    owner_repo=owner_repo,
-                    mapping_id=mapping.id,
-                    policy_id=policy.id,
-                    acl_scope=acl_scope,
-                    doc=doc,
-                    repo_updated_at=repo_candidate.updated_at,
-                )
-                self._record_upsert(
-                    report=report,
-                    mapping=mapping,
-                    triggered_by_user_id=actor_user_id,
-                    now=now,
-                    seen_external_ids=seen_external_ids,
-                    record=record,
-                )
-
-        # 6. Discussions (optional / graceful skip when repo disables discussions)
+        # 6. Discussions (optional / graceful skip when repo disables discussions or times out)
         if config.get("include_discussions", True) and report.items_discovered < max_items:
-            discussions, disc_warns = self._client.fetch_discussions(
-                access_token=access_token,
-                owner=owner,
-                repo=repo_name,
-                max_items=min(30, max_items - report.items_discovered),
+            self._update_sync_progress(
+                mapping=mapping,
+                report=report,
+                phase="supplementary_metadata",
+                checkpoint="fetching_discussions",
             )
-            report.warnings.extend(disc_warns)
-            for disc in discussions:
-                record = self._normalize_discussion(
-                    repo_id=repo_id,
-                    owner_repo=owner_repo,
-                    mapping_id=mapping.id,
-                    policy_id=policy.id,
-                    acl_scope=acl_scope,
-                    discussion=disc,
+            try:
+                discussions, disc_warns = self._client.fetch_discussions(
+                    access_token=access_token,
+                    owner=owner,
+                    repo=repo_name,
+                    max_items=min(30, max_items - report.items_discovered),
                 )
-                self._record_upsert(
-                    report=report,
-                    mapping=mapping,
-                    triggered_by_user_id=actor_user_id,
-                    now=now,
-                    seen_external_ids=seen_external_ids,
-                    record=record,
-                )
+                report.warnings.extend(disc_warns)
+                for disc in discussions:
+                    record = self._normalize_discussion(
+                        repo_id=repo_id,
+                        owner_repo=owner_repo,
+                        mapping_id=mapping.id,
+                        policy_id=policy.id,
+                        acl_scope=acl_scope,
+                        discussion=disc,
+                    )
+                    self._record_upsert(
+                        report=report,
+                        mapping=mapping,
+                        triggered_by_user_id=actor_user_id,
+                        now=now,
+                        seen_external_ids=seen_external_ids,
+                        record=record,
+                    )
+            except IntegrationAuthError:
+                raise
+            except (IntegrationRateLimitError, IntegrationProviderError, Exception) as exc:
+                logger.warning("GitHub discussions metadata skipped for %s: %s", owner_repo, exc)
+                report.warnings.append(f"GitHub discussions skipped: {exc}")
 
         # Safely reconcile disappeared items only on complete non-incremental snapshot runs
         if (
@@ -636,9 +827,77 @@ class GitHubSyncOrchestrator:
         checkpoint_dt = latest_seen_dt or now
         new_cursor["last_updated_since"] = checkpoint_dt.astimezone(UTC).isoformat()
         new_cursor["last_completed_at"] = now.astimezone(UTC).isoformat()
+        new_cursor["current_phase"] = "completed"
+        new_cursor["last_checkpoint"] = f"completed:{report.items_discovered}"
+        new_cursor["last_progress_at"] = utc_now().isoformat()
+        new_cursor["items_skipped"] = report.items_skipped
+        new_cursor["retry_or_rate_limit"] = None
         report.new_cursor = new_cursor
+        if self._active_sync_run is not None:
+            self._active_sync_run.items_discovered = report.items_discovered
+            self._active_sync_run.items_created = report.items_created
+            self._active_sync_run.items_updated = report.items_updated
+            self._active_sync_run.items_unchanged = report.items_unchanged
+            self._active_sync_run.cursor_after_json = dict(new_cursor)
         self._notify_pending_contributor_reviews(mapping=mapping, actor_user_id=actor_user_id)
+        logger.info(
+            "GitHub sync [%s] finished phase=completed discovered=%d created=%d updated=%d unchanged=%d skipped=%d failed=%d",
+            owner_repo,
+            report.items_discovered,
+            report.items_created,
+            report.items_updated,
+            report.items_unchanged,
+            report.items_skipped,
+            report.items_failed,
+        )
         return report
+
+    def _update_sync_progress(
+        self,
+        *,
+        mapping: ProjectSourceMapping,
+        report: SyncExecutionReport,
+        phase: str,
+        checkpoint: str,
+        rate_limit_status: str | None = None,
+        commit: bool = False,
+    ) -> None:
+        """Persist current phase, checkpoint, counters, and progress timestamp on SyncExecutionReport / SourceSyncRun."""
+        now_iso = utc_now().isoformat()
+        report.new_cursor["current_phase"] = phase
+        report.new_cursor["last_checkpoint"] = checkpoint
+        report.new_cursor["last_progress_at"] = now_iso
+        report.new_cursor["items_skipped"] = report.items_skipped
+        report.new_cursor["retry_or_rate_limit"] = rate_limit_status
+        if self._active_sync_run is not None:
+            self._active_sync_run.items_discovered = report.items_discovered
+            self._active_sync_run.items_created = report.items_created
+            self._active_sync_run.items_updated = report.items_updated
+            self._active_sync_run.items_unchanged = report.items_unchanged
+            self._active_sync_run.cursor_after_json = dict(report.new_cursor)
+        logger.info(
+            "GitHub sync [%s] phase=%s checkpoint=%s discovered=%d created=%d updated=%d unchanged=%d skipped=%d",
+            mapping.external_resource_key,
+            phase,
+            checkpoint,
+            report.items_discovered,
+            report.items_created,
+            report.items_updated,
+            report.items_unchanged,
+            report.items_skipped,
+        )
+        if commit:
+            session = getattr(self._ingestor, "_session", None)
+            if session is not None:
+                try:
+                    session.commit()
+                    from app.main import signal_worker_activity
+                    from app.services.pipeline_coordinator import invalidate_project_status_cache
+
+                    invalidate_project_status_cache(mapping.project_id)
+                    signal_worker_activity()
+                except Exception:
+                    pass
 
     def _backfill_commit_changed_files(
         self,
@@ -795,6 +1054,7 @@ class GitHubSyncOrchestrator:
         now: Any,
         seen_external_ids: set[str],
         record: NormalizedSourceEvidence,
+        flush: bool = True,
     ) -> None:
         report.items_discovered += 1
         seen_external_ids.add(record.source_external_id)
@@ -805,6 +1065,7 @@ class GitHubSyncOrchestrator:
             triggered_by_user_id=triggered_by_user_id,
             record=record,
             now=now,
+            flush=flush,
         )
         if outcome.action == "created":
             report.items_created += 1
@@ -812,6 +1073,40 @@ class GitHubSyncOrchestrator:
             report.items_updated += 1
         else:
             report.items_unchanged += 1
+
+        # Commit in bounded 25-item batches (plus initial 5-item warmup and high-value docs)
+        # so evidence, deterministic knowledge, and initial graphs appear live without per-commit DB overhead
+        meta = record.metadata_json or {}
+        is_high_value = (
+            record.category
+            in (
+                EvidenceCategory.DESIGN_DOCUMENT.value,
+                EvidenceCategory.PROJECT_DOCUMENT.value,
+                "architecture_decision",
+            )
+            or bool(meta.get("is_manifest"))
+            or is_manifest_path(str(meta.get("path") or record.title))
+            or (report.items_discovered == 5)
+            or (report.items_discovered % 25 == 0)
+        )
+        if is_high_value:
+            session = getattr(self._ingestor, "_session", None)
+            if session is not None:
+                try:
+                    if self._active_sync_run is not None:
+                        self._active_sync_run.items_discovered = report.items_discovered
+                        self._active_sync_run.items_created = report.items_created
+                        self._active_sync_run.items_updated = report.items_updated
+                        self._active_sync_run.items_unchanged = report.items_unchanged
+                        self._active_sync_run.cursor_after_json = dict(report.new_cursor)
+                    session.commit()
+                    from app.main import signal_worker_activity
+                    from app.services.pipeline_coordinator import invalidate_project_status_cache
+
+                    invalidate_project_status_cache(mapping.project_id)
+                    signal_worker_activity()
+                except Exception:
+                    pass
 
     def _normalize_issue(
         self,

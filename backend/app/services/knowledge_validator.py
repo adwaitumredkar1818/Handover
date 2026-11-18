@@ -73,6 +73,68 @@ def get_category_response_json_schema(category: KnowledgeCategory) -> dict[str, 
     return envelope_model.model_json_schema()
 
 
+def get_multi_domain_response_json_schema() -> dict[str, Any]:
+    """Return unified compact JSON schema envelope for multi-domain structured extraction."""
+    return {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "enum": [
+                                "project_overview_context",
+                                "decisions_rationale",
+                                "technical_architecture",
+                                "work_items",
+                                "responsibilities_ownership",
+                                "dependencies",
+                                "bugs_blockers_risks",
+                                "operational_historical",
+                            ],
+                        },
+                        "title": {"type": "string"},
+                        "structured_summary": {"type": "string"},
+                        "evidence_refs": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "chunk_id": {"type": "string"},
+                                    "supporting_excerpt": {"type": "string"},
+                                    "support_type": {
+                                        "type": "string",
+                                        "enum": ["direct", "interpretation", "uncertain"],
+                                    },
+                                },
+                                "required": ["chunk_id", "supporting_excerpt", "support_type"],
+                            },
+                        },
+                        "is_interpretation": {"type": "boolean"},
+                        "is_uncertain": {"type": "boolean"},
+                        "confidence_level": {
+                            "type": "string",
+                            "enum": ["high", "medium", "low"],
+                        },
+                    },
+                    "required": [
+                        "category",
+                        "title",
+                        "structured_summary",
+                        "evidence_refs",
+                        "confidence_level",
+                    ],
+                },
+            },
+        },
+        "required": ["items"],
+    }
+
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedEvidenceLinkDraft:
     """Validated provenance link verified against a concrete supplied EvidenceChunk."""
@@ -119,6 +181,7 @@ class BatchValidationReport:
     rejected_schema_count: int = 0
     rejected_ungrounded_count: int = 0
     rejection_reasons: list[str] = field(default_factory=list)
+    rejected_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _normalize_text_for_matching(value: str) -> str:
@@ -511,7 +574,13 @@ class KnowledgeCandidateValidator:
 
             if not verified_links:
                 report.rejected_ungrounded_count += 1
-                report.rejection_reasons.append(ref_rejection or "no_verified_evidence_links")
+                rej_reason = ref_rejection or "no_verified_evidence_links"
+                report.rejection_reasons.append(rej_reason)
+                report.rejected_items.append({
+                    "category": category.value if hasattr(category, "value") else str(category),
+                    "title": getattr(candidate, "title", "untitled"),
+                    "reason": rej_reason,
+                })
                 continue
 
             payload = candidate.model_dump(
@@ -597,3 +666,239 @@ class KnowledgeCandidateValidator:
             )
 
         return report
+
+    def validate_multi_domain_response(
+        self,
+        *,
+        parsed_json: dict[str, Any],
+        supplied_chunks: list[ChunkPromptInput],
+        is_synthetic: bool,
+    ) -> BatchValidationReport:
+        """Validate multi-domain extraction output covering all 8 canonical categories in 1 pass."""
+        report = BatchValidationReport()
+        raw_items = parsed_json.get("items")
+        if not isinstance(raw_items, list):
+            report.rejection_reasons.append("missing_items_array")
+            return report
+
+        supplied_by_id = {str(ch.chunk_id): ch for ch in supplied_chunks}
+        report.candidates_received = len(raw_items)
+
+        category_aliases: dict[str, KnowledgeCategory] = {
+            "project_overview_context": KnowledgeCategory.PROJECT_OVERVIEW_CONTEXT,
+            "decisions_rationale": KnowledgeCategory.DECISIONS_RATIONALE,
+            "technical_architecture": KnowledgeCategory.TECHNICAL_ARCHITECTURE,
+            "work_items": KnowledgeCategory.WORK_ITEMS,
+            "responsibilities_ownership": KnowledgeCategory.RESPONSIBILITIES_OWNERSHIP,
+            "dependencies": KnowledgeCategory.DEPENDENCIES,
+            "bugs_blockers_risks": KnowledgeCategory.BUGS_BLOCKERS_RISKS,
+            "operational_historical": KnowledgeCategory.OPERATIONAL_HISTORICAL,
+            "work_progress": KnowledgeCategory.WORK_ITEMS,
+            "architecture_technical": KnowledgeCategory.TECHNICAL_ARCHITECTURE,
+            "dependencies_relationships": KnowledgeCategory.DEPENDENCIES,
+            "risks_blockers_questions": KnowledgeCategory.BUGS_BLOCKERS_RISKS,
+        }
+
+        for raw_entry in raw_items:
+            if not isinstance(raw_entry, dict):
+                report.rejected_schema_count += 1
+                report.rejection_reasons.append("candidate_not_object")
+                report.rejected_items.append({"category": "unknown", "title": "<non-dict>", "reason": "candidate_not_object"})
+                continue
+
+            raw_cat = str(raw_entry.get("category", "")).lower().strip()
+            category = category_aliases.get(raw_cat)
+            if category is None:
+                report.rejected_schema_count += 1
+                report.rejection_reasons.append(f"unknown_category:{raw_cat[:30]}")
+                report.rejected_items.append({"category": raw_cat, "title": str(raw_entry.get("title", "")), "reason": f"unknown_category:{raw_cat[:30]}"})
+                continue
+
+            title = str(raw_entry.get("title", "")).strip()
+            if not title:
+                report.rejected_schema_count += 1
+                report.rejection_reasons.append("missing_title")
+                report.rejected_items.append({"category": raw_cat, "title": "<missing_title>", "reason": "missing_title"})
+                continue
+
+            summary = str(raw_entry.get("structured_summary") or raw_entry.get("description") or title).strip()
+
+            raw_refs = raw_entry.get("evidence_refs")
+            if not isinstance(raw_refs, list) or not raw_refs:
+                report.rejected_ungrounded_count += 1
+                report.rejection_reasons.append("missing_evidence_refs")
+                report.rejected_items.append({"category": raw_cat, "title": title, "reason": "missing_evidence_refs"})
+                continue
+
+            verified_links: list[VerifiedEvidenceLinkDraft] = []
+            cited_chunks: list[ChunkPromptInput] = []
+            seen_link_keys: set[tuple[uuid.UUID, str]] = set()
+            ref_rejection: str | None = None
+
+            for ref in raw_refs:
+                if not isinstance(ref, dict):
+                    continue
+                chunk_id_str = str(ref.get("chunk_id", "")).strip()
+                chunk_input = supplied_by_id.get(chunk_id_str)
+                if chunk_input is None:
+                    ref_rejection = "cited_chunk_not_in_supplied_context"
+                    continue
+
+                excerpt = str(ref.get("supporting_excerpt", "")).strip()
+                ok, match_mode, match_err = verify_excerpt_in_chunk(
+                    excerpt=excerpt,
+                    chunk_text=chunk_input.chunk_text,
+                )
+                if not ok or match_mode is None:
+                    ref_rejection = match_err
+                    continue
+
+                dedup_key = (chunk_input.chunk_id, excerpt)
+                if dedup_key in seen_link_keys:
+                    continue
+                seen_link_keys.add(dedup_key)
+
+                support_type = str(ref.get("support_type", "direct")).lower()
+                if support_type not in {"direct", "interpretation", "uncertain"}:
+                    support_type = "direct"
+
+                cited_chunks.append(chunk_input)
+                verified_links.append(
+                    VerifiedEvidenceLinkDraft(
+                        evidence_id=chunk_input.evidence_id,
+                        evidence_chunk_id=chunk_input.chunk_id,
+                        support_type=support_type,
+                        source_location={
+                            "chunk_index": chunk_input.chunk_index,
+                            "chunk_type": chunk_input.chunk_type,
+                            "page_number": chunk_input.page_number,
+                            "section_title": chunk_input.section_title,
+                            "char_start": chunk_input.char_start,
+                            "char_end": chunk_input.char_end,
+                        },
+                        supporting_excerpt=excerpt,
+                        excerpt_match_mode=match_mode,
+                        source_metadata={
+                            "source_type": chunk_input.source_type,
+                            "source_provider": chunk_input.source_provider,
+                            "source_external_id": chunk_input.source_external_id,
+                            "source_url": chunk_input.source_url,
+                            "title": chunk_input.title,
+                            "source_author_identity": chunk_input.source_author_identity,
+                            "source_created_at": chunk_input.source_created_at_iso,
+                            "source_updated_at": chunk_input.source_updated_at_iso,
+                            "extracted_at": chunk_input.extracted_at_iso,
+                            "evidence_content_hash": chunk_input.evidence_content_hash,
+                            "chunk_content_hash": chunk_input.chunk_content_hash,
+                        },
+                    )
+                )
+
+            if not verified_links:
+                report.rejected_ungrounded_count += 1
+                rej_reason = ref_rejection or "no_verified_evidence_links"
+                report.rejection_reasons.append(rej_reason)
+                report.rejected_items.append({
+                    "category": category.value if hasattr(category, "value") else str(category),
+                    "title": title,
+                    "reason": rej_reason,
+                })
+                continue
+
+            payload = dict(raw_entry.get("structured_payload") or {})
+            for k, v in raw_entry.items():
+                if k not in {
+                    "category",
+                    "title",
+                    "description",
+                    "structured_summary",
+                    "evidence_refs",
+                    "is_interpretation",
+                    "is_uncertain",
+                    "uncertainty_reason",
+                    "confidence_level",
+                    "structured_payload",
+                } and k not in payload:
+                    payload[k] = v
+            if "description" not in payload:
+                payload["description"] = summary
+
+            normalised_status = _extract_normalised_status(category, payload)
+            person_label = _extract_person_label(category, payload)
+
+            is_interpretation = bool(raw_entry.get("is_interpretation")) or any(
+                link.support_type == "interpretation" for link in verified_links
+            )
+            is_uncertain = bool(raw_entry.get("is_uncertain")) or any(
+                link.support_type == "uncertain" for link in verified_links
+            )
+            uncertainty_reason = str(raw_entry.get("uncertainty_reason") or "") if is_uncertain else None
+
+            support_classification = "interpretation" if is_interpretation else "direct"
+            epistemic_status = (
+                EpistemicStatus.INTERPRETED.value if is_interpretation else EpistemicStatus.EXTRACTED.value
+            )
+
+            conf_level_str = str(raw_entry.get("confidence_level", "medium")).lower()
+            if conf_level_str not in {"high", "medium", "low"}:
+                conf_level_str = "medium"
+
+            base_score = 0.90 if conf_level_str == "high" else (0.75 if conf_level_str == "medium" else 0.55)
+            if is_interpretation:
+                base_score -= 0.10
+            if is_uncertain:
+                base_score -= 0.15
+
+            confidence_meta = {
+                "extraction_confidence": conf_level_str,
+                "confidence_score": round(max(0.35, min(0.99, base_score)), 2),
+                "is_interpretation": is_interpretation,
+                "conflict_or_ambiguity_flag": is_uncertain,
+            }
+
+            fingerprint = compute_conservative_fingerprint(
+                category=category,
+                title=title,
+                payload=payload,
+                normalised_status=normalised_status,
+                person_or_owner_label=person_label,
+            )
+
+            primary = cited_chunks[0]
+            source_attribution = {
+                "source_type": primary.source_type,
+                "source_provider": primary.source_provider,
+                "source_external_id": primary.source_external_id,
+                "source_url": primary.source_url,
+                "source_author_identity": primary.source_author_identity,
+                "title": primary.title,
+                "source_created_at": primary.source_created_at_iso,
+                "evidence_count": len({link.evidence_id for link in verified_links}),
+            }
+
+            primary_dom = map_category_to_domain(category.value).value
+            report.accepted_items.append(
+                ValidatedKnowledgeItemDraft(
+                    category=category,
+                    epistemic_status=epistemic_status,
+                    review_status=KnowledgeReviewStatus.PENDING_REVIEW.value,
+                    support_classification=support_classification,
+                    title=title,
+                    structured_summary=summary,
+                    structured_payload=payload,
+                    normalised_status=normalised_status,
+                    person_or_owner_label=person_label,
+                    source_attribution=source_attribution,
+                    fingerprint=fingerprint,
+                    confidence_metadata=confidence_meta,
+                    uncertainty_reason=uncertainty_reason,
+                    source_observed_at=_parse_optional_source_timestamp(cited_chunks),
+                    is_synthetic=is_synthetic,
+                    evidence_links=tuple(verified_links),
+                    primary_domain=primary_dom,
+                    secondary_domains=(),
+                )
+            )
+
+        return report
+

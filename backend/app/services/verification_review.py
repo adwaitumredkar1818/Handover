@@ -468,6 +468,24 @@ class HumanReviewService:
         case.last_reviewed_at = now
         case.version += 1
 
+        # Update Target status
+        if _val(case.target_type) == _val(VerificationTargetType.KNOWLEDGE_ITEM):
+            item = self.session.get(KnowledgeItem, case.target_id)
+            if item:
+                item.review_status = KnowledgeReviewStatus.NEEDS_CLARIFICATION
+                item.reviewed_by_user_id = reviewer_user_id
+                item.review_note = explanation
+                item.reviewed_at = now
+                item.updated_at = now
+        elif _val(case.target_type) == _val(VerificationTargetType.RELATIONSHIP):
+            rel = self.session.get(KnowledgeRelationship, case.target_id)
+            if rel:
+                rel.verification_status = RelationshipVerificationStatus.UNVERIFIED
+                rel.reviewed_by_user_id = reviewer_user_id
+                rel.review_note = explanation
+                rel.reviewed_at = now
+                rel.updated_at = now
+
         correlation_id = get_correlation_id()
         event = VerificationReviewEvent(
             organisation_id=case.organisation_id,

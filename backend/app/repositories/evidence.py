@@ -321,6 +321,7 @@ class EvidenceRepository:
         error_code: str | None = None,
         error_message: str | None = None,
         metadata_json: dict[str, Any],
+        flush: bool = True,
     ) -> EvidenceItem:
         item = EvidenceItem(
             id=evidence_id or uuid.uuid4(),
@@ -359,7 +360,8 @@ class EvidenceRepository:
             metadata_json=metadata_json,
         )
         self._session.add(item)
-        self._session.flush()
+        if flush:
+            self._session.flush()
         return item
 
     def replace_extracted_content(
@@ -369,13 +371,14 @@ class EvidenceRepository:
         extracted_text: str,
         warnings: tuple[str, ...],
         pages: tuple[ExtractedPageData, ...],
+        flush: bool = True,
+        is_new: bool = False,
     ) -> None:
         """Persist separated canonical text and ordered page segments cleanly."""
         char_count = len(extracted_text)
         word_count = len(extracted_text.split()) if extracted_text.strip() else 0
 
-        existing_content = self._session.get(EvidenceContent, evidence_id)
-        if existing_content is None:
+        if is_new:
             self._session.add(
                 EvidenceContent(
                     evidence_id=evidence_id,
@@ -386,15 +389,29 @@ class EvidenceRepository:
                 )
             )
         else:
-            existing_content.extracted_text = extracted_text
-            existing_content.char_count = char_count
-            existing_content.word_count = word_count
-            existing_content.extraction_warnings = list(warnings)
+            existing_content = self._session.get(EvidenceContent, evidence_id)
+            if existing_content is None:
+                self._session.add(
+                    EvidenceContent(
+                        evidence_id=evidence_id,
+                        extracted_text=extracted_text,
+                        char_count=char_count,
+                        word_count=word_count,
+                        extraction_warnings=list(warnings),
+                    )
+                )
+            else:
+                existing_content.extracted_text = extracted_text
+                existing_content.char_count = char_count
+                existing_content.word_count = word_count
+                existing_content.extraction_warnings = list(warnings)
 
-        self._session.execute(
-            delete(EvidencePageContent).where(EvidencePageContent.evidence_id == evidence_id)
-        )
-        self._session.flush()
+            self._session.execute(
+                delete(EvidencePageContent).where(EvidencePageContent.evidence_id == evidence_id)
+            )
+            if flush:
+                self._session.flush()
+
         for page in pages:
             self._session.add(
                 EvidencePageContent(
@@ -408,7 +425,8 @@ class EvidenceRepository:
                     structured_metadata=dict(page.structured_metadata),
                 )
             )
-        self._session.flush()
+        if flush:
+            self._session.flush()
 
     def get_project_evidence_metrics(self, project_id: uuid.UUID) -> dict[str, Any]:
         """Aggregate evidence item counts, sizes, and provider distributions."""

@@ -18,6 +18,7 @@ from app.models.enums import BackgroundJobStatus, BackgroundJobType
 from app.models.job import BackgroundJob
 
 _heartbeat_logger = logging.getLogger("app.repositories.job")
+_STALE_HEARTBEAT_SECONDS = 180
 
 
 class BackgroundJobRepository:
@@ -40,6 +41,7 @@ class BackgroundJobRepository:
         max_attempts: int = 3,
         priority: int = 100,
         payload_json: dict[str, Any] | None = None,
+        flush: bool = True,
     ) -> BackgroundJob:
         job = BackgroundJob(
             organisation_id=organisation_id,
@@ -54,7 +56,8 @@ class BackgroundJobRepository:
             payload_json=dict(payload_json or {}),
         )
         self._session.add(job)
-        self._session.flush()
+        if flush:
+            self._session.flush()
         return job
 
     def list_for_evidence(self, evidence_id: uuid.UUID) -> list[BackgroundJob]:
@@ -104,13 +107,10 @@ class BackgroundJobRepository:
                 )
             ),
         )
-        now = utc_now()
         target_id = str(mapping_id)
         for job in self._session.execute(stmt).scalars().all():
             payload = job.payload_json or {}
             if str(payload.get("mapping_id") or "") == target_id:
-                if job.status == BackgroundJobStatus.RUNNING.value and job.lease_expires_at and job.lease_expires_at < now:
-                    continue
                 return True
         return False
 
@@ -159,14 +159,30 @@ class BackgroundJobRepository:
         self._session.flush()
         return int(getattr(result, "rowcount", 0) or 0)
 
-    def fail_expired_exhausted_jobs(self, *, now: datetime) -> int:
+    def fail_expired_exhausted_jobs(
+        self,
+        *,
+        now: datetime,
+        stale_heartbeat_seconds: int = _STALE_HEARTBEAT_SECONDS,
+    ) -> int:
         """Mark stale leased jobs that exhausted retries as failed before claiming."""
+        stale_cutoff = now - timedelta(seconds=max(30, int(stale_heartbeat_seconds)))
+        expired_condition = or_(
+            and_(
+                BackgroundJob.lease_expires_at.is_not(None),
+                BackgroundJob.lease_expires_at < now,
+            ),
+            and_(
+                BackgroundJob.locked_at.is_not(None),
+                BackgroundJob.locked_at < stale_cutoff,
+                BackgroundJob.updated_at < stale_cutoff,
+            ),
+        )
         result = self._session.execute(
             update(BackgroundJob)
             .where(
                 BackgroundJob.status == BackgroundJobStatus.RUNNING.value,
-                BackgroundJob.lease_expires_at.is_not(None),
-                BackgroundJob.lease_expires_at < now,
+                expired_condition,
                 BackgroundJob.attempt_count >= BackgroundJob.max_attempts,
             )
             .values(
@@ -180,6 +196,143 @@ class BackgroundJobRepository:
         )
         self._session.flush()
         return int(getattr(result, "rowcount", 0) or 0)
+
+    def recover_orphaned_jobs(self, *, now: datetime | None = None) -> int:
+        """Reset jobs left in RUNNING status back to QUEUED on server/worker boot."""
+        ts = now or utc_now()
+        # First mark any exhausted RUNNING jobs as FAILED
+        self._session.execute(
+            update(BackgroundJob)
+            .where(
+                BackgroundJob.status == BackgroundJobStatus.RUNNING.value,
+                BackgroundJob.attempt_count >= BackgroundJob.max_attempts,
+            )
+            .values(
+                status=BackgroundJobStatus.FAILED.value,
+                completed_at=ts,
+                locked_by=None,
+                lease_expires_at=None,
+                error_code="WORKER_ORPHANED_EXHAUSTED",
+                error_message="Worker process stopped after reaching maximum retry attempts.",
+            )
+        )
+        stmt = (
+            update(BackgroundJob)
+            .where(
+                BackgroundJob.status == BackgroundJobStatus.RUNNING.value,
+                BackgroundJob.attempt_count < BackgroundJob.max_attempts,
+            )
+            .values(
+                status=BackgroundJobStatus.QUEUED.value,
+                locked_by=None,
+                lease_expires_at=None,
+                next_retry_at=ts,
+            )
+        )
+        res = self._session.execute(stmt)
+        # Promote queued non-commit evidence_indexing jobs so documents/manifests always index before commits
+        from app.models.enums import EvidenceCategory, SourceSyncRunStatus
+        from app.models.evidence import EvidenceItem
+        from app.models.integration import SourceSyncRun
+
+        non_commit_evidence_subq = select(EvidenceItem.id).where(
+            EvidenceItem.category != EvidenceCategory.COMMIT.value
+        )
+        commit_evidence_subq = select(EvidenceItem.id).where(
+            EvidenceItem.category == EvidenceCategory.COMMIT.value
+        )
+        self._session.execute(
+            update(BackgroundJob)
+            .where(
+                BackgroundJob.job_type == BackgroundJobType.EVIDENCE_INDEXING.value,
+                BackgroundJob.status == BackgroundJobStatus.QUEUED.value,
+                BackgroundJob.evidence_id.in_(non_commit_evidence_subq),
+            )
+            .values(priority=1)
+        )
+        self._session.execute(
+            update(BackgroundJob)
+            .where(
+                BackgroundJob.job_type == BackgroundJobType.EVIDENCE_INDEXING.value,
+                BackgroundJob.status == BackgroundJobStatus.QUEUED.value,
+                BackgroundJob.priority < 9,
+                BackgroundJob.evidence_id.in_(commit_evidence_subq),
+            )
+            .values(priority=9)
+        )
+
+        running_runs = (
+            self._session.execute(
+                select(SourceSyncRun).where(
+                    SourceSyncRun.status == SourceSyncRunStatus.RUNNING.value
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for run in running_runs:
+            linked_job = (
+                self.get_by_id(run.background_job_id)
+                if run.background_job_id is not None
+                else None
+            )
+            if linked_job is None or linked_job.status in {
+                BackgroundJobStatus.QUEUED.value,
+                BackgroundJobStatus.RUNNING.value,
+            }:
+                run.status = SourceSyncRunStatus.QUEUED.value
+            elif linked_job.status == BackgroundJobStatus.CANCELLED.value:
+                run.status = SourceSyncRunStatus.CANCELLED.value
+                run.completed_at = ts
+            else:
+                run.status = SourceSyncRunStatus.FAILED.value
+                run.completed_at = ts
+                if not run.error_message and linked_job.error_message:
+                    run.error_message = linked_job.error_message
+                if not run.error_code and linked_job.error_code:
+                    run.error_code = linked_job.error_code
+
+        # Reconcile orphaned queued SourceSyncRuns with background_job_id=None when a newer run on that mapping succeeded
+        orphaned_queued_runs = (
+            self._session.execute(
+                select(SourceSyncRun).where(
+                    SourceSyncRun.status == SourceSyncRunStatus.QUEUED.value,
+                    SourceSyncRun.background_job_id.is_(None),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for orphan_run in orphaned_queued_runs:
+            latest_succeeded = (
+                self._session.execute(
+                    select(SourceSyncRun)
+                    .where(
+                        SourceSyncRun.project_source_mapping_id
+                        == orphan_run.project_source_mapping_id,
+                        SourceSyncRun.status == SourceSyncRunStatus.SUCCEEDED.value,
+                        SourceSyncRun.created_at >= orphan_run.created_at,
+                    )
+                    .order_by(SourceSyncRun.completed_at.desc(), SourceSyncRun.created_at.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+            if latest_succeeded is not None:
+                orphan_run.status = SourceSyncRunStatus.SUCCEEDED.value
+                orphan_run.items_discovered = latest_succeeded.items_discovered
+                orphan_run.items_created = latest_succeeded.items_created
+                orphan_run.items_updated = latest_succeeded.items_updated
+                orphan_run.items_unchanged = latest_succeeded.items_unchanged
+                orphan_run.items_inaccessible = latest_succeeded.items_inaccessible
+                orphan_run.items_failed = latest_succeeded.items_failed
+                orphan_run.cursor_after_json = dict(latest_succeeded.cursor_after_json or {})
+                orphan_run.completed_at = latest_succeeded.completed_at or ts
+                orphan_run.warnings_json = list(latest_succeeded.warnings_json or [])
+
+        self._session.flush()
+        return int(getattr(res, "rowcount", 0) or 0)
 
     def has_active_job_for_project(
         self,
@@ -215,10 +368,15 @@ class BackgroundJobRepository:
         now: datetime,
         job_type: str | None = None,
         job_types: Sequence[str] | None = None,
+        stale_heartbeat_seconds: int = _STALE_HEARTBEAT_SECONDS,
     ) -> BackgroundJob | None:
         """Atomically claim the next ready job using `FOR UPDATE SKIP LOCKED` on PostgreSQL."""
-        self.fail_expired_exhausted_jobs(now=now)
+        self.fail_expired_exhausted_jobs(
+            now=now,
+            stale_heartbeat_seconds=stale_heartbeat_seconds,
+        )
 
+        stale_cutoff = now - timedelta(seconds=max(30, int(stale_heartbeat_seconds)))
         ready_queued = and_(
             BackgroundJob.status == BackgroundJobStatus.QUEUED.value,
             or_(
@@ -229,8 +387,17 @@ class BackgroundJobRepository:
         )
         expired_running = and_(
             BackgroundJob.status == BackgroundJobStatus.RUNNING.value,
-            BackgroundJob.lease_expires_at.is_not(None),
-            BackgroundJob.lease_expires_at < now,
+            or_(
+                and_(
+                    BackgroundJob.lease_expires_at.is_not(None),
+                    BackgroundJob.lease_expires_at < now,
+                ),
+                and_(
+                    BackgroundJob.locked_at.is_not(None),
+                    BackgroundJob.locked_at < stale_cutoff,
+                    BackgroundJob.updated_at < stale_cutoff,
+                ),
+            ),
             BackgroundJob.attempt_count < BackgroundJob.max_attempts,
         )
 
@@ -267,13 +434,13 @@ def job_lease_heartbeat(
     *,
     session_factory: sessionmaker[Session],
     job_id: uuid.UUID,
-    lease_seconds: int = 1800,
-    interval_seconds: float = 120.0,
+    lease_seconds: int = 180,
+    interval_seconds: float = 15.0,
 ) -> Iterator[None]:
     """Periodically extend a running BackgroundJob lease on an isolated session."""
     stop_event = threading.Event()
-    effective_lease = max(300, int(lease_seconds))
-    effective_interval = max(10.0, min(float(interval_seconds), effective_lease / 3.0))
+    effective_lease = max(90, int(lease_seconds))
+    effective_interval = max(5.0, min(float(interval_seconds), effective_lease / 4.0))
 
     def _beat() -> None:
         while not stop_event.wait(effective_interval):

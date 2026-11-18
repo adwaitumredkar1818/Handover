@@ -396,6 +396,12 @@ class KnowledgeReconstructionService:
             message="Queued asynchronous knowledge reconstruction run for evidence item.",
         )
         self._session.commit()
+        try:
+            from app.main import signal_worker_activity
+
+            signal_worker_activity()
+        except Exception:
+            pass
         refreshed = self._knowledge_repo.get_run_by_id(run.id) or run
         self._session.refresh(job)
         return ExtractionTriggerResponse(
@@ -574,6 +580,12 @@ class KnowledgeReconstructionService:
             ),
         )
         self._session.commit()
+        try:
+            from app.main import signal_worker_activity
+
+            signal_worker_activity()
+        except Exception:
+            pass
         refreshed = self._knowledge_repo.get_run_by_id(run.id) or run
         self._session.refresh(job)
         return ExtractionTriggerResponse(
@@ -941,6 +953,12 @@ class KnowledgeReconstructionService:
             message="Cancelled queued knowledge extraction run.",
         )
         self._session.commit()
+        try:
+            from app.main import signal_worker_activity
+
+            signal_worker_activity()
+        except Exception:
+            pass
         refreshed = self._knowledge_repo.get_run_by_id(run.id) or run
         return to_extraction_run_response(refreshed)
 

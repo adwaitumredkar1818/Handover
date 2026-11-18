@@ -24,6 +24,8 @@ from app.models.enums import (
     RelationshipType,
 )
 from app.models.evidence import EvidenceItem
+from app.models.integration import UserSourceAuthorisation
+from app.models.project import ProjectMembership
 from app.models.relationship import (
     KnowledgeEntity,
     RelationshipReconstructionRun,
@@ -309,6 +311,34 @@ class WorkGroupingService:
             .all()
         }
 
+        memberships = list(
+            self._session.execute(
+                select(ProjectMembership)
+                .options(selectinload(ProjectMembership.user))
+                .where(ProjectMembership.project_id == project_id, ProjectMembership.status == "active")
+            )
+            .scalars()
+            .all()
+        )
+        user_ids = [m.user_id for m in memberships if m.user_id]
+        auth_rows = list(
+            self._session.execute(
+                select(UserSourceAuthorisation).where(
+                    UserSourceAuthorisation.user_id.in_(user_ids),
+                    UserSourceAuthorisation.provider == "github",
+                    UserSourceAuthorisation.status == "active",
+                )
+            )
+            .scalars()
+            .all()
+        ) if user_ids else []
+        user_to_gh = {a.user_id: a.external_username.strip().lower() for a in auth_rows if a.external_username}
+        gh_to_pm: dict[str, ProjectMembership] = {}
+        for pm in memberships:
+            gh = user_to_gh.get(pm.user_id)
+            if gh:
+                gh_to_pm[gh] = pm
+
         groups: dict[str, dict[str, Any]] = {}
         for attr in attributions:
             if attr.evidence_item_id not in accessible_ev_ids:
@@ -344,21 +374,49 @@ class WorkGroupingService:
                 for p in meta.get("changed_files") or []:
                     grp["changed_paths"].add(str(p))
 
+                # Display label for contributor
+                c_name = meta.get("git_author_name") or meta.get("github_author_login") or attr.contributor_identifier
+                if "lovable" in ckey.lower() or "gpt-engineer" in ckey.lower() or "lovable" in c_name.lower():
+                    c_name = "Lovable (AI Tool)"
+                elif "[bot]" in c_name.lower():
+                    c_name = f"{c_name} (AI Tool)"
+
                 if ckey not in grp["contributors"]:
                     grp["contributors"][ckey] = {
                         "contributor_key": ckey,
-                        "display_name": meta.get("git_author_name") or meta.get("github_author_login") or attr.contributor_identifier,
+                        "display_name": c_name,
                         "contributor_type": attr.contributor_type,
                         "count": 0,
                     }
                 grp["contributors"][ckey]["count"] += 1
+
+                # If commit was directed by a human project member, also register human member on cluster
+                d_pm_id = meta.get("directed_by_pm_id")
+                if not d_pm_id:
+                    repo = str(meta.get("repository") or "")
+                    repo_owner = repo.split("/")[0].strip().lower() if "/" in repo else None
+                    if repo_owner and repo_owner in gh_to_pm:
+                        d_pm_id = str(gh_to_pm[repo_owner].id)
+                if d_pm_id:
+                    human_ckey = f"member:{d_pm_id}"
+                    human_pm = next((m for m in memberships if str(m.id) == str(d_pm_id)), None)
+                    human_name = human_pm.user.full_name if (human_pm and human_pm.user) else "Project Member"
+                    if human_ckey not in grp["contributors"]:
+                        grp["contributors"][human_ckey] = {
+                            "contributor_key": human_ckey,
+                            "display_name": human_name,
+                            "contributor_type": ContributorType.CONFIRMED_MEMBER.value,
+                            "count": 0,
+                        }
+                    grp["contributors"][human_ckey]["count"] += 1
+
                 grp["contributions"].append(
                     {
                         "evidence_id": str(ev.id),
                         "title": ev.title,
                         "category": ev.category,
                         "contributor_key": ckey,
-                        "contributor_name": meta.get("git_author_name") or attr.contributor_identifier,
+                        "contributor_name": c_name,
                         "contributor_type": attr.contributor_type,
                         "alignment": attr.responsibility_alignment,
                     }
@@ -526,6 +584,7 @@ class WorkGroupingService:
                             "evidence_basis": "explicit",
                         }
                     )
+
 
         # Optional lazy drill-down for selected contributor or work cluster
         if expand_contributor_key or expand_cluster_name:

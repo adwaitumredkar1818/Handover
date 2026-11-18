@@ -70,6 +70,7 @@ export function ConnectSourceModal() {
     setActiveProject,
     createProject,
     connectSource,
+    addSourceMappings,
     triggerSync,
     refreshSources,
     refreshEvidence,
@@ -82,6 +83,10 @@ export function ConnectSourceModal() {
   // Multi-step flow state: "credentials" | "select_resources" | "configure_scope" | "confirm"
   type FlowStep = "credentials" | "select_resources" | "configure_scope" | "confirm";
   const [step, setStep] = useState<FlowStep>("credentials");
+  const changeStep = (s: FlowStep) => {
+    setStep(s);
+    setError(null);
+  };
   const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null);
 
   // Resolved active connection (explicit or from existing organisation connections)
@@ -476,13 +481,8 @@ export function ConnectSourceModal() {
           items,
         });
         createdMappingsCount = res.created_mappings.length;
-        // Trigger background sync for each created mapping
-        for (const mapping of res.created_mappings) {
-          try {
-            await triggerSync(mapping.id, finalProjectId);
-          } catch {
-            // Background sync queued
-          }
+        if (res.created_mappings.length > 0) {
+          addSourceMappings(res.created_mappings);
         }
       } else if (activeTab === "jira") {
         if (selectedProjectKeys.size === 0) {
@@ -500,12 +500,8 @@ export function ConnectSourceModal() {
           items,
         });
         createdMappingsCount = res.created_mappings.length;
-        for (const mapping of res.created_mappings) {
-          try {
-            await triggerSync(mapping.id, finalProjectId);
-          } catch {
-            // Background sync queued
-          }
+        if (res.created_mappings.length > 0) {
+          addSourceMappings(res.created_mappings);
         }
       } else if (activeTab === "slack") {
         if (selectedChannelIds.size === 0) {
@@ -523,21 +519,17 @@ export function ConnectSourceModal() {
           items,
         });
         createdMappingsCount = res.created_mappings.length;
-        for (const mapping of res.created_mappings) {
-          try {
-            await triggerSync(mapping.id, finalProjectId);
-          } catch {
-            // Background sync queued
-          }
+        if (res.created_mappings.length > 0) {
+          addSourceMappings(res.created_mappings);
         }
       }
 
       if (targetProject && activeProject?.id !== finalProjectId) {
         setActiveProject(targetProject);
       }
-      await refreshSources();
-      await refreshEvidence();
       setIsAddSourceModalOpen(false);
+      void refreshSources();
+      void refreshEvidence();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to map resources and queue sync.");
     } finally {
@@ -1033,14 +1025,14 @@ export function ConnectSourceModal() {
                   <div className="pt-2 flex items-center justify-between">
                     <button
                       type="button"
-                      onClick={() => setStep("credentials")}
+                      onClick={() => changeStep("credentials")}
                       className="text-xs text-slate-500 hover:text-slate-800"
                     >
                       &larr; Change Token
                     </button>
                     <button
                       type="button"
-                      onClick={() => setStep("configure_scope")}
+                      onClick={() => changeStep("configure_scope")}
                       disabled={selectedRepoKeys.size === 0}
                       className="px-4 py-2 bg-[#4774A9] hover:bg-[#386295] disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-2"
                     >
@@ -1255,14 +1247,14 @@ export function ConnectSourceModal() {
                   <div className="pt-2 flex items-center justify-between">
                     <button
                       type="button"
-                      onClick={() => setStep("select_resources")}
+                      onClick={() => changeStep("select_resources")}
                       className="text-xs text-slate-500 hover:text-slate-800"
                     >
                       &larr; Adjust Repositories
                     </button>
                     <button
                       type="button"
-                      onClick={() => setStep("confirm")}
+                      onClick={() => changeStep("confirm")}
                       className="px-4 py-2 bg-[#4774A9] hover:bg-[#386295] text-white rounded-lg text-xs font-semibold flex items-center gap-2"
                     >
                       <span>Review & Confirm</span>
@@ -1420,7 +1412,7 @@ export function ConnectSourceModal() {
                   <div className="pt-2 flex items-center justify-between">
                     <button
                       type="button"
-                      onClick={() => setStep("configure_scope")}
+                      onClick={() => changeStep("configure_scope")}
                       className="text-xs text-slate-500 hover:text-slate-800"
                     >
                       &larr; Edit Scope
@@ -1609,7 +1601,7 @@ export function ConnectSourceModal() {
                   <div className="pt-2 flex items-center justify-between">
                     <button
                       type="button"
-                      onClick={() => setStep("credentials")}
+                      onClick={() => changeStep("credentials")}
                       className="text-xs text-slate-500 hover:text-slate-800"
                     >
                       &larr; Back to credentials
@@ -1781,7 +1773,7 @@ export function ConnectSourceModal() {
                   <div className="pt-2 flex items-center justify-between">
                     <button
                       type="button"
-                      onClick={() => setStep("credentials")}
+                      onClick={() => changeStep("credentials")}
                       className="text-xs text-slate-500 hover:text-slate-800"
                     >
                       &larr; Back to credentials

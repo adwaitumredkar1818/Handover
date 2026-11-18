@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -23,6 +23,9 @@ import {
 import { api } from "@/lib/api";
 import { useLiveApp } from "@/context/LiveAppContext";
 import { AmeliorateFlowchartCanvas } from "@/components/knowledge/ameliorate/AmeliorateFlowchartCanvas";
+import { getCachedGraph, setCachedGraph, invalidateGraphCache } from "@/lib/graphCache";
+import { useProjectProcessingStatus } from "@/hooks/useProjectProcessingStatus";
+import { ProcessingEmptyStateCard } from "@/components/knowledge/LiveProcessingBanner";
 
 type KnowledgeMode =
   | "technology-stack"
@@ -68,7 +71,51 @@ const DOMAIN_DEFS: Array<{ id: string; label: string; desc: string }> = [
   { id: "OPERATIONAL_HISTORICAL", label: "Operational & Historical", desc: "Runbooks, deployment notes, and past context" },
 ];
 
+class CanvasErrorBoundary extends React.Component<
+  { children: React.ReactNode; onReset: () => void },
+  { hasError: boolean; error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode; onReset: () => void }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
 
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  override componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error("Canvas render error caught by boundary:", error, info);
+  }
+
+  override render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-slate-50">
+          <AlertCircle className="w-10 h-10 text-amber-500 mb-3" />
+          <p className="text-base font-medium text-slate-800">
+            Graph visualization encountered an unexpected rendering error.
+          </p>
+          <p className="text-xs text-slate-500 mt-1 max-w-md">
+            {this.state.error?.message || "An issue occurred while laying out nodes."}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              this.setState({ hasError: false, error: null });
+              this.props.onReset();
+            }}
+            className="mt-4 px-4 py-2 rounded-lg bg-blue-600 text-xs font-medium text-white hover:bg-blue-700 inline-flex items-center gap-1.5"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Reload Graph View
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export function KnowledgeIntelligenceWorkspace({
   projectId,
@@ -108,35 +155,59 @@ export function KnowledgeIntelligenceWorkspace({
   const [domainFindings, setDomainFindings] = useState<Record<string, unknown>[]>([]);
   const [selectedFinding, setSelectedFinding] = useState<Record<string, unknown> | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [reloadCounter, setReloadCounter] = useState(0);
 
-  const loadGraph = useCallback(async () => {
-    if (!projectId || mode === "domains") return;
-    setLoading(true);
-    setError(null);
+  const handleRefresh = useCallback(() => {
+    invalidateGraphCache(`ki_graph:${projectId}`);
+    invalidateGraphCache(`ki_domains:${projectId}`);
+    setReloadCounter((c) => c + 1);
+  }, [projectId]);
+
+  const {
+    status: processingStatus,
+    retry: retryProcessing,
+    retrying: retryingProcessing,
+  } = useProjectProcessingStatus(projectId, {
+    onProcessingComplete: handleRefresh,
+  });
+
+  // Project/mode switch cleanup & signature tracking to preserve selected drawer during live updates
+  const activeProjectIdRef = useRef(projectId);
+  const lastGraphSignatureRef = useRef<string>("");
+
+  const computeGraphSignature = (nodes: KIGraphNode[], edges: KIGraphEdge[]) =>
+    `${nodes.map((n) => `${n.id}:${n.status}:${n.verification_status}:${n.evidence_count}`).join("|")}||${edges.map((e) => `${e.id}:${e.relationship_type}:${e.verification_status}`).join("|")}`;
+
+  useEffect(() => {
+    activeProjectIdRef.current = projectId;
+    lastGraphSignatureRef.current = "";
+    setRawNodes([]);
+    setRawEdges([]);
+    setDomainFindings([]);
     setSelectedNodeDetail(null);
-    try {
-      const res = await api.knowledgeIntelligence.getGraph(projectId, mode, {
-        search: searchQuery.trim() || undefined,
-        status: statusFilter !== "all" ? statusFilter : undefined,
-        verification_state: verificationFilter !== "all" ? verificationFilter : undefined,
-        include_suggested: includeSuggested,
-      });
-      const fetchedNodes = res.nodes || [];
-      const fetchedEdges = res.edges || [];
-      setRawNodes(fetchedNodes);
-      setRawEdges(fetchedEdges);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load Knowledge Intelligence graph.");
-      setRawNodes([]);
-      setRawEdges([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId, mode, searchQuery, statusFilter, verificationFilter, includeSuggested]);
+  }, [projectId]);
+
+  useEffect(() => {
+    lastGraphSignatureRef.current = "";
+    setSelectedNodeDetail(null);
+  }, [projectId, mode]);
 
   const loadDomains = useCallback(async () => {
     if (!projectId || mode !== "domains") return;
-    setLoading(true);
+    const targetProjectId = projectId;
+    const cacheKey = `ki_domains:${projectId}:${selectedDomain}`;
+    const cached = getCachedGraph<Record<string, unknown>[]>(cacheKey);
+    if (cached && cached.length > 0) {
+      if (activeProjectIdRef.current === targetProjectId) {
+        setDomainFindings(cached);
+        setLoading(false);
+        setError(null);
+      }
+      return;
+    }
+    if (rawNodes.length === 0) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const res = await api.knowledgeIntelligence.listFindings(
@@ -145,21 +216,84 @@ export function KnowledgeIntelligenceWorkspace({
         100,
         0
       );
+      if (activeProjectIdRef.current !== targetProjectId) return;
       setDomainFindings(res.items || []);
+      setCachedGraph(cacheKey, res.items || []);
     } catch (err) {
+      if (activeProjectIdRef.current !== targetProjectId) return;
       setError(err instanceof Error ? err.message : "Failed to load reconstructed knowledge findings.");
     } finally {
-      setLoading(false);
+      if (activeProjectIdRef.current === targetProjectId) {
+        setLoading(false);
+      }
     }
-  }, [projectId, mode, selectedDomain]);
+  }, [projectId, mode, selectedDomain, reloadCounter]);
 
   useEffect(() => {
     if (mode === "domains") {
-      loadDomains();
-    } else {
-      loadGraph();
+      void loadDomains();
     }
-  }, [mode, loadGraph, loadDomains]);
+  }, [mode, loadDomains]);
+
+  useEffect(() => {
+    if (mode === "domains" || !projectId) return;
+    let isCurrent = true;
+    const targetProjectId = projectId;
+
+    const cacheKey = `ki_graph:${projectId}:${mode}:${statusFilter}:${verificationFilter}:${includeSuggested}:${searchQuery.trim()}`;
+    const cached = getCachedGraph<{ nodes: KIGraphNode[]; edges: KIGraphEdge[] }>(cacheKey);
+    if (cached && cached.nodes && cached.nodes.length > 0) {
+      if (activeProjectIdRef.current === targetProjectId) {
+        const nextNodes = cached.nodes;
+        const nextEdges = cached.edges || [];
+        const nextSig = computeGraphSignature(nextNodes, nextEdges);
+        if (nextSig !== lastGraphSignatureRef.current) {
+          lastGraphSignatureRef.current = nextSig;
+          setRawNodes(nextNodes);
+          setRawEdges(nextEdges);
+        }
+        setLoading(false);
+        setError(null);
+      }
+      return;
+    }
+
+    if (rawNodes.length === 0) {
+      setLoading(true);
+    }
+    setError(null);
+    api.knowledgeIntelligence
+      .getGraph(projectId, mode, {
+        search: searchQuery.trim() || undefined,
+        status: statusFilter !== "all" ? statusFilter : undefined,
+        verification_state: verificationFilter !== "all" ? verificationFilter : undefined,
+        include_suggested: includeSuggested,
+      })
+      .then((res) => {
+        if (!isCurrent || activeProjectIdRef.current !== targetProjectId) return;
+        const nextNodes = res.nodes || [];
+        const nextEdges = res.edges || [];
+        const nextSig = computeGraphSignature(nextNodes, nextEdges);
+        if (nextSig !== lastGraphSignatureRef.current) {
+          lastGraphSignatureRef.current = nextSig;
+          setRawNodes(nextNodes);
+          setRawEdges(nextEdges);
+        }
+        setCachedGraph(cacheKey, { nodes: nextNodes, edges: nextEdges });
+      })
+      .catch((err) => {
+        if (!isCurrent || activeProjectIdRef.current !== targetProjectId) return;
+        setError(err instanceof Error ? err.message : "Failed to load Knowledge Intelligence graph.");
+      })
+      .finally(() => {
+        if (isCurrent && activeProjectIdRef.current === targetProjectId) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      isCurrent = false;
+    };
+  }, [projectId, mode, searchQuery, statusFilter, verificationFilter, includeSuggested, reloadCounter]);
 
   const handleSelectNode = async (_: unknown, node: Node) => {
     if (mode === "domains") return;
@@ -258,7 +392,7 @@ export function KnowledgeIntelligenceWorkspace({
             )}
             <button
               type="button"
-              onClick={() => (mode === "domains" ? loadDomains() : loadGraph())}
+              onClick={handleRefresh}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
@@ -381,7 +515,7 @@ export function KnowledgeIntelligenceWorkspace({
             </span>
             <button
               type="button"
-              onClick={() => (mode === "domains" ? loadDomains() : loadGraph())}
+              onClick={handleRefresh}
               className="underline font-medium"
             >
               Retry
@@ -389,24 +523,15 @@ export function KnowledgeIntelligenceWorkspace({
           </div>
         )}
 
+
         {mode !== "domains" ? (
           rawNodes.length === 0 && !loading ? (
-            <div className="flex flex-col items-center justify-center h-full text-center p-8">
-              <Network className="w-12 h-12 text-slate-300 mb-3" />
-              <p className="text-base font-medium text-slate-800">
-                No knowledge has been reconstructed from this project&apos;s evidence yet.
-              </p>
-              <p className="text-sm text-slate-500 mt-1 max-w-md">
-                Upload documents or connect GitHub/Jira sources in Evidence Center and run knowledge extraction to populate this graph.
-              </p>
-              <Link
-                href={`/projects/${projectId}/evidence`}
-                className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-sm font-medium text-white hover:bg-blue-700"
-              >
-                Open Evidence Center
-                <ExternalLink className="w-4 h-4" />
-              </Link>
-            </div>
+            <ProcessingEmptyStateCard
+              status={processingStatus}
+              onRetry={retryProcessing}
+              retrying={retryingProcessing}
+              projectId={projectId}
+            />
           ) : viewKind === "list" ? (
             <div className="p-6 h-full overflow-y-auto">
               <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -441,12 +566,15 @@ export function KnowledgeIntelligenceWorkspace({
               </div>
             </div>
           ) : (
-            <AmeliorateFlowchartCanvas
-              rawNodes={rawNodes}
-              rawEdges={rawEdges}
-              selectedNodeId={selectedNodeDetail?.node.id ?? null}
-              onSelectNode={(node) => handleSelectNode(null, node)}
-            />
+            <CanvasErrorBoundary onReset={handleRefresh}>
+              <AmeliorateFlowchartCanvas
+                key={mode}
+                rawNodes={rawNodes}
+                rawEdges={rawEdges}
+                selectedNodeId={selectedNodeDetail?.node.id ?? null}
+                onSelectNode={(node) => handleSelectNode(null, node)}
+              />
+            </CanvasErrorBoundary>
           )
         ) : (
           /* 8-Domain Knowledge Register */

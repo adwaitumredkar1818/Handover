@@ -87,6 +87,9 @@ _TECH_ALIASES: dict[str, tuple[str, str, str]] = {
     "jira": ("Jira API", "external_integrations", "technology"),
     "slack": ("Slack API", "external_integrations", "technology"),
     "resend": ("Resend", "external_integrations", "technology"),
+    # Mobile
+    "flutter": ("Flutter", "mobile", "framework"),
+    "dart": ("Dart", "mobile", "technology"),
     # Infrastructure & Testing
     "docker": ("Docker", "infrastructure", "technology"),
     "docker compose": ("Docker Compose", "infrastructure", "technology"),
@@ -118,6 +121,7 @@ _MANIFEST_FILENAMES = frozenset(
         "compose.yml",
         "docker-compose.yml",
         "docker-compose.yaml",
+        "pubspec.yaml",
     }
 )
 
@@ -141,7 +145,8 @@ def is_manifest_path(path: str | None) -> bool:
     """Return True when the repository path points to a supported technical manifest."""
     if not path:
         return False
-    basename = path.replace("\\", "/").strip().split("/")[-1].lower()
+    clean_path = path.split(":", 1)[1].strip() if (":" in path and not path.startswith("http")) else path
+    basename = clean_path.replace("\\", "/").strip().split("/")[-1].lower()
     return basename in _MANIFEST_FILENAMES or basename.startswith("dockerfile.")
 
 
@@ -368,6 +373,53 @@ def _parse_compose_yaml(path: str, content: str) -> list[ParsedTechnologyDetecti
     return results
 
 
+def _parse_pubspec_yaml(path: str, content: str) -> list[ParsedTechnologyDetection]:
+    results: list[ParsedTechnologyDetection] = [
+        ParsedTechnologyDetection(
+            canonical_name="Flutter",
+            raw_name="Flutter",
+            category="mobile",
+            entity_type="framework",
+            usage_basis="configured_project",
+            purpose=f"Flutter application declared in {path}",
+            source_path=path,
+        )
+    ]
+    in_deps = False
+    for raw_line in content.splitlines():
+        line = raw_line.rstrip()
+        if not line or line.strip().startswith("#"):
+            continue
+        if line.startswith("dependencies:") or line.startswith("dev_dependencies:"):
+            in_deps = True
+            continue
+        if in_deps:
+            if not line.startswith(" ") and not line.startswith("\t"):
+                in_deps = False
+                continue
+            m = re.match(r"^\s+([a-zA-Z0-9_\-]+)\s*:\s*([^#\n\r]*)$", line)
+            if m:
+                pkg = m.group(1).strip()
+                ver = m.group(2).strip().strip('"\'') or None
+                if pkg in ("sdk", "git", "path", "flutter"):
+                    continue
+                canon, cat, etype = canonicalize_technology_name(pkg, default_category="mobile")
+                results.append(
+                    ParsedTechnologyDetection(
+                        canonical_name=canon,
+                        raw_name=pkg,
+                        category=cat,
+                        entity_type=etype,
+                        version=ver,
+                        usage_basis="declared_dependency",
+                        purpose=f"Declared dependency in {path}",
+                        source_path=path,
+                        metadata={"manifest_section": "pubspec.dependencies"},
+                    )
+                )
+    return results
+
+
 def parse_manifest_evidence(
     filename_or_path: str,
     content: str,
@@ -375,7 +427,12 @@ def parse_manifest_evidence(
     """Deterministically parse supported technical manifests into canonical tech detections."""
     if not filename_or_path or not content:
         return []
-    norm = filename_or_path.replace("\\", "/").strip()
+    clean_path = (
+        filename_or_path.split(":", 1)[1].strip()
+        if (":" in filename_or_path and not filename_or_path.startswith("http"))
+        else filename_or_path
+    )
+    norm = clean_path.replace("\\", "/").strip()
     basename = norm.split("/")[-1].lower()
 
     if basename == "package.json":
@@ -388,6 +445,8 @@ def parse_manifest_evidence(
         return _parse_dockerfile(norm, content)
     if basename in {"compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"}:
         return _parse_compose_yaml(norm, content)
+    if basename == "pubspec.yaml":
+        return _parse_pubspec_yaml(norm, content)
     return []
 
 
@@ -424,6 +483,35 @@ def is_known_technology(raw_name: str | None) -> bool:
     return any(cleaned.startswith(prefix) for prefix, _c, _e in _KNOWN_PREFIX_CATEGORIES)
 
 
+_NEG_BEFORE_RE = re.compile(
+    r"\b(?:no|not|never|without|prohibit\w*|forbid\w*|neither|nor)\b", re.IGNORECASE
+)
+_NEG_AFTER_RE = re.compile(
+    r"\b(?:not permitted|prohibited|forbidden|excluded|not used)\b", re.IGNORECASE
+)
+_REACT_TECH_RE = re.compile(r"(?<![A-Za-z0-9_.\-/])React(?:\.js|JS)?(?![A-Za-z0-9_.\-/])")
+
+
+def _is_match_negated(text: str, start: int, end: int) -> bool:
+    """Return True when a matched technology occurrence sits in a negated clause."""
+    pre_slice = text[max(0, start - 60) : start]
+    for sep in ("\n", ";", ". "):
+        idx = pre_slice.rfind(sep)
+        if idx != -1:
+            pre_slice = pre_slice[idx + len(sep) :]
+    if _NEG_BEFORE_RE.search(pre_slice):
+        return True
+
+    post_slice = text[end : min(len(text), end + 40)]
+    for sep in ("\n", ";", ". "):
+        idx = post_slice.find(sep)
+        if idx != -1:
+            post_slice = post_slice[:idx]
+    if _NEG_AFTER_RE.search(post_slice):
+        return True
+    return False
+
+
 def extract_known_technologies_from_text(*texts: str | None) -> list[tuple[str, str, str]]:
     """Detect canonical technologies mentioned in text without matching arbitrary non-tech phrases."""
     combined = "\n".join(t for t in texts if isinstance(t, str) and t.strip())
@@ -431,11 +519,10 @@ def extract_known_technologies_from_text(*texts: str | None) -> list[tuple[str, 
         return []
     found: dict[str, tuple[str, str, str]] = {}
     for alias, canon, cat, etype, pattern in _COMPILED_TECH_PATTERNS:
-        target = "React" if alias == "react" else None
-        if target is not None:
-            if not re.search(r"(?<![A-Za-z0-9_.\-/])React(?:\.js|JS)?(?![A-Za-z0-9_.\-/])", combined):
-                continue
-        elif not pattern.search(combined):
+        active_pat = _REACT_TECH_RE if alias == "react" else pattern
+        matches = list(active_pat.finditer(combined))
+        if not matches:
             continue
-        found.setdefault(canon, (canon, cat, etype))
+        if any(not _is_match_negated(combined, m.start(), m.end()) for m in matches):
+            found.setdefault(canon, (canon, cat, etype))
     return list(found.values())

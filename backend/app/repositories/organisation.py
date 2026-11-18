@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.enums import (
     InvitationStatus,
@@ -90,12 +90,12 @@ class OrganisationRepository:
         total = int(self._session.scalar(count_stmt) or 0)
 
         rows_stmt = (
-            base.options(selectinload(OrganisationMembership.role))
+            base.options(joinedload(OrganisationMembership.role))
             .order_by(Organisation.created_at.desc(), Organisation.id.asc())
             .offset(offset)
             .limit(limit)
         )
-        rows = [(org, mem) for org, mem in self._session.execute(rows_stmt).all()]
+        rows = [(org, mem) for org, mem in self._session.execute(rows_stmt).unique().all()]
         return rows, total
 
     def get_active_membership(
@@ -112,13 +112,13 @@ class OrganisationRepository:
                 OrganisationMembership.status == OrganisationMembershipStatus.ACTIVE.value,
             )
             .options(
-                selectinload(OrganisationMembership.user),
-                selectinload(OrganisationMembership.role)
-                .selectinload(Role.role_permissions)
-                .selectinload(RolePermission.permission),
+                joinedload(OrganisationMembership.user),
+                joinedload(OrganisationMembership.role)
+                .joinedload(Role.role_permissions)
+                .joinedload(RolePermission.permission),
             )
         )
-        return self._session.scalar(stmt)
+        return self._session.scalars(stmt).unique().first()
 
     def list_memberships(
         self,
@@ -137,14 +137,14 @@ class OrganisationRepository:
         total = int(self._session.scalar(select(func.count()).select_from(base.subquery())) or 0)
         stmt = (
             base.options(
-                selectinload(OrganisationMembership.user),
-                selectinload(OrganisationMembership.role),
+                joinedload(OrganisationMembership.user),
+                joinedload(OrganisationMembership.role),
             )
             .order_by(OrganisationMembership.joined_at.asc(), OrganisationMembership.id.asc())
             .offset(offset)
             .limit(limit)
         )
-        return list(self._session.scalars(stmt).all()), total
+        return list(self._session.scalars(stmt).unique().all()), total
 
     def count_active_by_role_name(
         self,
@@ -193,13 +193,13 @@ class OrganisationRepository:
             select(OrganisationInvitation)
             .where(OrganisationInvitation.token_hash == token_hash)
             .options(
-                selectinload(OrganisationInvitation.organisation),
-                selectinload(OrganisationInvitation.role),
-                selectinload(OrganisationInvitation.project),
-                selectinload(OrganisationInvitation.project_role),
+                joinedload(OrganisationInvitation.organisation),
+                joinedload(OrganisationInvitation.role),
+                joinedload(OrganisationInvitation.project),
+                joinedload(OrganisationInvitation.project_role),
             )
         )
-        return self._session.scalar(stmt)
+        return self._session.scalars(stmt).unique().first()
 
     def get_invitation_by_token_hash_for_update(
         self,

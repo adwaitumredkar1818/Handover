@@ -107,12 +107,14 @@ class SourceSyncWorkerService:
             max_attempts,
         ) = claimed
 
+        lease_seconds = max(180, min(300, int(self._settings.ingestion.worker_lease_seconds)))
         started_perf = time.perf_counter()
         try:
             with job_lease_heartbeat(
                 session_factory=self._session_factory,
                 job_id=job_id,
-                lease_seconds=max(1800, self._settings.ingestion.worker_lease_seconds),
+                lease_seconds=lease_seconds,
+                interval_seconds=15.0,
             ):
                 report = self._execute_claimed_sync(
                     job_id=job_id,
@@ -214,7 +216,7 @@ class SourceSyncWorkerService:
 
             job = job_repo.claim_next_job(
                 worker_id=self._worker_id,
-                lease_seconds=max(1800, self._settings.ingestion.worker_lease_seconds),
+                lease_seconds=max(180, min(300, int(self._settings.ingestion.worker_lease_seconds))),
                 now=now,
                 job_type=BackgroundJobType.SOURCE_SYNC.value,
             )
@@ -251,7 +253,7 @@ class SourceSyncWorkerService:
                 session.commit()
                 return None
 
-            # Resolve or create sync_run
+            # Resolve existing active sync_run before creating a new one
             sync_run_id_raw = payload.get("sync_run_id")
             sync_run = None
             if sync_run_id_raw:
@@ -261,11 +263,38 @@ class SourceSyncWorkerService:
                     sync_run = None
 
             if sync_run is None:
+                from sqlalchemy import select
+
+                sync_run = (
+                    session.execute(
+                        select(SourceSyncRun)
+                        .where(
+                            SourceSyncRun.project_source_mapping_id == mapping.id,
+                            SourceSyncRun.status.in_(
+                                (
+                                    SourceSyncRunStatus.QUEUED.value,
+                                    SourceSyncRunStatus.RUNNING.value,
+                                )
+                            ),
+                        )
+                        .order_by(SourceSyncRun.created_at.asc())
+                        .limit(1)
+                    )
+                    .scalars()
+                    .first()
+                )
+                if sync_run is not None:
+                    if sync_run.background_job_id is None:
+                        sync_run.background_job_id = job.id
+                    job.payload_json = {**payload, "sync_run_id": str(sync_run.id)}
+
+            if sync_run is None:
                 sync_run = SourceSyncRun(
                     organisation_id=mapping.organisation_id,
                     project_id=mapping.project_id,
                     project_source_mapping_id=mapping.id,
                     source_connection_id=mapping.source_connection_id,
+                    background_job_id=job.id,
                     triggered_by_user_id=job.triggered_by_user_id,
                     provider=mapping.provider,
                     sync_mode="manual",
@@ -273,6 +302,7 @@ class SourceSyncWorkerService:
                 )
                 session.add(sync_run)
                 session.flush()
+                job.payload_json = {**payload, "sync_run_id": str(sync_run.id)}
 
             sync_run_id = sync_run.id
 
@@ -305,7 +335,7 @@ class SourceSyncWorkerService:
                 return None
 
             auth_id = auth.id
-            sync_mode = str(payload.get("sync_mode") or "full")
+            sync_mode = str(payload.get("sync_mode") or "initial")
 
             if (
                 sync_run is None
@@ -466,6 +496,7 @@ class SourceSyncWorkerService:
                         external_user_id=loaded_auth.external_user_id,
                         external_username=loaded_auth.external_username,
                         sync_mode=sync_mode,
+                        sync_run=sync_run,
                     )
 
                 if active_mapping.provider in (IntegrationProvider.SLACK.value, "slack"):
@@ -521,6 +552,7 @@ class SourceSyncWorkerService:
                 if exc.status_code != 401:
                     raise
                 session.rollback()
+                ingestor.clear_cache()
                 # Re-fetch cleanly before refresh rotation and retry once
                 reloaded_mapping = int_repo.get_mapping_by_id(mapping_id)
                 if reloaded_mapping is not None:
@@ -654,6 +686,32 @@ class SourceSyncWorkerService:
             session.add(notif)
             session.commit()
 
+            try:
+                from app.services.knowledge_graphs import invalidate_knowledge_graph_cache
+                from app.services.relationship_coordinator import RelationshipCoordinatorService
+
+                with self._session_factory() as rel_session:
+                    RelationshipCoordinatorService(rel_session).run_reconstruction(
+                        organisation_id=sync_run.organisation_id,
+                        project_id=sync_run.project_id,
+                        include_llm_suggestions=False,
+                    )
+                    rel_session.commit()
+                invalidate_knowledge_graph_cache(sync_run.project_id)
+            except Exception as rel_exc:
+                logger.warning("Deterministic manifest graph reconstruction failed after source sync: %s", rel_exc)
+
+            try:
+                from app.services.pipeline_coordinator import PipelineCoordinatorService
+
+                with self._session_factory() as coord_session:
+                    PipelineCoordinatorService(coord_session).trigger_auto_pipeline(
+                        project_id=sync_run.project_id,
+                        triggered_by_user_id=sync_run.triggered_by_user_id,
+                    )
+            except Exception as pipe_exc:
+                logger.warning("Failed to trigger auto pipeline after source sync: %s", pipe_exc)
+
     def _complete_failure(
         self,
         *,
@@ -784,3 +842,29 @@ class SourceSyncWorkerService:
                     )
                     session.add(notif)
             session.commit()
+
+            try:
+                from app.services.knowledge_graphs import invalidate_knowledge_graph_cache
+                from app.services.relationship_coordinator import RelationshipCoordinatorService
+
+                with self._session_factory() as rel_session:
+                    RelationshipCoordinatorService(rel_session).run_reconstruction(
+                        organisation_id=sync_run.organisation_id,
+                        project_id=sync_run.project_id,
+                        include_llm_suggestions=False,
+                    )
+                    rel_session.commit()
+                invalidate_knowledge_graph_cache(sync_run.project_id)
+            except Exception as rel_exc:
+                logger.warning("Deterministic manifest graph reconstruction failed after source sync: %s", rel_exc)
+
+            try:
+                from app.services.pipeline_coordinator import PipelineCoordinatorService
+
+                with self._session_factory() as coord_session:
+                    PipelineCoordinatorService(coord_session).trigger_auto_pipeline(
+                        project_id=sync_run.project_id,
+                        triggered_by_user_id=sync_run.triggered_by_user_id,
+                    )
+            except Exception as pipe_exc:
+                logger.warning("Failed to trigger auto pipeline after source sync: %s", pipe_exc)

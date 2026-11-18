@@ -9,11 +9,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import utc_now
 from app.models.enums import (
     BackgroundJobType,
+    EvidenceCategory,
     EvidenceIndexingStatus,
     EvidenceProcessingStatus,
 )
@@ -89,6 +91,81 @@ class SourceEvidenceIngestor:
         self._session = session
         self._evidence_repo = evidence_repository
         self._job_repo = job_repository or BackgroundJobRepository(session)
+        self._existing_items_cache: dict[tuple[uuid.UUID, str, str], EvidenceItem | None] = {}
+        self._prefetched_sources: set[tuple[uuid.UUID, str]] = set()
+        self._existing_fps_cache: dict[uuid.UUID, set[str]] = {}
+        self._attribution_svc: Any = None
+
+    def clear_cache(self) -> None:
+        """Clear cached existing items after rollback or between sync batches."""
+        self._existing_items_cache.clear()
+        self._prefetched_sources.clear()
+        self._existing_fps_cache.clear()
+
+    def prefetch_project_state(
+        self,
+        *,
+        project_id: uuid.UUID,
+        source_type: str,
+    ) -> None:
+        """Prefetch existing evidence identities and knowledge fingerprints once per sync/batch."""
+        key = (project_id, source_type)
+        if key not in self._prefetched_sources:
+            existing_rows = (
+                self._session.execute(
+                    select(EvidenceItem).where(
+                        EvidenceItem.project_id == project_id,
+                        EvidenceItem.source_type == source_type,
+                        EvidenceItem.deleted_at.is_(None),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for item in existing_rows:
+                self._existing_items_cache[(project_id, source_type, item.source_external_id)] = item
+            self._prefetched_sources.add(key)
+
+        if project_id not in self._existing_fps_cache:
+            from app.models.knowledge import KnowledgeItem
+
+            fps = (
+                self._session.execute(
+                    select(KnowledgeItem.fingerprint).where(
+                        KnowledgeItem.project_id == project_id,
+                        KnowledgeItem.is_deleted.is_(False),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            self._existing_fps_cache[project_id] = set(fps)
+
+    def _get_project_fps(self, project_id: uuid.UUID) -> set[str]:
+        if project_id not in self._existing_fps_cache:
+            from app.models.knowledge import KnowledgeItem
+
+            fps = (
+                self._session.execute(
+                    select(KnowledgeItem.fingerprint).where(
+                        KnowledgeItem.project_id == project_id,
+                        KnowledgeItem.is_deleted.is_(False),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            self._existing_fps_cache[project_id] = set(fps)
+        return self._existing_fps_cache[project_id]
+
+    def _get_attribution_service(self) -> Any:
+        if self._attribution_svc is None:
+            try:
+                from app.services.contribution_attribution import ContributionAttributionService
+                self._attribution_svc = ContributionAttributionService(self._session)
+            except Exception:
+                self._attribution_svc = None
+        return self._attribution_svc
 
     def _enqueue_indexing_after_upsert(
         self,
@@ -98,6 +175,7 @@ class SourceEvidenceIngestor:
         extracted_text: str,
         trigger: str,
         now: datetime,
+        flush: bool = True,
     ) -> None:
         if not extracted_text.strip():
             item.indexing_status = EvidenceIndexingStatus.INDEXED.value
@@ -106,22 +184,28 @@ class SourceEvidenceIngestor:
             item.index_error_code = None
             item.index_error_message = None
             return
-        if not self._job_repo.has_active_job_for_evidence(
-            evidence_id=item.id,
-            job_type=BackgroundJobType.EVIDENCE_INDEXING.value,
-        ):
+        should_create = True
+        if trigger != "connector_created":
+            should_create = not self._job_repo.has_active_job_for_evidence(
+                evidence_id=item.id,
+                job_type=BackgroundJobType.EVIDENCE_INDEXING.value,
+            )
+        if should_create:
+            trigger_name = "pipeline_auto" if trigger in ("connector_created", "connector_updated") else trigger
+            job_priority = 80 if item.category != EvidenceCategory.COMMIT.value else 110
             self._job_repo.create_job(
                 organisation_id=item.organisation_id,
                 project_id=item.project_id,
                 evidence_id=item.id,
                 triggered_by_user_id=triggered_by_user_id,
                 job_type=BackgroundJobType.EVIDENCE_INDEXING.value,
-                priority=110,
+                priority=job_priority,
                 payload_json={
                     "target": "full",
                     "force_rechunk": True,
-                    "trigger": trigger,
+                    "trigger": trigger_name,
                 },
+                flush=flush,
             )
         item.indexing_status = EvidenceIndexingStatus.QUEUED.value
         item.index_error_code = None
@@ -136,6 +220,7 @@ class SourceEvidenceIngestor:
         triggered_by_user_id: uuid.UUID | None,
         record: NormalizedSourceEvidence,
         now: datetime | None = None,
+        flush: bool = True,
     ) -> UpsertEvidenceOutcome:
         """Create or update an external evidence item in place without touching uploads."""
         timestamp = now or utc_now()
@@ -156,13 +241,40 @@ class SourceEvidenceIngestor:
             else None
         )
 
-        existing = self._evidence_repo.find_active_by_source_external_id(
-            project_id=project_id,
-            source_type=record.source_type,
-            source_external_id=record.source_external_id,
+        cache_key = (project_id, record.source_type, record.source_external_id)
+        if cache_key in self._existing_items_cache:
+            existing = self._existing_items_cache[cache_key]
+        elif (project_id, record.source_type) in self._prefetched_sources:
+            existing = None
+            self._existing_items_cache[cache_key] = None
+        else:
+            existing = self._evidence_repo.find_active_by_source_external_id(
+                project_id=project_id,
+                source_type=record.source_type,
+                source_external_id=record.source_external_id,
+            )
+            self._existing_items_cache[cache_key] = existing
+
+        from app.services.fast_extractor import is_evidence_semantic_eligible
+
+        text_len = len(record.extracted_text.strip())
+        is_semantic_eligible = is_evidence_semantic_eligible(
+            category=record.category,
+            title=title,
+            mime_type=record.mime_type,
+            text_len=text_len,
+            metadata_json=dict(record.metadata_json),
         )
+        initial_semantic_status = "queued" if is_semantic_eligible else "not_applicable"
+
         if existing is None:
+            meta = dict(record.metadata_json)
+            meta["lifecycle_stage"] = "imported"
+            meta["semantic_status"] = initial_semantic_status
+            meta.setdefault("knowledge_count", 0)
+
             created_item = self._evidence_repo.create_evidence_item(
+                evidence_id=uuid.uuid4(),
                 organisation_id=organisation_id,
                 project_id=project_id,
                 uploaded_by_user_id=triggered_by_user_id,
@@ -195,13 +307,17 @@ class SourceEvidenceIngestor:
                 page_count=len(record.pages),
                 error_code=error_code,
                 error_message=error_message,
-                metadata_json=dict(record.metadata_json),
+                metadata_json=meta,
+                flush=flush,
             )
+            self._existing_items_cache[cache_key] = created_item
             self._evidence_repo.replace_extracted_content(
                 evidence_id=created_item.id,
                 extracted_text=record.extracted_text,
                 warnings=record.warnings,
                 pages=record.pages,
+                flush=flush,
+                is_new=True,
             )
             self._enqueue_indexing_after_upsert(
                 item=created_item,
@@ -209,13 +325,28 @@ class SourceEvidenceIngestor:
                 extracted_text=record.extracted_text,
                 trigger="connector_created",
                 now=timestamp,
+                flush=flush,
             )
             if created_item.category in ("commit", "pull_request"):
                 try:
-                    from app.services.contribution_attribution import ContributionAttributionService
-                    ContributionAttributionService(self._session).attribute_evidence(created_item)
+                    attr_svc = self._get_attribution_service()
+                    if attr_svc is not None:
+                        attr_svc.attribute_evidence(created_item, flush=flush)
                 except Exception as exc:
                     logger.debug("Contribution attribution error on create: %s", exc)
+
+            # Stage 1: Immediate fast deterministic extraction without waiting for Ollama
+            try:
+                from app.services.fast_extractor import FastKnowledgeExtractor
+                FastKnowledgeExtractor(self._session).extract_evidence_knowledge(
+                    evidence=created_item,
+                    existing_fps=self._get_project_fps(project_id),
+                    auto_commit=False,
+                    extracted_text_override=record.extracted_text,
+                )
+            except Exception as exc:
+                logger.debug("FastKnowledgeExtractor deterministic extraction notice on create: %s", exc)
+
             return UpsertEvidenceOutcome(action="created", evidence_item=created_item)
 
         if existing.content_hash == content_hash and existing.content is not None:
@@ -223,7 +354,15 @@ class SourceEvidenceIngestor:
             existing.source_connection_id = source_connection_id
             existing.source_access_policy_id = record.source_access_policy_id
             existing.acl_scope = record.acl_scope
-            self._session.flush()
+            if existing.metadata_json:
+                meta = dict(existing.metadata_json)
+                if "lifecycle_stage" not in meta:
+                    meta["lifecycle_stage"] = "indexed" if existing.indexing_status == "indexed" else "imported"
+                if "semantic_status" not in meta:
+                    meta["semantic_status"] = initial_semantic_status
+                existing.metadata_json = meta
+            if flush:
+                self._session.flush()
             return UpsertEvidenceOutcome(action="unchanged", evidence_item=existing)
 
         existing.source_provider = record.source_provider
@@ -249,14 +388,23 @@ class SourceEvidenceIngestor:
         existing.page_count = len(record.pages)
         existing.error_code = error_code
         existing.error_message = error_message
-        existing.metadata_json = dict(record.metadata_json)
-        self._session.flush()
+        updated_meta = dict(record.metadata_json)
+        updated_meta["lifecycle_stage"] = "imported"
+        updated_meta["semantic_status"] = initial_semantic_status
+        updated_meta.setdefault(
+            "knowledge_count",
+            (existing.metadata_json or {}).get("knowledge_count", 0),
+        )
+        existing.metadata_json = updated_meta
+        if flush:
+            self._session.flush()
 
         self._evidence_repo.replace_extracted_content(
             evidence_id=existing.id,
             extracted_text=record.extracted_text,
             warnings=record.warnings,
             pages=record.pages,
+            flush=flush,
         )
         KnowledgeRepository(self._session).mark_stale_for_evidence(
             evidence_id=existing.id,
@@ -276,6 +424,19 @@ class SourceEvidenceIngestor:
                 ContributionAttributionService(self._session).attribute_evidence(existing)
             except Exception as exc:
                 logger.debug("Contribution attribution error on update: %s", exc)
+
+        # Stage 1: Immediate fast deterministic extraction on update
+        try:
+            from app.services.fast_extractor import FastKnowledgeExtractor
+            FastKnowledgeExtractor(self._session).extract_evidence_knowledge(
+                evidence=existing,
+                existing_fps=self._get_project_fps(project_id),
+                auto_commit=False,
+                extracted_text_override=record.extracted_text,
+            )
+        except Exception as exc:
+            logger.debug("FastKnowledgeExtractor deterministic extraction notice on update: %s", exc)
+
         return UpsertEvidenceOutcome(action="updated", evidence_item=existing)
 
     def mark_item_inaccessible(

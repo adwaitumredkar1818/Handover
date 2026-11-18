@@ -22,8 +22,82 @@ import {
   Check,
   Lock,
   ChevronDown,
+  Sparkles,
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
+import { useProjectProcessingStatus } from "../../hooks/useProjectProcessingStatus";
+
+interface RowBadgeSpec {
+  label: string;
+  bg: string;
+  isSpinning: boolean;
+}
+
+function getRowStateBadges(
+  lifecycleStage?: string | null,
+  semanticStatus?: string | null,
+  processingStatus?: string | null
+): RowBadgeSpec[] {
+  const stage = (lifecycleStage || "imported").toLowerCase();
+  const sem = (semanticStatus || "").toLowerCase();
+  const proc = (processingStatus || "").toLowerCase();
+
+  if (proc === "failed" || stage === "failed" || sem === "failed") {
+    return [
+      {
+        label: "Failed",
+        bg: "bg-rose-50 text-rose-700 border-rose-200",
+        isSpinning: false,
+      },
+    ];
+  }
+
+  if (stage === "discovered" || stage === "imported") {
+    return [
+      {
+        label: "Imported",
+        bg: "bg-blue-50 text-blue-700 border-blue-200",
+        isSpinning: false,
+      },
+    ];
+  }
+
+  const badges: RowBadgeSpec[] = [
+    {
+      label: "Deterministic processing complete",
+      bg: "bg-teal-50 text-teal-800 border-teal-200 font-medium",
+      isSpinning: false,
+    },
+  ];
+
+  if (sem === "running" || sem === "extracting" || stage === "extracting") {
+    badges.push({
+      label: "Semantic extraction running",
+      bg: "bg-purple-50 text-purple-700 border-purple-200",
+      isSpinning: true,
+    });
+  } else if (sem === "succeeded" || sem === "completed" || sem === "ready") {
+    badges.push({
+      label: "Semantic extraction complete",
+      bg: "bg-emerald-100 text-emerald-800 border-emerald-400 font-bold",
+      isSpinning: false,
+    });
+  } else if (sem === "queued") {
+    badges.push({
+      label: "Semantic extraction queued",
+      bg: "bg-amber-50 text-amber-800 border-amber-200",
+      isSpinning: false,
+    });
+  } else {
+    badges.push({
+      label: "Not applicable",
+      bg: "bg-slate-100 text-slate-600 border-slate-200",
+      isSpinning: false,
+    });
+  }
+
+  return badges;
+}
 
 // Helper to render category badges consistently
 function getCategoryBadge(category?: string, sourceType?: string) {
@@ -92,6 +166,7 @@ export function EvidenceCenterView() {
     selectedEvidenceId,
     selectedEvidence,
     setSelectedEvidenceId,
+    refreshEvidence,
     isLoadingEvidence,
     isLoadingEvidenceDetail,
     evidenceFilter,
@@ -100,25 +175,42 @@ export function EvidenceCenterView() {
     setIsAddSourceModalOpen,
     downloadEvidence,
     addToast,
-    activeJobs,
   } = useLiveApp();
 
-  const [activeTab, setActiveTab] = useState<"chunks" | "metadata">("chunks");
+  const { status: projectStatus } = useProjectProcessingStatus(activeProject?.id || "");
+  const [activeTab, setActiveTab] = useState<"chunks" | "knowledge" | "metadata">("chunks");
   const [copiedHash, setCopiedHash] = useState(false);
   const [copiedChunkId, setCopiedChunkId] = useState<string | null>(null);
   const [copiedMetadataKey, setCopiedMetadataKey] = useState<string | null>(null);
   const [expandedChunkIds, setExpandedChunkIds] = useState<Record<string, boolean>>({});
   const [syncingMappingId, setSyncingMappingId] = useState<string | null>(null);
+  const initialEvidenceProjectRef = React.useRef<string | null>(null);
+  const lastStatusSignatureRef = React.useRef<string | null>(null);
 
-  const isMappingSyncing = (mappingId: string) => {
-    return (
-      syncingMappingId === mappingId ||
-      activeJobs.some((j) => {
-        if (j.job_type !== "source_sync") return false;
-        return j.mapping_id === mappingId;
-      })
-    );
-  };
+  useEffect(() => {
+    if (!activeProject?.id) return;
+    if (initialEvidenceProjectRef.current !== activeProject.id) {
+      initialEvidenceProjectRef.current = activeProject.id;
+      lastStatusSignatureRef.current = null;
+      void refreshEvidence();
+    }
+  }, [activeProject?.id, refreshEvidence]);
+
+  useEffect(() => {
+    if (!activeProject?.id || !projectStatus) return;
+    const nextSig = `${projectStatus.total_evidence_count}:${projectStatus.processed_evidence_count}:${projectStatus.deterministic_ready}:${projectStatus.semantic_extracting}:${projectStatus.semantic_ready}:${projectStatus.knowledge_item_count}:${projectStatus.is_processing}`;
+    if (lastStatusSignatureRef.current === null) {
+      lastStatusSignatureRef.current = nextSig;
+      if (projectStatus.total_evidence_count > evidenceList.length) {
+        void refreshEvidence();
+      }
+      return;
+    }
+    if (nextSig !== lastStatusSignatureRef.current) {
+      lastStatusSignatureRef.current = nextSig;
+      void refreshEvidence();
+    }
+  }, [activeProject?.id, projectStatus, evidenceList.length, refreshEvidence]);
 
   const formatBytes = (bytes?: number | null) => {
     if (!bytes || bytes <= 0) return "—";
@@ -185,9 +277,6 @@ export function EvidenceCenterView() {
         } else if (evidenceFilter.provider === "jira") {
           const isJira = prov === "jira" || srcType === "jira" || srcProv === "jira";
           if (!isJira) return false;
-        } else if (evidenceFilter.provider === "slack") {
-          const isSlack = prov === "slack" || srcType === "slack" || srcProv === "slack";
-          if (!isSlack) return false;
         }
       }
 
@@ -239,10 +328,43 @@ export function EvidenceCenterView() {
         </div>
 
         <div className="flex items-center gap-4 text-xs font-medium text-[#69778D]">
-          <span>
-            Total Evidence:{" "}
-            <strong className="text-[#25334B]">{evidenceMetrics?.total_items ?? evidenceList.length}</strong>
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-xs text-[#25334B]">
+              {projectStatus && projectStatus.total_evidence_count > 0 ? (
+                <>
+                  <span className="text-[#249E91] font-bold">{projectStatus.processed_evidence_count}</span>
+                  {" of "}
+                  <span>{projectStatus.total_evidence_count}</span>
+                  {" evidence items processed"}
+                </>
+              ) : (
+                <>
+                  Total Evidence:{" "}
+                  <strong className="text-[#25334B]">{evidenceMetrics?.total_items ?? evidenceList.length}</strong>
+                </>
+              )}
+            </span>
+            {projectStatus?.is_processing && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300 flex items-center gap-1 animate-pulse">
+                <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                <span>{projectStatus.stage_label || "Processing live"}</span>
+              </span>
+            )}
+            {/* Two-Stage Pipeline Indicators */}
+            {projectStatus && projectStatus.total_evidence_count > 0 && (
+              <div className="hidden xl:flex items-center gap-1.5 text-[11px]">
+                <span className="px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-200 font-medium" title="Stage 1: Directly parsed without LLM">
+                  Stage 1: {projectStatus.deterministic_ready ?? 0} ready
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-purple-50 text-purple-800 border border-purple-200 font-medium" title="Stage 2: Background semantic extraction by Qwen3">
+                  Stage 2: {projectStatus.semantic_ready ?? 0} ready{projectStatus.semantic_queued ? ` (${projectStatus.semantic_queued} queued)` : ""}
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 font-medium" title="Knowledge items published to interactive graphs">
+                  Graphs: {projectStatus.knowledge_item_count} items
+                </span>
+              </div>
+            )}
+          </div>
           <span className="hidden sm:inline">|</span>
           <span className="hidden sm:inline">
             Active Mappings:{" "}
@@ -339,37 +461,16 @@ export function EvidenceCenterView() {
                           </div>
                         </div>
                         <span className={`text-[9px] uppercase px-1.5 py-0.5 rounded font-bold ${
-                          isMappingSyncing(mapping.id)
-                            ? "bg-sky-100 text-sky-800 animate-pulse border border-sky-300"
-                            : mapping.status === "active"
-                            ? "bg-emerald-50 text-emerald-700"
-                            : "bg-amber-50 text-amber-700"
+                          mapping.status === "active" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"
                         }`}>
-                          {isMappingSyncing(mapping.id) ? "Syncing..." : mapping.status}
+                          {mapping.status}
                         </span>
                       </div>
 
-                      <div className="text-[10px] text-[#69778D] mt-1 flex items-center justify-between">
-                        <span className="truncate">Key: {mapping.external_resource_key}</span>
-                        <span className="font-semibold text-[#25334B] ml-2 shrink-0">
-                          {evidenceList.filter((e) => (e.provider || e.source_provider || e.source_type || "").toLowerCase() === (mapping.provider || "").toLowerCase()).length} records
-                        </span>
+                      <div className="text-[10px] text-[#69778D] mt-1 truncate">
+                        Key: {mapping.external_resource_key}
                       </div>
-                      {(() => {
-                        const activeJob = activeJobs.find(
-                          (j) => j.job_type === "source_sync" && j.mapping_id === mapping.id
-                        );
-                        if (isMappingSyncing(mapping.id) && activeJob?.message) {
-                          return (
-                            <div className="mt-1 text-[10px] text-[#249E91] font-medium truncate flex items-center gap-1">
-                              <RefreshCw className="w-2.5 h-2.5 animate-spin shrink-0" />
-                              <span>{activeJob.message}</span>
-                            </div>
-                          );
-                        }
-                        return null;
-                      })()}
-                      {(mapping.status === "error" || mapping.last_error_code) && !isMappingSyncing(mapping.id) && (
+                      {(mapping.status === "error" || mapping.last_error_code) && (
                         <div className="mt-1.5 p-1.5 rounded bg-amber-50 border border-amber-200 text-[10px] text-amber-800 flex items-center justify-between gap-2">
                           <span className="truncate" title={mapping.last_error_summary || mapping.last_error_code || ""}>
                             {mapping.last_error_code === "GITHUB_REPO_ACCESS_REVOKED"
@@ -388,20 +489,18 @@ export function EvidenceCenterView() {
 
                       <div className="mt-2.5 pt-2 border-t border-[#DCE3EB] flex items-center justify-between">
                         <span className="text-[10px] text-[#69778D]">
-                          {isMappingSyncing(mapping.id)
-                            ? "Sync in progress..."
-                            : mapping.last_synced_at
+                          {mapping.last_synced_at
                             ? `Synced ${new Date(mapping.last_synced_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
                             : "Not synced yet"}
                         </span>
                         <button
                           type="button"
-                          disabled={isMappingSyncing(mapping.id)}
+                          disabled={syncingMappingId === mapping.id}
                           onClick={() => handleSync(mapping.id)}
                           className="px-2 py-1 rounded bg-[#E8EEF5] hover:bg-[#DCE3EB] text-[#4774A9] text-[10px] font-semibold flex items-center gap-1 transition-colors disabled:opacity-50"
                         >
-                          <RefreshCw className={`w-3 h-3 ${isMappingSyncing(mapping.id) ? "animate-spin text-[#249E91]" : ""}`} />
-                          <span>{isMappingSyncing(mapping.id) ? "Syncing..." : "Sync Now"}</span>
+                          <RefreshCw className={`w-3 h-3 ${syncingMappingId === mapping.id ? "animate-spin" : ""}`} />
+                          <span>Sync Now</span>
                         </button>
                       </div>
                     </div>
@@ -443,7 +542,7 @@ export function EvidenceCenterView() {
 
             {/* Provider Filter Tabs */}
             <div className="flex items-center gap-1 overflow-x-auto text-[11px] font-semibold">
-              {["all", "upload", "github", "jira", "slack"].map((prov) => (
+              {["all", "upload", "github", "jira"].map((prov) => (
                 <button
                   key={prov}
                   type="button"
@@ -501,14 +600,6 @@ export function EvidenceCenterView() {
                       Connect a Jira project in Panel A or trigger a sync to ingest issues.
                     </p>
                   </>
-                ) : evidenceFilter.provider === "slack" ? (
-                  <>
-                    <Database className="w-8 h-8 text-purple-500 opacity-70 mb-2" />
-                    <div className="font-semibold text-[#25334B]">No Slack Evidence Found</div>
-                    <p className="text-[11px] max-w-xs mt-1 text-[#69778D]">
-                      Connect a Slack channel in Panel A or trigger a sync to ingest messages.
-                    </p>
-                  </>
                 ) : (
                   <>
                     <Database className="w-8 h-8 text-[#69778D] opacity-40 mb-2" />
@@ -525,6 +616,13 @@ export function EvidenceCenterView() {
                 const provBadge = getProviderBadge(item.provider, item.source_type);
                 const catBadge = getCategoryBadge(item.category, item.source_type);
                 const isUpload = provBadge.label === "UPLOAD";
+                const liveState = projectStatus?.item_states?.[item.id];
+                const rowBadges = getRowStateBadges(
+                  liveState?.lifecycle_stage ?? item.lifecycle_stage,
+                  liveState?.semantic_status ?? item.semantic_status,
+                  liveState?.processing_status ?? item.processing_status
+                );
+                const liveKCount = liveState?.knowledge_count ?? item.knowledge_count;
 
                 return (
                   <div
@@ -544,6 +642,20 @@ export function EvidenceCenterView() {
                         <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${catBadge.bg}`}>
                           {catBadge.label}
                         </span>
+                        {rowBadges.map((stageBadge) => (
+                          <span
+                            key={stageBadge.label}
+                            className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border flex items-center gap-1 ${stageBadge.bg}`}
+                          >
+                            {stageBadge.isSpinning && <RefreshCw className="w-2.5 h-2.5 animate-spin" />}
+                            <span>{stageBadge.label}</span>
+                          </span>
+                        ))}
+                        {liveKCount != null && liveKCount > 0 && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-300">
+                            +{liveKCount} items
+                          </span>
+                        )}
                         <span className="text-[10px] text-[#69778D] font-mono">
                           {item.content_hash.slice(0, 8)}...
                         </span>
@@ -663,7 +775,7 @@ export function EvidenceCenterView() {
               <div className="p-3 rounded-lg bg-[#F0FAF8] border border-[#249E91]/30 text-xs">
                 <div className="flex items-center gap-1.5 font-bold text-[#249E91] text-[11px] mb-1">
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Verified Canonical Evidence</span>
+                  <span>Canonical Source Evidence (SHA-256)</span>
                 </div>
                 <div className="text-[11px] text-[#25334B] font-mono flex items-center justify-between gap-2 mt-1">
                   <span className="truncate">SHA-256: {selectedEvidence.content_hash}</span>
@@ -678,7 +790,7 @@ export function EvidenceCenterView() {
                 </div>
               </div>
 
-              {/* Tabs: Chunks vs Metadata */}
+              {/* Tabs: Chunks vs Extracted Knowledge vs Metadata */}
               <div className="flex border-b border-[#DCE3EB] text-xs font-semibold">
                 <button
                   type="button"
@@ -690,6 +802,20 @@ export function EvidenceCenterView() {
                   }`}
                 >
                   Extracted Text Chunks ({selectedEvidence.chunks?.length || 0})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("knowledge")}
+                  className={`pb-2 px-3 transition-colors flex items-center gap-1 ${
+                    activeTab === "knowledge"
+                      ? "border-b-2 border-[#249E91] text-[#249E91]"
+                      : "text-[#69778D] hover:text-[#25334B]"
+                  }`}
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-[#249E91]" />
+                  <span>
+                    Extracted Knowledge ({selectedEvidence.linked_knowledge_items?.length || selectedEvidence.knowledge_count || 0})
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -808,6 +934,48 @@ export function EvidenceCenterView() {
                         </div>
                       );
                     })
+                  )}
+                </div>
+              ) : activeTab === "knowledge" ? (
+                <div className="space-y-3">
+                  {!selectedEvidence.linked_knowledge_items || selectedEvidence.linked_knowledge_items.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-[#69778D] bg-[#F4F6F9] rounded-xl border border-[#DCE3EB] flex flex-col items-center justify-center gap-2">
+                      <Sparkles className="w-8 h-8 text-[#249E91]/40" />
+                      <div className="font-semibold text-[#25334B]">No Knowledge Items Extracted Yet</div>
+                      <p className="text-[11px] max-w-xs text-[#69778D]">
+                        {selectedEvidence.semantic_status === "running"
+                          ? "Ollama Qwen3 8B semantic extraction is currently active on this document."
+                          : selectedEvidence.semantic_status === "not_applicable"
+                          ? "This evidence item has explicit metadata and is represented directly in Relationship Explorer without LLM reasoning."
+                          : "Knowledge items extracted deterministically or via Ollama will appear here with full provenance."}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {selectedEvidence.linked_knowledge_items.map((k) => (
+                        <div
+                          key={k.id}
+                          className="p-3 rounded-lg border border-[#DCE3EB] bg-white shadow-2xs space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
+                              {k.category.replace(/_/g, " ")}
+                            </span>
+                            {k.confidence != null && (
+                              <span className="text-[10px] font-mono text-slate-500">
+                                Confidence: {Math.round(k.confidence * 100)}%
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs font-bold text-[#25334B]">{k.title}</div>
+                          <p className="text-[11px] text-slate-600 leading-relaxed">{k.summary}</p>
+                          <div className="pt-1 border-t border-[#EBF0F5] flex items-center justify-between text-[10px] text-slate-400">
+                            <span>Status: {k.epistemic_status || "extracted"}</span>
+                            <span>ID: {k.id.slice(0, 8)}...</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               ) : (
