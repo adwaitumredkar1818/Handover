@@ -265,12 +265,17 @@ export function adaptContributorToHandoverGraph(contributorGraph: {
       typeLabel = "Bot";
     }
 
+    const matchMethod = (n.metadata?.match_method as string | undefined);
     return {
       id: n.id,
       label: n.label,
       entity_type,
       category,
-      status: n.review_status === "confirmed" ? "HUMAN_VERIFIED" : n.review_status,
+      status: n.review_status === "confirmed" && matchMethod === "human_confirmed"
+        ? "HUMAN_VERIFIED"
+        : n.review_status === "confirmed"
+        ? "SOURCE_EXTRACTED"
+        : n.review_status,
       verification_status: n.verification_status || n.review_status,
       evidence_count: n.contribution_count || 0,
       evidence_ids: (n.metadata?.evidence_ids as string[]) || [],
@@ -487,29 +492,36 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
 
   const { depHandoverNodes, depHandoverEdges } = useMemo(() => {
     if (!depGraph || !depGraph.nodes) return { depHandoverNodes: [], depHandoverEdges: [] };
-    const nodes: HandoverGraphNode[] = depGraph.nodes.map((n: any) => ({
-      id: String(n.id),
-      label: n.name || n.label || String(n.id),
-      entity_type: n.type || "technical_component",
-      category: n.category || "technical_component",
-      status: n.status || "SOURCE_EXTRACTED",
-      verification_status: n.verification_status || "unverified",
-      evidence_count: n.evidence_count || 1,
-      evidence_ids: n.evidence_ids || [],
-      aliases: [],
-      metadata: { raw: n },
-    }));
-    const edges: HandoverGraphEdge[] = (depGraph.edges || []).map((e: any) => ({
-      id: String(e.id || `${e.source}->${e.target}`),
-      source: String(e.source),
-      target: String(e.target),
-      relationship_type: e.relationship_type || e.type || "depends_on",
-      label: e.label || e.relationship_type || "depends on",
-      evidence_basis: "explicit",
-      verification_status: e.verification_status || "unverified",
-      confidence_score: 1.0,
-      evidence_ids: [],
-    }));
+    const nodes: HandoverGraphNode[] = depGraph.nodes.map((n: any) => {
+      const nodeId = String(n.entity_id || n.id);
+      return {
+        id: nodeId,
+        label: n.name || n.canonical_name || n.label || nodeId,
+        entity_type: n.entity_type || n.type || "technical_component",
+        category: n.category || n.entity_type || "technical_component",
+        status: n.status || "SOURCE_EXTRACTED",
+        verification_status: n.verification_status || "unverified",
+        evidence_count: n.evidence_count || 1,
+        evidence_ids: n.evidence_ids || [],
+        aliases: [],
+        metadata: { raw: n },
+      };
+    });
+    const edges: HandoverGraphEdge[] = (depGraph.edges || []).map((e: any) => {
+      const src = String(e.source_id || e.source);
+      const tgt = String(e.target_id || e.target);
+      return {
+        id: String(e.id || `${src}->${tgt}`),
+        source: src,
+        target: tgt,
+        relationship_type: e.dependency_type || e.relationship_type || e.type || "depends_on",
+        label: e.label || e.dependency_type || e.relationship_type || "depends on",
+        evidence_basis: e.relationship_basis || "explicit",
+        verification_status: e.verification_status || "unverified",
+        confidence_score: typeof e.confidence === "number" ? e.confidence : 1.0,
+        evidence_ids: [],
+      };
+    });
     return { depHandoverNodes: nodes, depHandoverEdges: edges };
   }, [depGraph]);
 
@@ -996,13 +1008,12 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   ]);
 
   const handleProcessingComplete = useCallback(() => {
-    invalidateGraphCache(`rel_contribs:${projectId}`);
-    invalidateGraphCache(`rel_entities:${projectId}`);
+    invalidateGraphCache(`rel_`);
     loadPeopleAndEntityGraphs(true);
     if (activeTab !== "people") {
       loadTabDetails(activeTab, true);
     }
-  }, [projectId, loadPeopleAndEntityGraphs, activeTab, loadTabDetails]);
+  }, [loadPeopleAndEntityGraphs, activeTab, loadTabDetails]);
 
   const {
     status: processingStatus,

@@ -1120,12 +1120,12 @@ export const api = {
       return request(`/projects/${projectId}/relationships/timeline`);
     },
     async listIdentityCandidates(projectId: string): Promise<Record<string, unknown>[]> {
-      return request(`/projects/${projectId}/relationships/identity-candidates`);
+      return request(`/projects/${projectId}/relationships/identities/candidates`);
     },
     async reviewCandidate(projectId: string, candidateId: string, decision: "accept" | "reject", rationale?: string): Promise<Record<string, unknown>> {
-      return request(`/projects/${projectId}/relationships/identity-candidates/${candidateId}/review`, {
+      return request(`/projects/${projectId}/relationships/identities/candidates/${candidateId}/review`, {
         method: "POST",
-        body: JSON.stringify({ decision, rationale }),
+        body: JSON.stringify({ action: decision, rationale }),
       });
     },
     async triggerReconstruction(projectId: string): Promise<{

@@ -43,7 +43,7 @@ _PATH_DOMAIN_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("Testing", ("tests/", "test_", ".test.", ".spec.", "vitest", "pytest")),
     ("Documentation", ("docs/", "documentation/", "readme", ".md", ".mdx", "specification")),
     ("DevOps", ("dockerfile", "docker-compose", "compose.yaml", ".github/workflows", "render.yaml")),
-    ("Infrastructure", ("infrastructure/", "docker/", ".env", "server")),
+    ("Infrastructure", ("infrastructure/", "docker/", ".env", "k8s/", "terraform/", "deploy/")),
     ("Backend", ("backend/", "services/", "repositories/", "worker.py", ".py")),
 ]
 
@@ -798,7 +798,7 @@ class ContributionAttributionService:
         ) if user_ids else []
         user_to_gh = {a.user_id: a.external_username.strip() for a in auth_rows if a.external_username}
 
-        # Collect assisted / directed work for confirmed members
+        # Collect assisted / directed work for confirmed members ONLY from tool-associated / bot commits
         directed_stats_by_pm: dict[uuid.UUID, dict[str, Any]] = defaultdict(lambda: {
             "assisted_commits": 0,
             "work_areas": set(),
@@ -809,15 +809,14 @@ class ContributionAttributionService:
             if row.evidence_item_id not in accessible_evidence_ids:
                 continue
             meta = row.metadata_json or {}
+            # Only count directed work if the row is from a bot / AI tool
+            is_bot = (
+                row.contributor_type == ContributorType.BOT.value
+                or meta.get("attribution_classification") == "tool_associated"
+            )
+            if not is_bot:
+                continue
             d_pm_id = meta.get("directed_by_pm_id")
-            if not d_pm_id:
-                repo = str(meta.get("repository") or "")
-                repo_owner = repo.split("/")[0].strip().lower() if "/" in repo else None
-                for pm_candidate in memberships:
-                    cand_gh = (user_to_gh.get(pm_candidate.user_id) or "").strip().lower()
-                    if cand_gh and cand_gh == repo_owner:
-                        d_pm_id = str(pm_candidate.id)
-                        break
             if d_pm_id:
                 try:
                     pm_uuid = uuid.UUID(str(d_pm_id))
@@ -834,7 +833,7 @@ class ContributionAttributionService:
         for pm in memberships:
             ckey = f"member:{pm.id}"
             gh_handle = user_to_gh.get(pm.user_id)
-            if pm.id not in matched_pm_ids or ckey not in grouped:
+            if pm.id not in matched_pm_ids:
                 raw_email = pm.user.email if pm.user else None
                 role_name = pm.role.name if getattr(pm, "role", None) else "project_member"
                 role_label = role_name.replace("_", " ").title()
@@ -868,11 +867,14 @@ class ContributionAttributionService:
                     }
                     grouped[ckey] = entry
 
-            entry = grouped.get(ckey)
+            entry = grouped.get(ckey) or next(
+                (e for e in grouped.values() if e.get("matched_project_membership_id") == str(pm.id)),
+                None,
+            )
             if entry is not None and pm.id in directed_stats_by_pm:
                 d_stats = directed_stats_by_pm[pm.id]
                 entry["assisted_commits_count"] = d_stats["assisted_commits"]
-                entry["contribution_count"] = entry.get("commits_count", 0) + d_stats["assisted_commits"]
+                entry["contribution_count"] = entry.get("contribution_count", 0) + d_stats["assisted_commits"]
                 entry["repositories"] = entry["repositories"] | d_stats["repositories"]
                 entry["work_areas"] = (entry["work_areas"] - {"Unassigned"}) | d_stats["work_areas"]
                 entry["evidence_ids"] = list(set(entry["evidence_ids"] + d_stats["evidence_ids"]))
