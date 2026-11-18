@@ -5,7 +5,7 @@ import { X, UploadCloud, Shield, ArrowRight, AlertCircle, CheckCircle2 } from "l
 import { useLiveApp } from "../../context/LiveAppContext";
 
 export function UploadDocumentModal() {
-  const { isUploadModalOpen, setIsUploadModalOpen, uploadDocument } = useLiveApp();
+  const { isUploadModalOpen, setIsUploadModalOpen, uploadDocument, activeProject } = useLiveApp();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [customTitle, setCustomTitle] = useState("");
   const [docCategory, setDocCategory] = useState<"team_roster" | "meeting_notes" | "project_document">("project_document");
@@ -68,6 +68,11 @@ export function UploadDocumentModal() {
           <div className="flex items-center gap-2 text-sm font-bold text-[#25334B]">
             <UploadCloud className="w-4 h-4 text-[#249E91]" />
             <span>Ingest Document Evidence</span>
+            {activeProject && (
+              <span className="text-xs px-2 py-0.5 rounded bg-teal-50 text-teal-700 font-normal border border-teal-200">
+                {activeProject.name}
+              </span>
+            )}
           </div>
           <button
             type="button"

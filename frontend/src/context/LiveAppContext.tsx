@@ -11,6 +11,7 @@ import React, {
 } from "react";
 import { usePathname } from "next/navigation";
 import { api, setStoredToken, setStoredUser, getStoredUser, ApiError } from "../lib/api";
+import { invalidateGraphCache, setGraphCacheUser } from "../lib/graphCache";
 import { createClient as createSupabaseClient } from "../lib/supabase/client";
 import type {
   User,
@@ -84,6 +85,7 @@ interface LiveAppContextType {
   sourceMappings: ProjectSourceMapping[];
   orgConnections: SourceConnection[];
   isLoadingSources: boolean;
+  addSourceMappings: (newMappings: ProjectSourceMapping[]) => void;
   connectSource: (provider: "github" | "jira" | "slack", token: string, accountId: string) => Promise<SourceConnection>;
   createMapping: (data: { source_connection_id: string; external_resource_key: string; external_resource_name: string; external_resource_url?: string }) => Promise<ProjectSourceMapping>;
   triggerSync: (mappingId: string) => Promise<void>;
@@ -106,6 +108,9 @@ interface LiveAppContextType {
     options?: { documentCategory?: string; documentSubtype?: string }
   ) => Promise<{ document_id: string; title: string }>;
   downloadEvidence: (evidenceId: string, filename?: string) => Promise<void>;
+  reprocessEvidence: (evidenceId: string) => Promise<void>;
+  extractEvidenceKnowledge: (evidenceId: string) => Promise<void>;
+  extractProjectKnowledge: () => Promise<void>;
 
   // Downstream intelligence
   knowledgeSummary: KnowledgeSummaryTelemetry | null;
@@ -187,6 +192,22 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const [activeOrg, setActiveOrgInternal] = useState<Organisation | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProjectInternal] = useState<Project | null>(null);
+
+  // Restore cached org & project from localStorage after client hydration (SSR-safe)
+  useEffect(() => {
+    try {
+      const rawOrg = typeof window !== "undefined" ? localStorage.getItem("handover_cached_active_org") : null;
+      if (rawOrg) {
+        setActiveOrgInternal(JSON.parse(rawOrg));
+      }
+      const rawProj = typeof window !== "undefined" ? localStorage.getItem("handover_cached_active_project") : null;
+      if (rawProj) {
+        setActiveProjectInternal(JSON.parse(rawProj));
+      }
+    } catch {
+      // Ignore corrupted localStorage cache
+    }
+  }, []);
   const [isLoadingProjects, setIsLoadingProjects] = useState(false);
 
   // Overview state
@@ -237,6 +258,15 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const activeJobsRef = useRef<ActiveSyncJob[]>([]);
   activeJobsRef.current = activeJobs;
 
+  const activeProjectIdRef = useRef<string | null>(activeProject?.id || null);
+  useEffect(() => {
+    activeProjectIdRef.current = activeProject?.id || null;
+  }, [activeProject?.id]);
+
+  useEffect(() => {
+    setGraphCacheUser(user?.id || null);
+  }, [user?.id]);
+
   // Organisation selector wrapper that persists user workspace preference
   const setActiveOrg = useCallback(
     (action: Organisation | null | ((prev: Organisation | null) => Organisation | null)) => {
@@ -244,8 +274,10 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         const next = typeof action === "function" ? action(prev) : action;
         if (next && typeof window !== "undefined") {
           localStorage.setItem("handover_active_org_id", next.id);
+          localStorage.setItem("handover_cached_active_org", JSON.stringify(next));
         } else if (!next && typeof window !== "undefined") {
           localStorage.removeItem("handover_active_org_id");
+          localStorage.removeItem("handover_cached_active_org");
         }
         return next;
       });
@@ -260,14 +292,22 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         const next = typeof action === "function" ? action(prev) : action;
         if (next && typeof window !== "undefined") {
           localStorage.setItem("handover_active_project_id", next.id);
+          localStorage.setItem("handover_cached_active_project", JSON.stringify(next));
         } else if (!next && typeof window !== "undefined") {
           localStorage.removeItem("handover_active_project_id");
+          localStorage.removeItem("handover_cached_active_project");
         }
         if (prev?.id === next?.id) return prev;
         setOverview(null);
         setMembers([]);
         setEvidenceList([]);
         setSourceMappings([]);
+        setFindings([]);
+        setKnowledgeSummary(null);
+        setVerificationQueue([]);
+        setVerificationSummary(null);
+        setSelectedEvidence(null);
+        setSelectedEvidenceId(null);
         return next;
       });
     },
@@ -723,6 +763,8 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
 
   // Load evidence list and metrics
   const isFetchingEvidenceRef = useRef(false);
+  const evidenceListLenRef = useRef(0);
+  evidenceListLenRef.current = evidenceList.length;
   const refreshEvidence = useCallback(async () => {
     if (!user || !activeProject) {
       setEvidenceList([]);
@@ -732,16 +774,19 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     if (isFetchingEvidenceRef.current) return;
     isFetchingEvidenceRef.current = true;
     const currentProjectId = activeProject.id;
-    setIsLoadingEvidence(true);
+    if (evidenceListLenRef.current === 0) {
+      setIsLoadingEvidence(true);
+    }
     try {
       const [itemsRes, metricsRes] = await Promise.allSettled([
         api.evidence.list(currentProjectId, {
-          limit: 100,
+          limit: 500,
         }),
         api.evidence.getMetrics(currentProjectId),
       ]);
       const items = itemsRes.status === "fulfilled" ? itemsRes.value : [];
       const metrics = metricsRes.status === "fulfilled" ? metricsRes.value : null;
+      if (activeProjectIdRef.current !== currentProjectId) return;
       setEvidenceList(items);
       setEvidenceMetrics(metrics);
       if (items.length > 0 && items[0]) {
@@ -757,35 +802,58 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         setSelectedEvidence(null);
       }
     } catch (err: unknown) {
-      if (err instanceof ApiError && err.status === 401) return;
-      console.error("Error loading evidence:", err);
+      if (err instanceof ApiError && (err.status === 401 || err.status === 0)) return;
+      console.warn("Evidence loading unavailable:", err instanceof Error ? err.message : String(err));
     } finally {
-      setIsLoadingEvidence(false);
+      if (activeProjectIdRef.current === currentProjectId) {
+        setIsLoadingEvidence(false);
+      }
       isFetchingEvidenceRef.current = false;
     }
   }, [user?.id, activeProject?.id]);
 
   // Load evidence detail when selectedEvidenceId changes
   useEffect(() => {
+    let isCurrent = true;
     async function loadDetail() {
       if (!user || !selectedEvidenceId) {
         setSelectedEvidence(null);
         return;
       }
+      const targetProjectId = activeProject?.id;
+      const targetEvidenceId = selectedEvidenceId;
       setIsLoadingEvidenceDetail(true);
       try {
         const detail = await api.evidence.getDetail(selectedEvidenceId);
-        setSelectedEvidence(detail);
+        if (
+          isCurrent &&
+          activeProjectIdRef.current === targetProjectId &&
+          selectedEvidenceId === targetEvidenceId
+        ) {
+          setSelectedEvidence(detail);
+        }
       } catch (err: unknown) {
-        if (err instanceof ApiError && err.status === 401) return;
-        console.error("Error loading evidence detail:", err);
+        if (!isCurrent) return;
+        if (
+          err instanceof ApiError &&
+          (err.status === 401 || err.status === 0 || err.status === 404)
+        ) {
+          setSelectedEvidence(null);
+          return;
+        }
+        console.warn("Evidence detail unavailable:", err instanceof Error ? err.message : String(err));
         setSelectedEvidence(null);
       } finally {
-        setIsLoadingEvidenceDetail(false);
+        if (isCurrent) {
+          setIsLoadingEvidenceDetail(false);
+        }
       }
     }
     loadDetail();
-  }, [user?.id, selectedEvidenceId]);
+    return () => {
+      isCurrent = false;
+    };
+  }, [user?.id, selectedEvidenceId, activeProject?.id]);
 
   // Downstream Intelligence Handlers
   const refreshFindings = useCallback(async () => {
@@ -794,21 +862,25 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       setKnowledgeSummary(null);
       return;
     }
+    const targetProjectId = activeProject.id;
     setIsLoadingFindings(true);
     try {
       const [sum, list] = await Promise.allSettled([
         api.knowledgeIntelligence.getSummary(activeProject.id),
         api.knowledgeIntelligence.listFindings(activeProject.id, undefined, 100, 0),
       ]);
+      if (activeProjectIdRef.current !== targetProjectId) return;
       if (sum.status === "fulfilled") setKnowledgeSummary(sum.value as unknown as KnowledgeSummaryTelemetry);
       if (list.status === "fulfilled") {
         const allItems = (list.value.items || []) as unknown as KnowledgeFinding[];
         setFindings(allItems);
       }
     } catch (err) {
-      console.error("Error loading findings:", err);
+      console.warn("Knowledge findings unavailable:", err instanceof Error ? err.message : String(err));
     } finally {
-      setIsLoadingFindings(false);
+      if (activeProjectIdRef.current === targetProjectId) {
+        setIsLoadingFindings(false);
+      }
     }
   }, [user?.id, activeProject?.id]);
 
@@ -824,16 +896,6 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       });
       await refreshFindings();
       await refreshOverview();
-
-      // Poll periodically to stream in new findings as Ollama generates them
-      let pollCount = 0;
-      const pollInterval = setInterval(async () => {
-        pollCount += 1;
-        await refreshFindings();
-        if (pollCount >= 12) {
-          clearInterval(pollInterval);
-        }
-      }, 5000);
     } catch (err: unknown) {
       addToast({
         type: "error",
@@ -851,18 +913,22 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       setVerificationSummary(null);
       return;
     }
+    const targetProjectId = activeProject.id;
     setIsLoadingVerification(true);
     try {
       const [sum, q] = await Promise.allSettled([
         api.verification.getSummary(activeProject.id),
         api.verification.getQueue(activeProject.id),
       ]);
+      if (activeProjectIdRef.current !== targetProjectId) return;
       if (sum.status === "fulfilled") setVerificationSummary(sum.value as unknown as VerificationSummaryData);
       if (q.status === "fulfilled") setVerificationQueue((q.value.items || []) as unknown as VerificationCaseQueueItem[]);
     } catch (err) {
-      console.error("Error loading verification data:", err);
+      console.warn("Verification data unavailable:", err instanceof Error ? err.message : String(err));
     } finally {
-      setIsLoadingVerification(false);
+      if (activeProjectIdRef.current === targetProjectId) {
+        setIsLoadingVerification(false);
+      }
     }
   }, [user?.id, activeProject?.id]);
 
@@ -968,6 +1034,11 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       const prevJobs = activeJobsRef.current;
       setActiveJobs(jobs as ActiveSyncJob[]);
 
+      // Only refetch evidence list globally if a sync job is actively importing new items
+      if (jobs.some((j) => j.job_type === "source_sync")) {
+        void refreshEvidence();
+      }
+
       // Check if any job completed
       if (prevJobs.length > 0 && jobs.length === 0) {
         void refreshEvidence();
@@ -979,10 +1050,6 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
           title: "Background Task Finished",
           message: "All background sync and extraction jobs have completed.",
         });
-      } else if (prevJobs.length > jobs.length) {
-        void refreshEvidence();
-        void refreshSources();
-        void refreshNotifications();
       }
     } catch {
       // ignore
@@ -1025,7 +1092,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     void refreshNotifications();
     void refreshActiveJobs();
 
-    const intervalTime = hasActiveJobs ? 10000 : 30000;
+    const intervalTime = hasActiveJobs ? 3000 : 15000;
     const timer = setInterval(() => {
       if (typeof document !== "undefined" && document.hidden) {
         return;
@@ -1066,7 +1133,10 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       );
       if (isOverviewRoute) void refreshOverview();
       void refreshMembers();
-      if (isSourcesRoute) void refreshSources();
+      if (isSourcesRoute) {
+        void refreshSources();
+        void refreshEvidence();
+      }
     });
     return () => {
       active = false;
@@ -1148,6 +1218,8 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     setStoredUser(null);
     setToken(null);
     setUser(null);
+    invalidateGraphCache();
+    setGraphCacheUser(null);
     setActiveOrg(null);
     setActiveProject(null);
     setOrganisations([]);
@@ -1262,6 +1334,14 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     return mapping;
   };
 
+  const addSourceMappings = useCallback((newMappings: ProjectSourceMapping[]) => {
+    setSourceMappings((prev) => {
+      const existingIds = new Set(prev.map((m) => m.id));
+      const toAdd = newMappings.filter((m) => !existingIds.has(m.id));
+      return [...prev, ...toAdd];
+    });
+  }, []);
+
   const triggerSync = async (mappingId: string) => {
     if (!activeProject) return;
     try {
@@ -1271,9 +1351,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         title: "Sync Started",
         message: res.message || "Background sync job submitted",
       });
-      await refreshSources();
-      await refreshEvidence();
-      await refreshOverview();
+      void Promise.allSettled([refreshSources(), refreshEvidence(), refreshOverview()]);
     } catch (err: unknown) {
       addToast({
         type: "error",
@@ -1334,6 +1412,69 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const reprocessEvidence = async (evidenceId: string) => {
+    if (!activeProject) return;
+    try {
+      await api.evidence.reprocess(activeProject.id, evidenceId);
+      addToast({
+        type: "info",
+        title: "Processing Started",
+        message: "Document extraction and indexing queued in background",
+      });
+      await refreshEvidence();
+      void refreshActiveJobs();
+      void refreshOverview();
+    } catch (err: unknown) {
+      addToast({
+        type: "error",
+        title: "Processing Failed",
+        message: err instanceof Error ? err.message : "Failed to queue processing",
+      });
+    }
+  };
+
+  const extractEvidenceKnowledge = async (evidenceId: string) => {
+    if (!activeProject) return;
+    try {
+      await api.evidence.extract(activeProject.id, evidenceId);
+      addToast({
+        type: "info",
+        title: "Knowledge Extraction Started",
+        message: "AI knowledge reconstruction queued across 8 domains",
+      });
+      await refreshEvidence();
+      void refreshActiveJobs();
+      void refreshOverview();
+    } catch (err: unknown) {
+      addToast({
+        type: "error",
+        title: "Extraction Failed",
+        message: err instanceof Error ? err.message : "Failed to trigger knowledge extraction",
+      });
+    }
+  };
+
+  const extractProjectKnowledge = async () => {
+    if (!activeProject) return;
+    try {
+      await api.knowledgeIntelligence.triggerExtraction(activeProject.id);
+      addToast({
+        type: "info",
+        title: "Project Extraction Started",
+        message: "AI knowledge extraction queued across all project evidence",
+      });
+      await refreshEvidence();
+      void refreshActiveJobs();
+      void refreshOverview();
+    } catch (err: unknown) {
+      addToast({
+        type: "error",
+        title: "Extraction Failed",
+        message: err instanceof Error ? err.message : "Failed to trigger project extraction",
+      });
+    }
+  };
+
   const value: LiveAppContextType = {
     user,
     token,
@@ -1365,6 +1506,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     sourceMappings,
     orgConnections,
     isLoadingSources,
+    addSourceMappings,
     connectSource,
     createMapping,
     triggerSync,
@@ -1381,6 +1523,9 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     refreshEvidence,
     uploadDocument,
     downloadEvidence,
+    reprocessEvidence,
+    extractEvidenceKnowledge,
+    extractProjectKnowledge,
     knowledgeSummary,
     findings,
     isLoadingFindings,
