@@ -347,9 +347,9 @@ interface NodeBox {
 }
 
 const DEFAULT_NODE_W = 204;
-const DEFAULT_NODE_H = 104;
-const MIN_NODE_GAP_X = 76;
-const MIN_NODE_GAP_Y = 76;
+const DEFAULT_NODE_H = 116;
+const MIN_NODE_GAP_X = 64;
+const MIN_NODE_GAP_Y = 64;
 
 function getNodeSize(
   id: string,
@@ -370,7 +370,7 @@ function resolveOverlaps(
   positions: Map<string, { x: number; y: number }>,
   ids: string[],
   dims?: Map<string, { width: number; height: number }>,
-  padding = 34
+  padding = 40
 ): void {
   const sortedIds = [...ids].sort();
   const boxes: NodeBox[] = sortedIds.map((id) => {
@@ -379,7 +379,7 @@ function resolveOverlaps(
     return { id, x: pos.x, y: pos.y, w, h };
   });
 
-  for (let iter = 0; iter < 18; iter++) {
+  for (let iter = 0; iter < 80; iter++) {
     let moved = false;
     for (let i = 0; i < boxes.length; i++) {
       const a = boxes[i]!;
@@ -401,7 +401,7 @@ function resolveOverlaps(
           const overlapY = reqDy - Math.abs(dy);
 
           // Push apart along the axis with smaller penetration (deterministic tie-break)
-          if (overlapX < overlapY) {
+          if (overlapX <= overlapY) {
             const sign = dx === 0 ? (i % 2 === 0 ? -1 : 1) : Math.sign(dx);
             const shift = overlapX / 2 + 2;
             a.x -= sign * shift;
@@ -529,8 +529,8 @@ function layoutComponent(
   const n = compNodes.length;
   if (n === 0) return pos;
 
-  const colStep = DEFAULT_NODE_W + MIN_NODE_GAP_X + 34; // ~314px
-  const rowStep = DEFAULT_NODE_H + MIN_NODE_GAP_Y + 64; // ~244px
+  const colStep = DEFAULT_NODE_W + MIN_NODE_GAP_X + 22; // ~290px
+  const rowStep = DEFAULT_NODE_H + MIN_NODE_GAP_Y + 25; // ~205px
 
   // Build adjacency & degrees
   const inDeg = new Map<string, number>();
@@ -659,11 +659,13 @@ function layoutComponent(
     }
   }
 
-  // Blend with semantic architectural tier when graph has weak topological depth (e.g. flat bipartite or tier-driven)
+  // Blend with semantic architectural tier when topological depth is either flat (< 2)
+  // OR creates an overly tall sparse chain (e.g. > 6 layers with < 1.8 nodes/layer avg)
   const maxTopo = Math.max(...Array.from(topoDepth.values()), 0);
+  const useTopoLayers = maxTopo >= 2 && (maxTopo <= 6 || n / (maxTopo + 1) >= 1.8);
   const byLayer = new Map<number, HandoverGraphNode[]>();
   for (const node of compNodes) {
-    const layer = maxTopo >= 2 ? (topoDepth.get(node.id) ?? 0) : resolveNodeTier(node);
+    const layer = useTopoLayers ? (topoDepth.get(node.id) ?? 0) : resolveNodeTier(node);
     const bucket = byLayer.get(layer) || [];
     bucket.push(node);
     byLayer.set(layer, bucket);
@@ -672,7 +674,7 @@ function layoutComponent(
   // Determine ideal max items per row based on viewport aspect ratio and graph size
   const targetCols = Math.max(
     3,
-    Math.min(6, Math.round(Math.sqrt(n * Math.max(0.85, aspectRatio)) * 1.15))
+    Math.min(6, Math.round(Math.sqrt(n * Math.max(1.0, aspectRatio)) * 1.15))
   );
 
   // Build wrapped visual rows
@@ -847,18 +849,111 @@ export function resolveIncrementalNodePositions(
     }
   }
 
-  if (addedIds.length > 0) {
-    resolveOverlaps(
-      resultPositions,
-      newLayoutNodes.map((n) => n.id),
-      dims
-    );
-  }
+  // Always guarantee zero overlap across final positions (even if dimensions changed or stale cache existed)
+  resolveOverlaps(
+    resultPositions,
+    newLayoutNodes.map((n) => n.id),
+    dims
+  );
 
   return newLayoutNodes.map((n) => {
     const pos = resultPositions.get(n.id) ?? n.position;
     existingPositions.set(n.id, pos);
     return { ...n, position: pos };
+  });
+}
+
+/**
+ * Recompute edge label coordinates (labelX, labelY, hasCollision) directly from the
+ * actual final node positions so edge labels can never float away from their edges.
+ */
+export function recomputeEdgeLabelPositions(
+  finalNodes: Node<AmeliorateNodeData>[],
+  edges: Edge<AmeliorateEdgeData>[],
+  dims?: Map<string, { width: number; height: number }>
+): Edge<AmeliorateEdgeData>[] {
+  const posMap = new Map(finalNodes.map((n) => [n.id, n.position]));
+  const nodeBoxes = finalNodes.map((n) => {
+    const { w, h } = getNodeSize(n.id, dims);
+    return {
+      xmin: n.position.x - 24,
+      xmax: n.position.x + w + 24,
+      ymin: n.position.y - 24,
+      ymax: n.position.y + h + 24,
+    };
+  });
+  const placedLabels: Array<{ x: number; y: number; w: number; h: number }> = [];
+
+  return edges.map((e) => {
+    const sPos = posMap.get(e.source);
+    const tPos = posMap.get(e.target);
+    const labelText = e.label ? String(e.label) : "";
+    if (!labelText || !sPos || !tPos || !e.data) {
+      return e;
+    }
+
+    const sSz = getNodeSize(e.source, dims);
+    const tSz = getNodeSize(e.target, dims);
+    const sx = sPos.x + sSz.w / 2;
+    const sy = sPos.y + sSz.h;
+    const tx = tPos.x + tSz.w / 2;
+    const ty = tPos.y;
+    const dy = ty - sy;
+
+    const p0: [number, number] = [sx, sy];
+    const c = Math.max(35, Math.abs(dy) * 0.45);
+    const p1: [number, number] = [sx, sy + c];
+    const p2: [number, number] = [tx, ty - c];
+    const p3: [number, number] = [tx, ty];
+
+    const lblW = Math.max(54, labelText.length * 6.5 + 20);
+    const lblH = 22;
+    const candidateTs = [0.5, 0.4, 0.6];
+    let chosenX: number | null = null;
+    let chosenY: number | null = null;
+
+    for (const t of candidateTs) {
+      const mt = 1 - t;
+      const cx = mt * mt * mt * p0[0] + 3 * mt * mt * t * p1[0] + 3 * mt * t * t * p2[0] + t * t * t * p3[0];
+      const cy = mt * mt * mt * p0[1] + 3 * mt * mt * t * p1[1] + 3 * mt * t * t * p2[1] + t * t * t * p3[1];
+
+      const collidesWithNode = nodeBoxes.some(
+        (b) => cx + lblW / 2 > b.xmin && cx - lblW / 2 < b.xmax && cy + lblH / 2 > b.ymin && cy - lblH / 2 < b.ymax
+      );
+      if (collidesWithNode) continue;
+
+      const collidesWithLabel = placedLabels.some((pl) => {
+        return Math.abs(cx - pl.x) < (lblW + pl.w) / 2 + 18 && Math.abs(cy - pl.y) < (lblH + pl.h) / 2 + 12;
+      });
+      if (collidesWithLabel) continue;
+
+      chosenX = cx;
+      chosenY = cy;
+      break;
+    }
+
+    if (chosenX !== null && chosenY !== null) {
+      placedLabels.push({ x: chosenX, y: chosenY, w: lblW, h: lblH });
+      return {
+        ...e,
+        data: {
+          ...e.data,
+          labelX: Math.round(chosenX),
+          labelY: Math.round(chosenY),
+          hasCollision: false,
+        },
+      };
+    }
+
+    return {
+      ...e,
+      data: {
+        ...e.data,
+        labelX: Math.round((sx + tx) / 2),
+        labelY: Math.round((sy + ty) / 2),
+        hasCollision: true,
+      },
+    };
   });
 }
 
@@ -899,15 +994,10 @@ export function buildAmeliorateFlowchartElements(
   const nodePosMap = new Map<string, { x: number; y: number }>();
 
   // Pack connected components in a balanced 2D grid matching viewport aspect ratio
-  const COMP_GAP_X = 140;
-  const COMP_GAP_Y = 120;
-  const targetRowWidth = Math.max(vpW * 1.15, 950);
+  const COMP_GAP_X = 120;
+  const COMP_GAP_Y = 100;
 
-  let cursorX = 50;
-  let cursorY = 40;
-  let rowMaxH = 0;
-
-  for (const comp of components) {
+  const compLayouts = components.map((comp) => {
     const compIds = new Set(comp.map((n) => n.id));
     const compEdges = validEdges.filter((e) => compIds.has(e.source) && compIds.has(e.target));
     const localPos = layoutComponent(comp, compEdges, aspectRatio, dims);
@@ -924,26 +1014,40 @@ export function buildAmeliorateFlowchartElements(
       minY = Math.min(minY, p.y);
       maxY = Math.max(maxY, p.y + sz.h);
     }
+    return {
+      comp,
+      localPos,
+      minX,
+      minY,
+      compW: Math.max(DEFAULT_NODE_W, maxX - minX),
+      compH: Math.max(DEFAULT_NODE_H, maxY - minY),
+    };
+  });
 
-    const compW = Math.max(DEFAULT_NODE_W, maxX - minX);
-    const compH = Math.max(DEFAULT_NODE_H, maxY - minY);
+  const totalArea = compLayouts.reduce((acc, c) => acc + (c.compW + COMP_GAP_X) * (c.compH + COMP_GAP_Y), 0);
+  const targetRowWidth = Math.max(vpW * 1.35, 1100, Math.round(Math.sqrt(totalArea * Math.max(1.1, aspectRatio))));
 
-    if (cursorX > 50 && cursorX + compW > targetRowWidth) {
+  let cursorX = 50;
+  let cursorY = 40;
+  let rowMaxH = 0;
+
+  for (const cl of compLayouts) {
+    if (cursorX > 50 && cursorX + cl.compW > targetRowWidth) {
       cursorX = 50;
       cursorY += rowMaxH + COMP_GAP_Y;
       rowMaxH = 0;
     }
 
-    for (const node of comp) {
-      const p = localPos.get(node.id) ?? { x: 0, y: 0 };
+    for (const node of cl.comp) {
+      const p = cl.localPos.get(node.id) ?? { x: 0, y: 0 };
       nodePosMap.set(node.id, {
-        x: Math.round(cursorX + (p.x - minX)),
-        y: Math.round(cursorY + (p.y - minY)),
+        x: Math.round(cursorX + (p.x - cl.minX)),
+        y: Math.round(cursorY + (p.y - cl.minY)),
       });
     }
 
-    cursorX += compW + COMP_GAP_X;
-    rowMaxH = Math.max(rowMaxH, compH);
+    cursorX += cl.compW + COMP_GAP_X;
+    rowMaxH = Math.max(rowMaxH, cl.compH);
   }
 
   // Final global overlap safeguard across all components

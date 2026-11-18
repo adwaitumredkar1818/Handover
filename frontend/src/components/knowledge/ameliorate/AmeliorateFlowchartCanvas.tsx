@@ -23,6 +23,7 @@ import {
 import { Expand, Minimize2, LayoutGrid, Scan } from "lucide-react";
 import {
   buildAmeliorateFlowchartElements,
+  recomputeEdgeLabelPositions,
   resolveIncrementalNodePositions,
   updateAmeliorateSpotlight,
   type AmeliorateEdgeData,
@@ -175,8 +176,21 @@ export function AmeliorateFlowchartCanvas({
   );
 
   // On base layout change (initial load or progressive new nodes arriving),
-  // preserve coordinates of previously positioned nodes and resolve local overlaps for new nodes only.
+  // preserve coordinates of previously positioned nodes on the same graph and recompute edge labels for final positions.
   useEffect(() => {
+    const newIds = new Set(baseLayout.nodes.map((n) => n.id));
+    if (positionsRef.current.size > 0 && newIds.size > 0) {
+      let overlapCount = 0;
+      for (const id of newIds) {
+        if (positionsRef.current.has(id)) overlapCount++;
+      }
+      // If more than half of the graph changed (e.g. tab/project switch), reset stale positions & re-fit
+      if (overlapCount / newIds.size < 0.5) {
+        positionsRef.current.clear();
+        hasFittedRef.current = false;
+      }
+    }
+
     const positionedNodes = resolveIncrementalNodePositions(
       baseLayout.nodes,
       baseLayout.edges,
@@ -184,9 +198,15 @@ export function AmeliorateFlowchartCanvas({
       measuredDimsRef.current
     );
 
-    const { nodes: updatedNodes, edges: updatedEdges } = updateAmeliorateSpotlight(
+    const alignedEdges = recomputeEdgeLabelPositions(
       positionedNodes,
       baseLayout.edges,
+      measuredDimsRef.current
+    );
+
+    const { nodes: updatedNodes, edges: updatedEdges } = updateAmeliorateSpotlight(
+      positionedNodes,
+      alignedEdges,
       selectedNodeId
     );
     setNodes(updatedNodes);

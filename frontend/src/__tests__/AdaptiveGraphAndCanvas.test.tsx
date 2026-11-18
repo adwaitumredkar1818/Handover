@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import {
   buildAmeliorateFlowchartElements,
+  recomputeEdgeLabelPositions,
   resolveIncrementalNodePositions,
   type HandoverGraphEdge,
   type HandoverGraphNode,
@@ -259,5 +260,51 @@ describe("Adaptive Graph Layouts, MiniMap & Fullscreen", () => {
 
     fireEvent.click(screen.getByTestId("mock-node-b"));
     expect(onSelectNode).toHaveBeenCalledTimes(1);
+  });
+
+  it("prevents vertical-column collapse and keeps edge labels aligned after incremental node shifts (100+ nodes & chain-like graphs)", () => {
+    // 1. Long chain-like Knowledge Intelligence graph (24 nodes) should use horizontal space rather than 1-column strip
+    const chainNodes = Array.from({ length: 24 }, (_, i) =>
+      makeNode(`k${i}`, i === 0 ? "project" : i % 3 === 0 ? "database" : "service")
+    );
+    const chainEdges = Array.from({ length: 23 }, (_, i) => makeEdge(`k${i}`, `k${i + 1}`, i));
+    const chainLayout = buildAmeliorateFlowchartElements(chainNodes, chainEdges, null, {
+      viewportWidth: 1280,
+      viewportHeight: 720,
+    });
+
+    assertNoNodeOverlaps(chainLayout.nodes);
+    const xs = chainLayout.nodes.map((n) => n.position.x);
+    const ys = chainLayout.nodes.map((n) => n.position.y);
+    const width = Math.max(...xs) - Math.min(...xs) + 204;
+    const height = Math.max(...ys) - Math.min(...ys) + 116;
+    expect(width).toBeGreaterThan(600);
+    expect(height / width).toBeLessThan(2.5);
+
+    // 2. Edge labels must stay aligned with their edges even after resolveIncrementalNodePositions moves nodes
+    const existing = new Map<string, { x: number; y: number }>();
+    existing.set("k0", { x: 900, y: 120 });
+    const shiftedNodes = resolveIncrementalNodePositions(chainLayout.nodes, chainLayout.edges, existing);
+    const realignedEdges = recomputeEdgeLabelPositions(shiftedNodes, chainLayout.edges);
+    const posMap = new Map(shiftedNodes.map((n) => [n.id, n.position]));
+    for (const edge of realignedEdges) {
+      const sp = posMap.get(edge.source)!;
+      const tp = posMap.get(edge.target)!;
+      const midX = (sp.x + 102 + tp.x + 102) / 2;
+      const midY = (sp.y + 116 + tp.y) / 2;
+      const lx = edge.data?.labelX ?? midX;
+      const ly = edge.data?.labelY ?? midY;
+      expect(Math.hypot(lx - midX, ly - midY)).toBeLessThan(Math.hypot(tp.x - sp.x, tp.y - sp.y) + 120);
+    }
+
+    // 3. 108-node large graph with mixed dimensions has zero overlaps
+    const largeNodes = Array.from({ length: 108 }, (_, i) => makeNode(`big${i}`));
+    const largeEdges = Array.from({ length: 107 }, (_, i) => makeEdge(`big${Math.floor(i / 4)}`, `big${i + 1}`, i));
+    const largeLayout = buildAmeliorateFlowchartElements(largeNodes, largeEdges, null, {
+      viewportWidth: 1440,
+      viewportHeight: 900,
+    });
+    expect(largeLayout.nodes).toHaveLength(108);
+    assertNoNodeOverlaps(largeLayout.nodes);
   });
 });
