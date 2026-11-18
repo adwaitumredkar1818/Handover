@@ -826,12 +826,19 @@ class GitHubSyncOrchestrator:
         else:
             report.items_unchanged += 1
 
-        # Periodically commit and signal worker so items appear live in Evidence Center
-        is_major_doc = record.category in (
-            EvidenceCategory.DESIGN_DOCUMENT.value,
-            EvidenceCategory.PROJECT_DOCUMENT.value,
+        # Commit in small batches so items, deterministic knowledge, and initial graphs appear live immediately
+        is_high_value = (
+            record.category
+            in (
+                EvidenceCategory.DESIGN_DOCUMENT.value,
+                EvidenceCategory.PROJECT_DOCUMENT.value,
+                "architecture_decision",
+            )
+            or is_manifest_path(record.title)
+            or (report.items_discovered <= 5)
+            or (report.items_discovered % 3 == 0)
         )
-        if is_major_doc or (report.items_discovered % 5 == 0):
+        if is_high_value:
             session = getattr(self._ingestor, "_session", None)
             if session is not None:
                 try:

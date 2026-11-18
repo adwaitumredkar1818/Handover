@@ -189,11 +189,15 @@ class SourceEvidenceIngestor:
             )
             self._existing_items_cache[cache_key] = existing
 
+        from app.services.fast_extractor import is_evidence_semantic_eligible
+
         text_len = len(record.extracted_text.strip())
-        is_semantic_eligible = (
-            record.category in ("documentation", "architecture", "pdf_document", "docx_document")
-            or record.mime_type in ("text/markdown", "application/pdf")
-            or text_len >= 200
+        is_semantic_eligible = is_evidence_semantic_eligible(
+            category=record.category,
+            title=title,
+            mime_type=record.mime_type,
+            text_len=text_len,
+            metadata_json=dict(record.metadata_json),
         )
         initial_semantic_status = "queued" if is_semantic_eligible else "not_applicable"
 
@@ -263,6 +267,14 @@ class SourceEvidenceIngestor:
                         attr_svc.attribute_evidence(created_item, flush=flush)
                 except Exception as exc:
                     logger.debug("Contribution attribution error on create: %s", exc)
+
+            # Stage 1: Immediate fast deterministic extraction without waiting for Ollama
+            try:
+                from app.services.fast_extractor import FastKnowledgeExtractor
+                FastKnowledgeExtractor(self._session).extract_evidence_knowledge(evidence=created_item)
+            except Exception as exc:
+                logger.debug("FastKnowledgeExtractor deterministic extraction notice on create: %s", exc)
+
             return UpsertEvidenceOutcome(action="created", evidence_item=created_item)
 
         if existing.content_hash == content_hash and existing.content is not None:
@@ -340,6 +352,14 @@ class SourceEvidenceIngestor:
                 ContributionAttributionService(self._session).attribute_evidence(existing)
             except Exception as exc:
                 logger.debug("Contribution attribution error on update: %s", exc)
+
+        # Stage 1: Immediate fast deterministic extraction on update
+        try:
+            from app.services.fast_extractor import FastKnowledgeExtractor
+            FastKnowledgeExtractor(self._session).extract_evidence_knowledge(evidence=existing)
+        except Exception as exc:
+            logger.debug("FastKnowledgeExtractor deterministic extraction notice on update: %s", exc)
+
         return UpsertEvidenceOutcome(action="updated", evidence_item=existing)
 
     def mark_item_inaccessible(
