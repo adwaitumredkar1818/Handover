@@ -50,7 +50,44 @@ export const people: Person[] = [
   { id: 'grace', name: 'Grace Liu', title: 'Security Engineer', email: 'grace.liu@northwind.io', color: '#475569', wsRole: 'Member', status: 'Invited' },
 ]
 
-export const personById = (id?: string): Person => people.find((p) => p.id === id) ?? people[0]!
+export const registerPerson = (person: Person) => {
+  if (!person || !person.id) return
+  const existing = people.findIndex((p) => p.id === person.id)
+  if (existing >= 0) {
+    people[existing] = { ...people[existing], ...person }
+  } else {
+    people.push(person)
+  }
+}
+
+export const registerPeople = (newPeople: Person[]) => {
+  newPeople.forEach(registerPerson)
+}
+
+export const personById = (id?: string): Person => {
+  if (!id) {
+    return {
+      id: '',
+      name: 'Unassigned',
+      title: 'None',
+      email: '',
+      color: '#94a3b8',
+      wsRole: 'Member',
+      status: 'Active'
+    }
+  }
+  const found = people.find((p) => p.id === id)
+  if (found) return found
+  return {
+    id,
+    name: 'Project Member',
+    title: 'Project Member',
+    email: '',
+    color: '#0F6CBD',
+    wsRole: 'Member',
+    status: 'Active'
+  }
+}
 export const initials = (name: string) => name.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase()
 
 export interface Project {

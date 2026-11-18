@@ -210,7 +210,7 @@ function NotificationsMenu() {
         <IconButton
           icon={Bell}
           label="Notifications"
-          badge={totalCount > 0 ? totalCount : undefined}
+          badge={mounted && totalCount > 0 ? totalCount : undefined}
         />
       )}
     >

@@ -364,14 +364,50 @@ class PackageAssemblyService:
         version_hash = hashlib.sha256("".join(section_hashes).encode("utf-8")).hexdigest()
         created_version.content_hash = version_hash
 
+        # Stage 6 package integrity guard: assembling a new version supersedes any prior
+        # approvals on older versions (preserving original signoff rows immutably)
+        if next_version_num > 1:
+            from app.models.handover import HandoverSignoff
+
+            prior_signoffs = list(
+                self.session.execute(
+                    select(HandoverSignoff).where(
+                        HandoverSignoff.case_id == case.id,
+                        HandoverSignoff.version_id != created_version.id,
+                        HandoverSignoff.is_superseded.is_(False),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if prior_signoffs:
+                for sig in prior_signoffs:
+                    sig.is_superseded = True
+                self.audit_service.record_event(
+                    event_type="handover.signoff.superseded_by_new_version",
+                    resource_type="handover_case",
+                    resource_id=str(case.id),
+                    actor_user_id=user_id,
+                    organisation_id=case.organisation_id,
+                    project_id=project_id,
+                    outcome=AuditOutcome.SUCCESS.value,
+                    metadata={
+                        "case_id": str(case.id),
+                        "new_version_id": str(created_version.id),
+                        "new_version_number": next_version_num,
+                        "superseded_signoff_count": len(prior_signoffs),
+                    },
+                )
+
         # Transition Case to ASSEMBLED
-        self.case_service.transition_status(
-            case_id,
-            project_id=project_id,
-            new_status=HandoverCaseStatus.ASSEMBLED.value,
-            user_id=user_id,
-            change_reason=f"Assembled package version {created_version.version_number}",
-        )
+        if case.status != HandoverCaseStatus.ASSEMBLED.value:
+            self.case_service.transition_status(
+                case_id,
+                project_id=project_id,
+                new_status=HandoverCaseStatus.ASSEMBLED.value,
+                user_id=user_id,
+                change_reason=f"Assembled package version {created_version.version_number}",
+            )
 
         self.audit_service.record_event(
             event_type="handover.package.assembled",

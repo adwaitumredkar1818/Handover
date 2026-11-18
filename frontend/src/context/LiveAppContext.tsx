@@ -13,6 +13,7 @@ import { usePathname } from "next/navigation";
 import { api, setStoredToken, setStoredUser, getStoredUser, ApiError } from "../lib/api";
 import { invalidateGraphCache, setGraphCacheUser } from "../lib/graphCache";
 import { createClient as createSupabaseClient } from "../lib/supabase/client";
+import { registerPerson } from "../lib/figmaStore";
 import type {
   User,
   Organisation,
@@ -536,6 +537,21 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Sync authenticated user into person registry
+  useEffect(() => {
+    if (user?.id) {
+      registerPerson({
+        id: user.id,
+        name: user.full_name || user.email?.split('@')[0] || 'User',
+        title: user.roles?.[0] || 'Member',
+        email: user.email || '',
+        color: '#0F6CBD',
+        wsRole: 'Admin',
+        status: 'Active'
+      });
+    }
+  }, [user]);
+
   // Once authenticated, load organisations
   const refreshOrganisations = useCallback(async () => {
     if (!user) return;
@@ -723,6 +739,20 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       setActiveProjectInternal((curr) => {
         if (curr?.id === currentProjectId) {
           setMembers(annotated);
+          annotated.forEach((m) => {
+            const memId = m.user_id || m.id;
+            if (memId) {
+              registerPerson({
+                id: memId,
+                name: m.full_name || m.email?.split('@')[0] || 'Member',
+                title: m.role_name || 'Member',
+                email: m.email || '',
+                color: '#0F6CBD',
+                wsRole: m.role_name === 'owner' ? 'Owner' : m.role_name === 'admin' ? 'Admin' : 'Member',
+                status: 'Active'
+              });
+            }
+          });
         }
         return curr;
       });

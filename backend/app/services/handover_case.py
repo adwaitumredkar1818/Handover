@@ -78,11 +78,13 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         HandoverCaseStatus.REJECTED.value,
         HandoverCaseStatus.REVIEW_PENDING.value,
         HandoverCaseStatus.READINESS_ASSESSED.value,
+        HandoverCaseStatus.ASSEMBLED.value,
         HandoverCaseStatus.ARCHIVED.value,
     },
     HandoverCaseStatus.APPROVED.value: {
         HandoverCaseStatus.DELIVERED.value,
         HandoverCaseStatus.UNDER_REVIEW.value,
+        HandoverCaseStatus.ASSEMBLED.value,
         HandoverCaseStatus.ARCHIVED.value,
         HandoverCaseStatus.SUPERSEDED.value,
     },
@@ -219,8 +221,10 @@ class HandoverCaseService:
         if case.status in (
             HandoverCaseStatus.APPROVED.value,
             HandoverCaseStatus.DELIVERED.value,
+            HandoverCaseStatus.ACKNOWLEDGED.value,
             HandoverCaseStatus.TRANSFERRED.value,
             HandoverCaseStatus.ARCHIVED.value,
+            HandoverCaseStatus.SUPERSEDED.value,
         ):
             raise BadRequestError(
                 f"Cannot update case in locked status '{case.status}'."
@@ -231,6 +235,10 @@ class HandoverCaseService:
         if request.description is not None:
             case.description = request.description
         if request.successor_id is not None:
+            if request.successor_id == case.departing_member_id:
+                raise BadRequestError(
+                    "The designated successor cannot be the same user as the departing member."
+                )
             case.successor_id = request.successor_id
         if request.metadata_json is not None:
             case.metadata_json = request.metadata_json
