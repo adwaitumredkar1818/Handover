@@ -1,6 +1,6 @@
 'use client'
 
-import { useContext, type ReactNode } from 'react'
+import { useContext, useState, useEffect, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
@@ -598,7 +598,7 @@ function IncomingDash({ project }: { project: Project }) {
   ]
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" suppressHydrationWarning>
       <MetricBand
         items={[
           { label: 'Received handovers', value: received.length, tone: 'blue', onClick: () => router.push('/handovers/received') },
@@ -728,7 +728,7 @@ function MemberDash({ project }: { project: Project }) {
   const myTasks = f.tasks.filter((t) => t.status !== 'Done')
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" suppressHydrationWarning>
       <MetricBand
         items={[
           { label: 'Project status', value: 'Active', hint: project.name, tone: 'blue', onClick: () => router.push('/projects') },
@@ -827,50 +827,57 @@ function EmptyWorkspace({
   project?: Project | null
 }) {
   const router = useRouter()
-  const isComplete = projectsCount > 0 && connectedSourcesCount > 0 && membersCount > 0 && activeHandoversCount > 0
-  const completedCount = [projectsCount > 0, connectedSourcesCount > 0, membersCount > 0, activeHandoversCount > 0].filter(Boolean).length
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+
+  const isComplete = mounted && projectsCount > 0 && connectedSourcesCount > 0 && membersCount > 0 && activeHandoversCount > 0
+  const completedCount = mounted
+    ? [projectsCount > 0, connectedSourcesCount > 0, membersCount > 0, activeHandoversCount > 0].filter(Boolean).length
+    : 0
 
   const steps = [
     {
       icon: FolderPlus,
-      title: projectsCount > 0 ? 'Project workspace' : 'Create your first project',
-      body: projectsCount > 0 ? `${activeProjectName} active in ${orgName}` : 'Projects group sources, members and handovers.',
+      title: mounted && projectsCount > 0 ? 'Project workspace' : 'Create your first project',
+      body: mounted && projectsCount > 0 ? `${activeProjectName} active in ${orgName}` : 'Projects group sources, members and handovers.',
       to: '/projects',
       cta: 'Create project',
-      done: projectsCount > 0,
+      done: mounted && projectsCount > 0,
       completedCta: 'View projects',
     },
     {
       icon: Plug,
-      title: connectedSourcesCount > 0 ? 'Data sources connected' : 'Connect a data source',
-      body: connectedSourcesCount > 0 ? `${connectedSourcesCount} active source${connectedSourcesCount > 1 ? 's' : ''} syncing live` : 'GitHub, Jira, Slack or document uploads.',
+      title: mounted && connectedSourcesCount > 0 ? 'Data sources connected' : 'Connect a data source',
+      body: mounted && connectedSourcesCount > 0 ? `${connectedSourcesCount} active source${connectedSourcesCount > 1 ? 's' : ''} syncing live` : 'GitHub, Jira, Slack or document uploads.',
       to: project ? `/evidence` : '/projects',
       cta: 'Connect source',
-      done: connectedSourcesCount > 0,
+      done: mounted && connectedSourcesCount > 0,
       completedCta: 'View sources',
     },
     {
       icon: UserPlus,
-      title: membersCount > 0 ? 'Team workspace configured' : 'Invite your team',
-      body: membersCount > 0 ? `${membersCount} active participant${membersCount > 1 ? 's' : ''} assigned` : 'Managers, outgoing and incoming members.',
+      title: mounted && membersCount > 0 ? 'Team workspace configured' : 'Invite your team',
+      body: mounted && membersCount > 0 ? `${membersCount} active participant${membersCount > 1 ? 's' : ''} assigned` : 'Managers, outgoing and incoming members.',
       to: '/team',
       cta: 'Invite',
-      done: membersCount > 0,
+      done: mounted && membersCount > 0,
       completedCta: 'Manage team',
     },
     {
       icon: Workflow,
-      title: activeHandoversCount > 0 ? 'Handover pipeline active' : 'Start a handover',
-      body: activeHandoversCount > 0 ? `${activeHandoversCount} handover in verification review` : 'Reconstruct knowledge and verify it with people.',
+      title: mounted && activeHandoversCount > 0 ? 'Handover pipeline active' : 'Start a handover',
+      body: mounted && activeHandoversCount > 0 ? `${activeHandoversCount} handover in verification review` : 'Reconstruct knowledge and verify it with people.',
       to: '/handovers',
       cta: 'Create handover',
-      done: activeHandoversCount > 0,
+      done: mounted && activeHandoversCount > 0,
       completedCta: 'View handovers',
     },
   ]
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" suppressHydrationWarning>
       <MetricBand
         items={[
           {
@@ -907,16 +914,16 @@ function EmptyWorkspace({
           },
         ]}
       />
-      <Card className="p-6 sm:p-8">
-        <div className="flex flex-col justify-between gap-6 sm:flex-row sm:items-center">
-          <div>
+      <Card className="p-6 sm:p-8" suppressHydrationWarning>
+        <div className="flex flex-col justify-between gap-6 sm:flex-row sm:items-center" suppressHydrationWarning>
+          <div suppressHydrationWarning>
             <SectionLabel>
               {isComplete ? 'Workspace Readiness · All 4 milestones completed' : `Getting started · ${completedCount} of 4 completed`}
             </SectionLabel>
-            <h2 className="mt-3 text-[22px] font-semibold tracking-[-0.02em] text-navy">
+            <h2 className="mt-3 text-[22px] font-semibold tracking-[-0.02em] text-navy" suppressHydrationWarning>
               {orgName} Knowledge Workspace
             </h2>
-            <p className="mt-1 max-w-xl text-[14px] text-muted">
+            <p className="mt-1 max-w-xl text-[14px] text-muted" suppressHydrationWarning>
               {isComplete
                 ? 'All foundational workspace milestones are active. Connected sources are continuously indexing and reconstructing project knowledge with full provenance.'
                 : 'Complete the foundational setup milestones to connect repositories, documents, and teams into the knowledge reconstruction pipeline.'}
@@ -924,7 +931,7 @@ function EmptyWorkspace({
           </div>
           <SphereVisual variant={isComplete ? "full" : "empty"} emptyKind="project" interactive={false} className="mx-auto size-36 shrink-0 sm:mx-0" />
         </div>
-        <ol className="mt-7 grid gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-2 lg:grid-cols-4">
+        <ol className="mt-7 grid gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-2 lg:grid-cols-4" suppressHydrationWarning>
           {steps.map((st, i) => (
             <li key={st.title} className="flex flex-col bg-white p-5">
               <div className="flex items-center justify-between">
@@ -939,8 +946,8 @@ function EmptyWorkspace({
                   <Mono className="text-[11px] text-slate-400">0{i + 1}</Mono>
                 </div>
               </div>
-              <p className="mt-4 text-[14px] font-semibold text-navy">{st.title}</p>
-              <p className="mt-1 flex-1 text-[12.5px] text-muted">{st.body}</p>
+              <p className="mt-4 text-[14px] font-semibold text-navy" suppressHydrationWarning>{st.title}</p>
+              <p className="mt-1 flex-1 text-[12.5px] text-muted" suppressHydrationWarning>{st.body}</p>
               <Button
                 size="sm"
                 variant={st.done ? 'secondary' : (i === 0 ? 'primary' : 'secondary')}
@@ -960,6 +967,10 @@ function EmptyWorkspace({
 function DashboardContent() {
   const router = useRouter()
   const s = useFigmaStore()
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => {
+    setMounted(true)
+  }, [])
   const {
     user,
     activeOrg,
@@ -1070,7 +1081,7 @@ function DashboardContent() {
       <div className="mb-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="flex items-center gap-2 text-[12.5px] text-muted">
+            <p className="flex items-center gap-2 text-[12.5px] text-muted" suppressHydrationWarning>
               {today}
               <span className="text-slate-300">·</span>
               {effectiveRole === 'member' ? (
@@ -1110,7 +1121,7 @@ function DashboardContent() {
           project={p}
         />
 
-        {p && (
+        {mounted && p && (
           <div className="mt-8 border-t border-line pt-6">
             <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>

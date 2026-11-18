@@ -248,11 +248,11 @@ export function CardHeader({ title, subtitle, action, icon: Icon, className }: {
 }
 export function PageHeader({ title, subtitle, actions, eyebrow }: { title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; eyebrow?: ReactNode }) {
   return (
-    <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-      <div className="min-w-0">
-        {eyebrow && <div className="mb-1.5">{eyebrow}</div>}
-        <h1 className="text-[26px] font-semibold tracking-[-0.025em] text-navy sm:text-[30px]">{title}</h1>
-        {subtitle && <p className="mt-1.5 max-w-2xl text-[14px] leading-relaxed text-muted">{subtitle}</p>}
+    <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between" suppressHydrationWarning>
+      <div className="min-w-0" suppressHydrationWarning>
+        {eyebrow && <div className="mb-1.5" suppressHydrationWarning>{eyebrow}</div>}
+        <h1 className="text-[26px] font-semibold tracking-[-0.025em] text-navy sm:text-[30px]" suppressHydrationWarning>{title}</h1>
+        {subtitle && <p className="mt-1.5 max-w-2xl text-[14px] leading-relaxed text-muted" suppressHydrationWarning>{subtitle}</p>}
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </div>
@@ -274,6 +274,10 @@ export function Kpi({ label, value, icon: Icon, hint, tone = 'blue', trend }: { 
 
 /** A single band of metrics divided by hairlines, used instead of rows of identical KPI cards. */
 export function MetricBand({ items, className }: { items: { label: string; value: ReactNode; hint?: ReactNode; tone?: Tone; onClick?: () => void; spark?: number[] }[]; className?: string }) {
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => {
+    setMounted(true)
+  }, [])
   const dot: Record<string, string> = { blue: 'bg-brand', green: 'bg-ok', amber: 'bg-warn', red: 'bg-bad', indigo: 'bg-ai', gray: 'bg-slate-300', navy: 'bg-navy' }
   const sc: Record<string, string> = { blue: '#315FBA', green: '#299B80', amber: '#D39B43', red: '#D36D72', indigo: '#8B78C9', gray: '#A0AEC0', navy: '#203653' }
   return (
@@ -282,10 +286,10 @@ export function MetricBand({ items, className }: { items: { label: string; value
         <button key={m.label} type="button" onClick={m.onClick} disabled={!m.onClick} className={cn('group relative rounded-[14px] border border-line/85 bg-white px-4 py-4 text-left sm:px-5', m.onClick ? 'tile cursor-pointer' : 'shadow-card')}>
           <p className="flex items-center gap-2 text-[12.5px] font-medium text-muted"><span className={cn('size-1.5 rounded-full', dot[m.tone ?? 'blue'])} />{m.label}</p>
           <div className="mt-2.5 flex items-end justify-between gap-3">
-            <p className="text-[28px] font-semibold leading-none tracking-[-0.035em] text-navy tabular-nums sm:text-[30px]">{m.value}</p>
-            {m.spark && <Sparkline values={m.spark} color={sc[m.tone ?? 'blue']} />}
+            <p className="text-[28px] font-semibold leading-none tracking-[-0.035em] text-navy tabular-nums sm:text-[30px]" suppressHydrationWarning>{m.value}</p>
+            {mounted && m.spark && <Sparkline values={m.spark} color={sc[m.tone ?? 'blue']} />}
           </div>
-          {m.hint && <p className="mt-2 text-xs text-muted">{m.hint}</p>}
+          {m.hint && <p className="mt-2 text-xs text-muted" suppressHydrationWarning>{m.hint}</p>}
         </button>
       ))}
     </div>
@@ -295,7 +299,7 @@ export function MetricBand({ items, className }: { items: { label: string; value
 export function Sparkline({ values, color = '#315FBA', w = 72, h = 26 }: { values: number[]; color?: string; w?: number; h?: number }) {
   const max = Math.max(...values), min = Math.min(...values)
   const pts = values.map((v, i) => `${(i / (values.length - 1)) * w},${h - 2 - ((v - min) / (max - min || 1)) * (h - 4)}`).join(' ')
-  return <svg width={w} height={h} className="shrink-0" aria-hidden><polyline points={pts} fill="none" stroke={color} strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" opacity="0.85" /></svg>
+  return <svg width={w} height={h} className="shrink-0" aria-hidden suppressHydrationWarning><polyline points={pts} fill="none" stroke={color} strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" opacity="0.85" /></svg>
 }
 
 export function Mono({ children, className }: { children: ReactNode; className?: string }) {
@@ -303,7 +307,7 @@ export function Mono({ children, className }: { children: ReactNode; className?:
 }
 
 export function SectionLabel({ children, className }: { children: ReactNode; className?: string }) {
-  return <p className={cn('text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400', className)}>{children}</p>
+  return <p className={cn('text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400', className)} suppressHydrationWarning>{children}</p>
 }
 
 /* Form controls */

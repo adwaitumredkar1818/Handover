@@ -27,30 +27,76 @@ import {
 import { useLiveApp } from "../../context/LiveAppContext";
 import { useProjectProcessingStatus } from "../../hooks/useProjectProcessingStatus";
 
-function getLifecycleBadge(stage?: string) {
-  const s = (stage || "imported").toLowerCase();
-  switch (s) {
-    case "discovered":
-      return { label: "Discovered", bg: "bg-slate-100 text-slate-700 border-slate-200", isSpinning: false };
-    case "imported":
-      return { label: "Imported", bg: "bg-blue-50 text-blue-700 border-blue-200", isSpinning: false };
-    case "indexing":
-      return { label: "Indexing", bg: "bg-amber-50 text-amber-700 border-amber-200", isSpinning: true };
-    case "indexed":
-      return { label: "Indexed", bg: "bg-cyan-50 text-cyan-800 border-cyan-200", isSpinning: false };
-    case "extracting":
-      return { label: "Extracting", bg: "bg-purple-50 text-purple-700 border-purple-200", isSpinning: true };
-    case "knowledge_ready":
-      return { label: "Knowledge Ready", bg: "bg-emerald-50 text-emerald-800 border-emerald-300", isSpinning: false };
-    case "graph_updated":
-      return { label: "Graph Updated", bg: "bg-emerald-100 text-emerald-800 border-emerald-400 font-bold", isSpinning: false };
-    case "failed":
-      return { label: "Failed", bg: "bg-rose-50 text-rose-700 border-rose-200", isSpinning: false };
-    case "not_applicable":
-      return { label: "Not Applicable", bg: "bg-slate-100 text-slate-600 border-slate-200", isSpinning: false };
-    default:
-      return { label: stage || "Imported", bg: "bg-slate-100 text-slate-700 border-slate-200", isSpinning: false };
+interface RowBadgeSpec {
+  label: string;
+  bg: string;
+  isSpinning: boolean;
+}
+
+function getRowStateBadges(
+  lifecycleStage?: string | null,
+  semanticStatus?: string | null,
+  processingStatus?: string | null
+): RowBadgeSpec[] {
+  const stage = (lifecycleStage || "imported").toLowerCase();
+  const sem = (semanticStatus || "").toLowerCase();
+  const proc = (processingStatus || "").toLowerCase();
+
+  if (proc === "failed" || stage === "failed" || sem === "failed") {
+    return [
+      {
+        label: "Failed",
+        bg: "bg-rose-50 text-rose-700 border-rose-200",
+        isSpinning: false,
+      },
+    ];
   }
+
+  if (stage === "discovered" || stage === "imported") {
+    return [
+      {
+        label: "Imported",
+        bg: "bg-blue-50 text-blue-700 border-blue-200",
+        isSpinning: false,
+      },
+    ];
+  }
+
+  const badges: RowBadgeSpec[] = [
+    {
+      label: "Deterministic processing complete",
+      bg: "bg-teal-50 text-teal-800 border-teal-200 font-medium",
+      isSpinning: false,
+    },
+  ];
+
+  if (sem === "running" || sem === "extracting" || stage === "extracting") {
+    badges.push({
+      label: "Semantic extraction running",
+      bg: "bg-purple-50 text-purple-700 border-purple-200",
+      isSpinning: true,
+    });
+  } else if (sem === "succeeded" || sem === "completed" || sem === "ready") {
+    badges.push({
+      label: "Semantic extraction complete",
+      bg: "bg-emerald-100 text-emerald-800 border-emerald-400 font-bold",
+      isSpinning: false,
+    });
+  } else if (sem === "queued") {
+    badges.push({
+      label: "Semantic extraction queued",
+      bg: "bg-amber-50 text-amber-800 border-amber-200",
+      isSpinning: false,
+    });
+  } else {
+    badges.push({
+      label: "Not applicable",
+      bg: "bg-slate-100 text-slate-600 border-slate-200",
+      isSpinning: false,
+    });
+  }
+
+  return badges;
 }
 
 // Helper to render category badges consistently
@@ -120,6 +166,7 @@ export function EvidenceCenterView() {
     selectedEvidenceId,
     selectedEvidence,
     setSelectedEvidenceId,
+    refreshEvidence,
     isLoadingEvidence,
     isLoadingEvidenceDetail,
     evidenceFilter,
@@ -137,6 +184,28 @@ export function EvidenceCenterView() {
   const [copiedMetadataKey, setCopiedMetadataKey] = useState<string | null>(null);
   const [expandedChunkIds, setExpandedChunkIds] = useState<Record<string, boolean>>({});
   const [syncingMappingId, setSyncingMappingId] = useState<string | null>(null);
+  const initialEvidenceProjectRef = React.useRef<string | null>(null);
+  const lastFetchedTotalRef = React.useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!activeProject?.id) return;
+    if (initialEvidenceProjectRef.current !== activeProject.id) {
+      initialEvidenceProjectRef.current = activeProject.id;
+      lastFetchedTotalRef.current = null;
+      void refreshEvidence();
+    }
+  }, [activeProject?.id, refreshEvidence]);
+
+  useEffect(() => {
+    if (!activeProject?.id || !projectStatus) return;
+    if (
+      projectStatus.total_evidence_count > evidenceList.length &&
+      projectStatus.total_evidence_count !== lastFetchedTotalRef.current
+    ) {
+      lastFetchedTotalRef.current = projectStatus.total_evidence_count;
+      void refreshEvidence();
+    }
+  }, [activeProject?.id, projectStatus, evidenceList.length, refreshEvidence]);
 
   const formatBytes = (bytes?: number | null) => {
     if (!bytes || bytes <= 0) return "—";
@@ -275,6 +344,20 @@ export function EvidenceCenterView() {
                 <RefreshCw className="w-2.5 h-2.5 animate-spin" />
                 <span>{projectStatus.stage_label || "Processing live"}</span>
               </span>
+            )}
+            {/* Two-Stage Pipeline Indicators */}
+            {projectStatus && projectStatus.total_evidence_count > 0 && (
+              <div className="hidden xl:flex items-center gap-1.5 text-[11px]">
+                <span className="px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-200 font-medium" title="Stage 1: Directly parsed without LLM">
+                  Stage 1: {projectStatus.deterministic_ready ?? 0} ready
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-purple-50 text-purple-800 border border-purple-200 font-medium" title="Stage 2: Background semantic extraction by Qwen3">
+                  Stage 2: {projectStatus.semantic_ready ?? 0} ready{projectStatus.semantic_queued ? ` (${projectStatus.semantic_queued} queued)` : ""}
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 font-medium" title="Knowledge items published to interactive graphs">
+                  Graphs: {projectStatus.knowledge_item_count} items
+                </span>
+              </div>
             )}
           </div>
           <span className="hidden sm:inline">|</span>
@@ -528,6 +611,13 @@ export function EvidenceCenterView() {
                 const provBadge = getProviderBadge(item.provider, item.source_type);
                 const catBadge = getCategoryBadge(item.category, item.source_type);
                 const isUpload = provBadge.label === "UPLOAD";
+                const liveState = projectStatus?.item_states?.[item.id];
+                const rowBadges = getRowStateBadges(
+                  liveState?.lifecycle_stage ?? item.lifecycle_stage,
+                  liveState?.semantic_status ?? item.semantic_status,
+                  liveState?.processing_status ?? item.processing_status
+                );
+                const liveKCount = liveState?.knowledge_count ?? item.knowledge_count;
 
                 return (
                   <div
@@ -547,18 +637,18 @@ export function EvidenceCenterView() {
                         <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${catBadge.bg}`}>
                           {catBadge.label}
                         </span>
-                        {(() => {
-                          const stageBadge = getLifecycleBadge(item.lifecycle_stage);
-                          return (
-                            <span className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded border flex items-center gap-1 ${stageBadge.bg}`}>
-                              {stageBadge.isSpinning && <RefreshCw className="w-2.5 h-2.5 animate-spin" />}
-                              <span>{stageBadge.label}</span>
-                            </span>
-                          );
-                        })()}
-                        {item.knowledge_count != null && item.knowledge_count > 0 && (
+                        {rowBadges.map((stageBadge) => (
+                          <span
+                            key={stageBadge.label}
+                            className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border flex items-center gap-1 ${stageBadge.bg}`}
+                          >
+                            {stageBadge.isSpinning && <RefreshCw className="w-2.5 h-2.5 animate-spin" />}
+                            <span>{stageBadge.label}</span>
+                          </span>
+                        ))}
+                        {liveKCount != null && liveKCount > 0 && (
                           <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-300">
-                            +{item.knowledge_count} items
+                            +{liveKCount} items
                           </span>
                         )}
                         <span className="text-[10px] text-[#69778D] font-mono">
