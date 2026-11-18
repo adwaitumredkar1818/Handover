@@ -104,10 +104,13 @@ class BackgroundJobRepository:
                 )
             ),
         )
+        now = utc_now()
         target_id = str(mapping_id)
         for job in self._session.execute(stmt).scalars().all():
             payload = job.payload_json or {}
             if str(payload.get("mapping_id") or "") == target_id:
+                if job.status == BackgroundJobStatus.RUNNING.value and job.lease_expires_at and job.lease_expires_at < now:
+                    continue
                 return True
         return False
 

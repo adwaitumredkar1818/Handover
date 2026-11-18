@@ -208,6 +208,7 @@ def create_organisation_source(
     )
 
     gh_profile = None
+    slack_info = None
     provider_lower = payload.provider.lower()
     if provider_lower == "github":
         from app.core.config import get_settings
@@ -223,11 +224,24 @@ def create_organisation_source(
                 gh_profile = None
             else:
                 raise
+    elif provider_lower == "slack":
+        from app.core.config import get_settings
+        from app.services.integrations.slack_client import SlackClient
+        slack_client = SlackClient(settings=get_settings())
+        try:
+            slack_info = slack_client.auth_test(access_token=payload.secret_token)
+        except Exception:
+            slack_info = None
 
     gh_login = str(gh_profile.get("login") or "") if gh_profile else None
     gh_id = str(gh_profile.get("id") or "") if gh_profile else None
+    slack_team = str(slack_info.get("team") or "") if slack_info else None
+    slack_team_id = str(slack_info.get("team_id") or "") if slack_info else None
+
     if provider_lower == "github" and gh_login:
         account_identifier = gh_login
+    elif provider_lower == "slack" and (slack_team or slack_team_id):
+        account_identifier = payload.account_identifier or slack_team or slack_team_id or "slack_workspace"
     else:
         account_identifier = payload.account_identifier or gh_login or gh_id or f"{provider_lower}_user"
 
@@ -240,7 +254,9 @@ def create_organisation_source(
     )
 
     display_name = payload.display_name or (
-        f"GitHub (@{gh_login})" if gh_login else f"{payload.provider.capitalize()} ({account_identifier})"
+        f"GitHub (@{gh_login})" if gh_login else (
+            f"Slack ({slack_team})" if slack_team else f"{payload.provider.capitalize()} ({account_identifier})"
+        )
     )
 
     conn_metadata: dict[str, Any] = {
@@ -256,6 +272,8 @@ def create_organisation_source(
             "avatar_url": gh_profile.get("avatar_url"),
             "rate_limit": gh_profile.get("_rate_limit"),
         }
+    if slack_info:
+        conn_metadata["slack_workspace"] = slack_info
 
     # Check if connection already exists for this provider and identifier in this organisation
     stmt = select(SourceConnection).where(

@@ -107,15 +107,31 @@ class EvidenceSummaryResponse(BaseSchema):
         if isinstance(data, dict):
             if not data.get("provider"):
                 cat = str(data.get("category") or "")
+                src_prov = str(data.get("source_provider") or "")
                 if cat == "pdf_document":
                     data["provider"] = "pdf"
                 elif cat == "docx_document":
                     data["provider"] = "docx"
-                elif data.get("source_provider") in ("github", "jira", "slack"):
-                    data["provider"] = data.get("source_provider")
+                elif src_prov in ("github", "jira", "slack"):
+                    data["provider"] = src_prov
                 else:
-                    data["provider"] = data.get("source_provider") or "upload"
+                    data["provider"] = src_prov or "upload"
         return data
+
+    @model_validator(mode="after")
+    def _ensure_provider_set(self) -> EvidenceSummaryResponse:
+        if not self.provider:
+            cat = str(self.category or "")
+            src_prov = str(self.source_provider or "")
+            if cat == "pdf_document":
+                self.provider = "pdf"
+            elif cat == "docx_document":
+                self.provider = "docx"
+            elif src_prov in ("github", "jira", "slack"):
+                self.provider = src_prov
+            else:
+                self.provider = src_prov or "upload"
+        return self
 
 
 class EvidenceChunkDetailResponse(BaseSchema):

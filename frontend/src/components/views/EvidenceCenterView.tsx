@@ -100,6 +100,7 @@ export function EvidenceCenterView() {
     setIsAddSourceModalOpen,
     downloadEvidence,
     addToast,
+    activeJobs,
   } = useLiveApp();
 
   const [activeTab, setActiveTab] = useState<"chunks" | "metadata">("chunks");
@@ -108,6 +109,16 @@ export function EvidenceCenterView() {
   const [copiedMetadataKey, setCopiedMetadataKey] = useState<string | null>(null);
   const [expandedChunkIds, setExpandedChunkIds] = useState<Record<string, boolean>>({});
   const [syncingMappingId, setSyncingMappingId] = useState<string | null>(null);
+
+  const isMappingSyncing = (mappingId: string) => {
+    return (
+      syncingMappingId === mappingId ||
+      activeJobs.some((j) => {
+        if (j.job_type !== "source_sync") return false;
+        return j.mapping_id === mappingId;
+      })
+    );
+  };
 
   const formatBytes = (bytes?: number | null) => {
     if (!bytes || bytes <= 0) return "—";
@@ -174,6 +185,9 @@ export function EvidenceCenterView() {
         } else if (evidenceFilter.provider === "jira") {
           const isJira = prov === "jira" || srcType === "jira" || srcProv === "jira";
           if (!isJira) return false;
+        } else if (evidenceFilter.provider === "slack") {
+          const isSlack = prov === "slack" || srcType === "slack" || srcProv === "slack";
+          if (!isSlack) return false;
         }
       }
 
@@ -325,16 +339,37 @@ export function EvidenceCenterView() {
                           </div>
                         </div>
                         <span className={`text-[9px] uppercase px-1.5 py-0.5 rounded font-bold ${
-                          mapping.status === "active" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"
+                          isMappingSyncing(mapping.id)
+                            ? "bg-sky-100 text-sky-800 animate-pulse border border-sky-300"
+                            : mapping.status === "active"
+                            ? "bg-emerald-50 text-emerald-700"
+                            : "bg-amber-50 text-amber-700"
                         }`}>
-                          {mapping.status}
+                          {isMappingSyncing(mapping.id) ? "Syncing..." : mapping.status}
                         </span>
                       </div>
 
-                      <div className="text-[10px] text-[#69778D] mt-1 truncate">
-                        Key: {mapping.external_resource_key}
+                      <div className="text-[10px] text-[#69778D] mt-1 flex items-center justify-between">
+                        <span className="truncate">Key: {mapping.external_resource_key}</span>
+                        <span className="font-semibold text-[#25334B] ml-2 shrink-0">
+                          {evidenceList.filter((e) => (e.provider || e.source_provider || e.source_type || "").toLowerCase() === (mapping.provider || "").toLowerCase()).length} records
+                        </span>
                       </div>
-                      {(mapping.status === "error" || mapping.last_error_code) && (
+                      {(() => {
+                        const activeJob = activeJobs.find(
+                          (j) => j.job_type === "source_sync" && j.mapping_id === mapping.id
+                        );
+                        if (isMappingSyncing(mapping.id) && activeJob?.message) {
+                          return (
+                            <div className="mt-1 text-[10px] text-[#249E91] font-medium truncate flex items-center gap-1">
+                              <RefreshCw className="w-2.5 h-2.5 animate-spin shrink-0" />
+                              <span>{activeJob.message}</span>
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
+                      {(mapping.status === "error" || mapping.last_error_code) && !isMappingSyncing(mapping.id) && (
                         <div className="mt-1.5 p-1.5 rounded bg-amber-50 border border-amber-200 text-[10px] text-amber-800 flex items-center justify-between gap-2">
                           <span className="truncate" title={mapping.last_error_summary || mapping.last_error_code || ""}>
                             {mapping.last_error_code === "GITHUB_REPO_ACCESS_REVOKED"
@@ -353,18 +388,20 @@ export function EvidenceCenterView() {
 
                       <div className="mt-2.5 pt-2 border-t border-[#DCE3EB] flex items-center justify-between">
                         <span className="text-[10px] text-[#69778D]">
-                          {mapping.last_synced_at
+                          {isMappingSyncing(mapping.id)
+                            ? "Sync in progress..."
+                            : mapping.last_synced_at
                             ? `Synced ${new Date(mapping.last_synced_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
                             : "Not synced yet"}
                         </span>
                         <button
                           type="button"
-                          disabled={syncingMappingId === mapping.id}
+                          disabled={isMappingSyncing(mapping.id)}
                           onClick={() => handleSync(mapping.id)}
                           className="px-2 py-1 rounded bg-[#E8EEF5] hover:bg-[#DCE3EB] text-[#4774A9] text-[10px] font-semibold flex items-center gap-1 transition-colors disabled:opacity-50"
                         >
-                          <RefreshCw className={`w-3 h-3 ${syncingMappingId === mapping.id ? "animate-spin" : ""}`} />
-                          <span>Sync Now</span>
+                          <RefreshCw className={`w-3 h-3 ${isMappingSyncing(mapping.id) ? "animate-spin text-[#249E91]" : ""}`} />
+                          <span>{isMappingSyncing(mapping.id) ? "Syncing..." : "Sync Now"}</span>
                         </button>
                       </div>
                     </div>
@@ -406,7 +443,7 @@ export function EvidenceCenterView() {
 
             {/* Provider Filter Tabs */}
             <div className="flex items-center gap-1 overflow-x-auto text-[11px] font-semibold">
-              {["all", "upload", "github", "jira"].map((prov) => (
+              {["all", "upload", "github", "jira", "slack"].map((prov) => (
                 <button
                   key={prov}
                   type="button"
@@ -462,6 +499,14 @@ export function EvidenceCenterView() {
                     <div className="font-semibold text-[#25334B]">No Jira Evidence Found</div>
                     <p className="text-[11px] max-w-xs mt-1 text-[#69778D]">
                       Connect a Jira project in Panel A or trigger a sync to ingest issues.
+                    </p>
+                  </>
+                ) : evidenceFilter.provider === "slack" ? (
+                  <>
+                    <Database className="w-8 h-8 text-purple-500 opacity-70 mb-2" />
+                    <div className="font-semibold text-[#25334B]">No Slack Evidence Found</div>
+                    <p className="text-[11px] max-w-xs mt-1 text-[#69778D]">
+                      Connect a Slack channel in Panel A or trigger a sync to ingest messages.
                     </p>
                   </>
                 ) : (
