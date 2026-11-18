@@ -338,8 +338,9 @@ export function AssistantWorkspaceView() {
           } else if (line.startsWith("data: ")) {
             try {
               const dataObj = JSON.parse(line.slice(6).trim());
-              if (dataObj.payload?.chunk) {
-                setLiveStreamingAnswer((prev) => prev + dataObj.payload.chunk);
+              const delta = dataObj.payload?.delta || dataObj.payload?.chunk;
+              if (delta) {
+                setLiveStreamingAnswer((prev) => prev + delta);
               }
             } catch {
               // Non-JSON SSE payload

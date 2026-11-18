@@ -1,75 +1,30 @@
 "use client";
 
-import React, { useEffect, useRef } from "react";
-import { CircleAlert, RefreshCw } from "lucide-react";
+import React from "react";
+import { CircleAlert, Network, RefreshCw } from "lucide-react";
 import { SourceIcon } from "../brand";
-
-function useReveal<T extends HTMLElement>() {
-  const ref = useRef<T>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((e) => {
-          if (e.isIntersecting) {
-            e.target.classList.add("is-in");
-            io.unobserve(e.target);
-          }
-        });
-      },
-      { threshold: 0.12 }
-    );
-    el.querySelectorAll(".reveal").forEach((n) => io.observe(n));
-    return () => io.disconnect();
-  }, []);
-  return ref;
-}
+import { OrganicScene } from "../brand/OrganicScene";
+import { useReveal } from "./hooks/useReveal";
+import { useElementScrollProgress } from "./motion/useElementScrollProgress";
+import { useReducedMotion } from "./motion/useReducedMotion";
 
 export function ProblemSection() {
-  const ref = useReveal<HTMLElement>();
+  const revealRef = useReveal<HTMLDivElement>();
+  const { ref: scrollRef, progress: scrollProgress } = useElementScrollProgress<HTMLElement>({
+    startOffset: 0.9,
+    endOffset: 0.25,
+  });
+  const reducedMotion = useReducedMotion();
+
+  // As the visitor scrolls through the problem narrative, connection filaments fade
+  const filamentOpacity = reducedMotion ? 0.55 : Math.max(0.16, 0.9 - scrollProgress * 0.75);
+  const driftOffset = reducedMotion ? 0 : Math.round((scrollProgress - 0.5) * 14);
 
   const rows = [
     {
       num: "01",
-      title: "Scattered knowledge",
-      body: "Critical information is distributed across repositories, pull requests, issue trackers, conversations and private documents, with no single owner and no unified place.",
-      visual: (
-        <div className="relative h-40 w-full max-w-[320px]">
-          {[
-            { type: "github" as const, x: 8, y: 18, rot: -6, animClass: "animate-float-1" },
-            { type: "slack" as const, x: 62, y: 8, rot: 5, animClass: "animate-float-2" },
-            { type: "jira" as const, x: 28, y: 60, rot: -3, animClass: "animate-float-3" },
-            { type: "docs" as const, x: 74, y: 62, rot: 7, animClass: "animate-float-4" },
-          ].map((item) => (
-            <div
-              key={item.type}
-              className={`absolute flex items-center gap-2 rounded-xl border border-[#D9E1F0] bg-white px-3 py-2 shadow-card ${item.animClass}`}
-              style={{
-                left: `${item.x}%`,
-                top: `${item.y}%`,
-              }}
-            >
-              <SourceIcon type={item.type} size={22} />
-              <span className="h-1.5 w-12 rounded-full bg-slate-100" />
-            </div>
-          ))}
-          <svg className="absolute inset-0 h-full w-full pointer-events-none" aria-hidden>
-            {/* Broken dashed paths with subtle flicker to convey fragmented context */}
-            <path d="M90 50 L160 42" stroke="#D9E1F0" strokeDasharray="3 5" className="animate-flicker" />
-            <path d="M150 110 L230 112" stroke="#D9E1F0" strokeDasharray="3 5" className="animate-flicker" style={{ animationDelay: "1.4s" }} />
-
-            {/* Faint fragmented evidence particles that travel along connections before dissolving */}
-            <circle cx="0" cy="0" r="2.5" fill="#315FBA" className="animate-particle-1" />
-            <circle cx="0" cy="0" r="2.5" fill="#7997BE" className="animate-particle-2" />
-          </svg>
-        </div>
-      ),
-    },
-    {
-      num: "02",
-      title: "Lost context",
-      body: "Teams inherit architecture and legacy code without understanding why choices were made: the operational constraints, rejected alternatives, and trade-offs made under pressure.",
+      title: "Decisions without context",
+      body: "Teams inherit architecture and production code without knowing why choices were made: the constraints, rejected alternatives, and trade-offs negotiated under pressure in scattered threads.",
       visual: (
         <div className="w-full max-w-[310px] rounded-2xl border border-[#D9E1F0] bg-white p-4.5 shadow-card">
           <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-[#718096]">
@@ -90,21 +45,67 @@ export function ProblemSection() {
               />
             ))}
           </div>
-          <div className="mt-3.5 flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11.5px] font-medium text-red-600 animate-alert-breathe">
+          <div className="mt-3.5 flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11.5px] font-medium text-red-600 animate-alert-breathe">
             <CircleAlert className="size-3.5 shrink-0" />
-            <span>Author left the team without documentation</span>
+            <span>Author moved on without recorded rationale</span>
+          </div>
+        </div>
+      ),
+    },
+    {
+      num: "02",
+      title: "Hidden dependencies",
+      body: "Service links, credential rotation schedules, and blocking migrations sit isolated across GitHub pull requests, Jira tickets, Slack messages, and unlinked docs with fading traceability.",
+      visual: (
+        <div className="relative h-44 w-full max-w-[320px] rounded-2xl border border-[#D9E1F0] bg-[#F8FAFD] p-3 overflow-hidden">
+          {[
+            { type: "github" as const, x: 8, y: 16, animClass: "animate-float-1" },
+            { type: "slack" as const, x: 58, y: 10, animClass: "animate-float-2" },
+            { type: "jira" as const, x: 18, y: 60, animClass: "animate-float-3" },
+            { type: "docs" as const, x: 66, y: 62, animClass: "animate-float-4" },
+          ].map((item, idx) => (
+            <div
+              key={item.type}
+              className={`absolute flex items-center gap-2 rounded-xl border border-[#D9E1F0] bg-white px-2.5 py-1.5 shadow-card ${item.animClass}`}
+              style={{
+                left: `${item.x}%`,
+                top: `${item.y}%`,
+                transform: `translateY(${idx % 2 === 0 ? driftOffset * 0.4 : -driftOffset * 0.4}px)`,
+              }}
+            >
+              <SourceIcon type={item.type} size={22} />
+              <span className="h-1.5 w-10 rounded-full bg-slate-100" />
+            </div>
+          ))}
+          <svg
+            className="absolute inset-0 h-full w-full pointer-events-none transition-opacity duration-300"
+            style={{ opacity: filamentOpacity }}
+            aria-hidden="true"
+          >
+            <path d="M90 50 L175 42" stroke="#D36D72" strokeDasharray="3 5" strokeWidth="1.4" />
+            <path d="M135 120 L215 122" stroke="#D39B43" strokeDasharray="3 5" strokeWidth="1.4" />
+            <path d="M85 65 L105 112" stroke="#7997BE" strokeDasharray="2 6" strokeWidth="1.2" />
+            <circle cx="0" cy="0" r="2.5" fill="#315FBA" className="animate-particle-1" />
+            <circle cx="0" cy="0" r="2.5" fill="#D36D72" className="animate-particle-2" />
+          </svg>
+          <div className="absolute bottom-2 left-3 right-3 flex items-center justify-between font-mono text-[10px] text-[#718096]">
+            <span className="flex items-center gap-1">
+              <Network className="size-3 text-[#D39B43]" />
+              Severed trace links
+            </span>
+            <span className="text-red-500 font-semibold">Fragmenting</span>
           </div>
         </div>
       ),
     },
     {
       num: "03",
-      title: "Repeated work",
-      body: "Incoming team members spend their first months rediscovering what already existed, re-asking settled questions, and stumbling into risks that were identified long ago.",
+      title: "Unfinished work and undocumented responsibilities",
+      body: "Incoming engineers spend months rediscovering incomplete migrations, edge-case timeout behaviors, and manual runbooks that no static wiki ever kept up to date.",
       visual: (
         <div className="flex w-full max-w-[320px] items-center gap-4">
           <div className="relative shrink-0">
-            <svg width="84" height="84" viewBox="0 0 96 96" aria-hidden>
+            <svg width="84" height="84" viewBox="0 0 96 96" aria-hidden="true">
               <circle cx="48" cy="48" r="36" fill="none" stroke="#EDF1F8" strokeWidth="8" />
               <path
                 d="M48 12 A36 36 0 1 1 13 40"
@@ -144,42 +145,54 @@ export function ProblemSection() {
   ];
 
   return (
-    <section ref={ref} className="bg-white py-24 sm:py-32">
-      <div className="mx-auto w-full max-w-[1240px] px-5 sm:px-8">
+    <section ref={scrollRef} className="relative bg-white py-24 sm:py-32 overflow-x-clip">
+      {/* Subtle Ambient Fragmented Canvas Backing */}
+      <div className="pointer-events-none absolute inset-y-0 right-0 w-full lg:w-[45%] opacity-35">
+        <OrganicScene
+          variant="fragmented"
+          progress={scrollProgress}
+          showTags={false}
+          interactive={false}
+          className="h-full w-full"
+          label="Fragmented organizational knowledge drifting apart"
+        />
+      </div>
+
+      <div ref={revealRef} className="relative z-10 mx-auto w-full max-w-[1240px] px-5 sm:px-8">
         <div className="grid gap-14 grid-cols-1 lg:grid-cols-[0.9fr_1.1fr] lg:gap-20">
           {/* Left Sticky Problem Anchor */}
-          <div className="lg:sticky lg:top-32 lg:self-start">
-            <div className="reveal">
+          <div className="lg:sticky lg:top-28 lg:self-start">
+            <div className="reveal-left">
               <p className="flex items-center gap-2 text-[12.5px] font-semibold uppercase tracking-[0.16em] text-[#315FBA]">
                 <span className="h-px w-6 bg-current opacity-60" />
                 The Problem
-                <span className="ml-auto font-mono text-[10px] tracking-[0.12em] text-[#7997BE]/70 sm:hidden">
-                  SEC_01
-                </span>
               </p>
             </div>
-            <h2 className="reveal mt-5 text-[34px] font-semibold leading-[1.06] tracking-[-0.035em] text-[#203653] sm:text-[44px] lg:text-[50px]">
-              Projects don&apos;t lose progress. They lose context.
+            <h2 className="reveal-left mt-5 text-[34px] font-semibold leading-[1.06] tracking-[-0.035em] text-[#203653] sm:text-[44px] lg:text-[50px]">
+              When people leave, knowledge leaves with them.
             </h2>
-            <p className="reveal mt-6 max-w-md text-[17px] leading-[1.65] text-[#56657c]">
-              When someone moves on, the next person doesn&apos;t just inherit tasks.
-              They inherit decisions, unwritten assumptions, technical dependencies, and years of accumulated understanding.
+            <p className="reveal-left mt-4 text-[18px] font-medium text-[#315FBA]">
+              Project knowledge is fragile.
+            </p>
+            <p className="reveal-left mt-4 max-w-md text-[16.5px] leading-[1.65] text-[#56657c]">
+              When an engineer or lead moves on, the next team doesn&apos;t just inherit open tickets. They inherit years of unwritten architectural decisions, hidden service dependencies, and operational edge cases no documentation tool ever connected.
             </p>
           </div>
 
           {/* Right Structured Problem List */}
-          <ol className="divide-y divide-[#D9E1F0] border-y border-[#D9E1F0]">
-            {rows.map((r) => (
+          <ol className="divide-y divide-[#D9E1F0] border-y border-[#D9E1F0] bg-white/85 backdrop-blur-xs">
+            {rows.map((r, idx) => (
               <li
                 key={r.num}
+                data-stagger-index={idx}
                 className="reveal grid gap-6 py-10 sm:grid-cols-[1fr_310px] sm:items-center"
               >
                 <div>
-                  <p className="font-mono text-[13px] text-[#7997BE]">{r.num}</p>
-                  <h3 className="mt-2 text-[26px] font-semibold tracking-[-0.025em] text-[#203653]">
+                  <p className="font-mono text-[13px] font-semibold text-[#7997BE]">{r.num}</p>
+                  <h3 className="mt-2 text-[22px] sm:text-[25px] font-semibold tracking-[-0.025em] text-[#203653]">
                     {r.title}
                   </h3>
-                  <p className="mt-2.5 max-w-sm text-[15.5px] leading-relaxed text-[#56657c]">
+                  <p className="mt-2.5 max-w-sm text-[15px] leading-relaxed text-[#56657c]">
                     {r.body}
                   </p>
                 </div>

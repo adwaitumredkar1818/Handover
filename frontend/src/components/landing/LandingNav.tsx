@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   ChevronDown,
   Menu,
@@ -10,58 +10,79 @@ import {
   Sparkles,
   Workflow,
   ShieldCheck,
-  Compass,
   Send,
   Inbox,
+  FileSearch,
+  Bot,
+  Plug,
 } from "lucide-react";
 import { Logo } from "../brand";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { useRouter } from "next/navigation";
+import { useScrollProgress } from "./motion/useScrollProgress";
 
 const PRODUCT_MENU = [
   {
+    icon: Sparkles,
+    title: "Knowledge Intelligence",
+    body: "Reconstructs 8 domains of project knowledge with citations",
+    id: "intelligence",
+  },
+  {
+    icon: Plug,
+    title: "Connected Sources",
+    body: "Fine-grained, ACL-enforced connections to repos, tickets, threads & docs",
+    id: "sources",
+  },
+  {
+    icon: FileSearch,
+    title: "Evidence Center",
+    body: "Three-panel workspace tracing findings to raw evidence",
+    id: "evidence",
+  },
+  {
     icon: Network,
     title: "Knowledge Explorer",
-    body: "See how decisions, people and systems connect",
+    body: "Interactive graph linking decisions, tasks, people & components",
     id: "explorer",
   },
   {
-    icon: Sparkles,
-    title: "Knowledge Intelligence",
-    body: "Decisions, responsibilities, risks, dependencies",
-    id: "intelligence",
+    icon: Bot,
+    title: "Knowledge Assistant",
+    body: "Grounded Q&A with strict citations and uncertainty disclosure",
+    id: "assistant",
   },
   {
     icon: Workflow,
     title: "Structured Handovers",
-    body: "Verified, publishable transition packages",
+    body: "Verified, publishable transition dossiers for incoming members",
     id: "handovers",
   },
   {
     icon: ShieldCheck,
-    title: "Evidence & Verification",
-    body: "Every finding traced to its source",
+    title: "Trust & Governance",
+    body: "Four-tier epistemic separation and human verification gates",
     id: "security",
   },
 ];
 
 const SOLUTIONS_MENU = [
   {
-    icon: Compass,
-    title: "Project Managers",
-    body: "See every transition clearly across projects",
+    icon: Send,
+    title: "Departing Members",
+    body: "Review reconstructed findings and leave critical context effortlessly",
     id: "roles",
   },
   {
-    icon: Send,
-    title: "Outgoing Members",
-    body: "Leave the knowledge, not just the role",
+    icon: ShieldCheck,
+    title: "Technical Reviewers",
+    body: "Verify candidate findings against original evidence and approve packages",
     id: "roles",
   },
   {
     icon: Inbox,
-    title: "Incoming Members",
-    body: "Step into the project with complete context",
+    title: "Incoming Successors",
+    body: "Step into the project with complete, verified architectural context",
     id: "roles",
   },
 ];
@@ -76,8 +97,8 @@ const scrollToSection = (id: string) => {
 export function LandingNav() {
   const { user } = useLiveApp();
   const router = useRouter();
+  const { isScrolled } = useScrollProgress();
   const [mounted, setMounted] = useState(false);
-  const [scrolled, setScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [productOpen, setProductOpen] = useState(false);
   const [solutionsOpen, setSolutionsOpen] = useState(false);
@@ -86,14 +107,34 @@ export function LandingNav() {
     setMounted(true);
   }, []);
 
+  // Handle escape key to close open menus
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setProductOpen(false);
+        setSolutionsOpen(false);
+        setMobileMenuOpen(false);
+      }
+    },
+    []
+  );
+
   useEffect(() => {
-    const handleScroll = () => {
-      setScrolled(window.scrollY > 12);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handleKeyDown]);
+
+  // Lock body scroll when mobile menu is active
+  useEffect(() => {
+    if (mobileMenuOpen) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
     };
-    handleScroll();
-    window.addEventListener("scroll", handleScroll, { passive: true });
-    return () => window.removeEventListener("scroll", handleScroll);
-  }, []);
+  }, [mobileMenuOpen]);
 
   const handleAuthAction = (mode: "login" | "register") => {
     if (user) {
@@ -106,8 +147,8 @@ export function LandingNav() {
   return (
     <header
       className={`sticky top-0 z-40 transition-all duration-300 ${
-        scrolled
-          ? "border-b border-[#D9E1F0]/80 bg-white/85 backdrop-blur-xl shadow-xs"
+        isScrolled
+          ? "border-b border-[#D9E1F0]/80 bg-white/90 backdrop-blur-xl shadow-xs"
           : "border-b border-transparent bg-transparent"
       }`}
     >
@@ -116,7 +157,7 @@ export function LandingNav() {
         <button
           onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
           className="flex items-center gap-2 cursor-pointer focus:outline-none"
-          aria-label="Handover home"
+          aria-label="The Handover home"
         >
           <Logo size={28} />
         </button>
@@ -145,7 +186,7 @@ export function LandingNav() {
               />
             </button>
             <div
-              className={`absolute left-1/2 top-full w-[380px] -translate-x-1/2 pt-2 transition-all duration-200 ${
+              className={`absolute left-1/2 top-full w-[410px] -translate-x-1/2 pt-2 transition-all duration-200 ${
                 productOpen
                   ? "visible translate-y-0 opacity-100"
                   : "invisible -translate-y-1 opacity-0 pointer-events-none"
@@ -159,16 +200,16 @@ export function LandingNav() {
                       setProductOpen(false);
                       scrollToSection(item.id);
                     }}
-                    className="flex w-full items-start gap-3 rounded-xl p-3 text-left transition hover:bg-[#F6F8FC] cursor-pointer"
+                    className="flex w-full items-start gap-3 rounded-xl p-2.5 text-left transition hover:bg-[#F6F8FC] cursor-pointer"
                   >
                     <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-[#D9E1F0] bg-white text-[#315FBA]">
                       <item.icon className="size-4" />
                     </span>
                     <span>
-                      <span className="block text-[14px] font-semibold text-[#203653]">
+                      <span className="block text-[13.5px] font-semibold text-[#203653]">
                         {item.title}
                       </span>
-                      <span className="block text-[12.5px] text-[#718096]">
+                      <span className="block text-[12px] leading-snug text-[#718096]">
                         {item.body}
                       </span>
                     </span>
@@ -205,7 +246,7 @@ export function LandingNav() {
               />
             </button>
             <div
-              className={`absolute left-1/2 top-full w-[360px] -translate-x-1/2 pt-2 transition-all duration-200 ${
+              className={`absolute left-1/2 top-full w-[380px] -translate-x-1/2 pt-2 transition-all duration-200 ${
                 solutionsOpen
                   ? "visible translate-y-0 opacity-100"
                   : "invisible -translate-y-1 opacity-0 pointer-events-none"
@@ -219,16 +260,16 @@ export function LandingNav() {
                       setSolutionsOpen(false);
                       scrollToSection(item.id);
                     }}
-                    className="flex w-full items-start gap-3 rounded-xl p-3 text-left transition hover:bg-[#F6F8FC] cursor-pointer"
+                    className="flex w-full items-start gap-3 rounded-xl p-2.5 text-left transition hover:bg-[#F6F8FC] cursor-pointer"
                   >
                     <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-[#D9E1F0] bg-white text-[#315FBA]">
                       <item.icon className="size-4" />
                     </span>
                     <span>
-                      <span className="block text-[14px] font-semibold text-[#203653]">
+                      <span className="block text-[13.5px] font-semibold text-[#203653]">
                         {item.title}
                       </span>
-                      <span className="block text-[12.5px] text-[#718096]">
+                      <span className="block text-[12px] leading-snug text-[#718096]">
                         {item.body}
                       </span>
                     </span>
@@ -238,7 +279,7 @@ export function LandingNav() {
             </div>
           </div>
 
-          {/* Security Link */}
+          {/* Trust & Security Link */}
           <button
             onClick={() => scrollToSection("security")}
             className="h-10 rounded-lg px-3.5 text-[14.5px] font-medium text-[#3e5373] transition hover:text-[#203653] cursor-pointer"
@@ -297,11 +338,11 @@ export function LandingNav() {
       {/* Mobile Menu Overlay & Drawer */}
       {mobileMenuOpen && (
         <div
-          className="fixed inset-0 z-50 bg-[#203653]/30 backdrop-blur-xs lg:hidden"
+          className="fixed inset-0 z-50 bg-[#203653]/40 backdrop-blur-xs lg:hidden"
           onClick={() => setMobileMenuOpen(false)}
         >
           <div
-            className="ml-auto flex h-full w-[86%] max-w-sm flex-col bg-white p-6 shadow-pop"
+            className="ml-auto flex h-full w-[86%] max-w-sm flex-col bg-white p-6 shadow-pop overflow-y-auto animate-slide"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between">
@@ -315,9 +356,9 @@ export function LandingNav() {
               </button>
             </div>
 
-            <div className="mt-8 flex-1 overflow-y-auto space-y-2">
+            <div className="mt-8 flex-1 space-y-2">
               <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                Product
+                Product Modules
               </p>
               {PRODUCT_MENU.map((item) => (
                 <button
@@ -326,19 +367,19 @@ export function LandingNav() {
                     setMobileMenuOpen(false);
                     setTimeout(() => scrollToSection(item.id), 50);
                   }}
-                  className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[14.5px] font-medium text-[#203653] hover:bg-[#F6F8FC] cursor-pointer"
+                  className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-[14px] font-medium text-[#203653] hover:bg-[#F6F8FC] cursor-pointer"
                 >
-                  <item.icon className="size-4 text-[#315FBA]" />
-                  {item.title}
+                  <item.icon className="size-4 text-[#315FBA] shrink-0" />
+                  <span>{item.title}</span>
                 </button>
               ))}
 
               <p className="px-3 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                Explore
+                Explore &amp; Solutions
               </p>
               {([
                 ["How it works", "how"],
-                ["Solutions", "roles"],
+                ["Role Experiences", "roles"],
                 ["Trust & Security", "security"],
                 ["FAQ", "faq"],
               ] as const).map(([label, id]) => (
@@ -348,14 +389,14 @@ export function LandingNav() {
                     setMobileMenuOpen(false);
                     setTimeout(() => scrollToSection(id), 50);
                   }}
-                  className="block w-full rounded-xl px-3 py-2.5 text-left text-[14.5px] font-medium text-[#203653] hover:bg-[#F6F8FC] cursor-pointer"
+                  className="block w-full rounded-xl px-3 py-2 text-left text-[14px] font-medium text-[#203653] hover:bg-[#F6F8FC] cursor-pointer"
                 >
                   {label}
                 </button>
               ))}
             </div>
 
-            <div className="mt-auto pt-6 border-t border-[#D9E1F0] space-y-2.5">
+            <div className="mt-6 pt-6 border-t border-[#D9E1F0] space-y-2.5">
               {mounted && user ? (
                 <button
                   onClick={() => {

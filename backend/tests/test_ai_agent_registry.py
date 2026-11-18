@@ -51,3 +51,41 @@ def test_dynamic_agent_factory_permission_boundary() -> None:
     # Security agent requires assistant.admin -> should fail closed with ForbiddenError
     with pytest.raises(ForbiddenError):
         DynamicAgentFactory.create_worker(agent_id="security_agent", project_ctx=mock_ctx)
+
+
+@pytest.mark.anyio
+async def test_multi_agent_delegation_selection() -> None:
+    """Verify that multi-facet queries dispatch bounded multi-agent workers (max 2)."""
+    from app.models.enums import AssistantResponseMode
+    from app.services.ai.orchestrator import ProjectIntelligenceOrchestrator
+    from app.services.ai.state import InvestigationState
+
+    orchestrator = ProjectIntelligenceOrchestrator(
+        session=MagicMock(),
+        settings=MagicMock(),
+        retrieval_service=MagicMock(),
+        llm_reasoner=MagicMock(),
+        validator=MagicMock(),
+    )
+
+    mock_ctx = MagicMock()
+    mock_ctx.has_permission.return_value = True
+
+    # Multi-facet query spanning architecture and database
+    state = InvestigationState(
+        investigation_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        organisation_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        user_role="admin",
+        query="What architecture decisions were made regarding the database schema?",
+        response_mode=AssistantResponseMode.STANDARD,
+    )
+
+    res_state = await orchestrator._node_delegate_agents(state, project_ctx=mock_ctx)
+    assert len(res_state.agent_findings) == 2
+    # Expect decision_agent and database_agent
+    roles = [f.claim_text for f in res_state.agent_findings]
+    assert any("decision_agent" in f.finding_id or "Decision" in roles[0] or "Decision" in roles[1] for f in res_state.agent_findings)
+

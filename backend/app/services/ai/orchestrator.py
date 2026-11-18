@@ -258,29 +258,41 @@ class ProjectIntelligenceOrchestrator:
         state: InvestigationState,
         project_ctx: ProjectContext,
     ) -> InvestigationState:
-        """Dynamically instantiate and dispatch approved specialized agents based on query scope."""
+        """Dynamically instantiate and dispatch approved specialized agents based on query scope.
+        
+        Supports bounded multi-agent collaboration (max 2 agents) executed sequentially
+        to respect the single-GPU concurrency semaphore on RTX 4050 6GB VRAM.
+        """
         state.current_node = "delegate_agents"
         self.registry.update_state(state)
 
-        # Policy-based agent selection based on target domains and response mode
-        target_agent_id = "knowledge_agent"
+        # Policy-based multi-agent selection based on query facets
         query_lower = state.query.lower()
+        candidate_agent_ids: list[str] = []
+
         if any(w in query_lower for w in ("architecture", "adr", "decision", "choice", "design")):
-            target_agent_id = "decision_agent"
-        elif any(w in query_lower for w in ("code", "commit", "pr", "pull request", "git", "function")):
-            target_agent_id = "engineering_agent"
-        elif any(w in query_lower for w in ("database", "table", "schema", "postgres", "sql", "migration")):
-            target_agent_id = "database_agent"
-        elif any(w in query_lower for w in ("api", "endpoint", "route", "openapi", "rest")):
-            target_agent_id = "api_agent"
-        elif any(w in query_lower for w in ("handover", "transition", "checklist", "readiness")):
-            target_agent_id = "planning_agent"
+            candidate_agent_ids.append("decision_agent")
+        if any(w in query_lower for w in ("code", "commit", "pr", "pull request", "git", "function", "diff")):
+            candidate_agent_ids.append("engineering_agent")
+        if any(w in query_lower for w in ("database", "table", "schema", "postgres", "sql", "migration", "column")):
+            candidate_agent_ids.append("database_agent")
+        if any(w in query_lower for w in ("api", "endpoint", "route", "openapi", "rest")):
+            candidate_agent_ids.append("api_agent")
+        if any(w in query_lower for w in ("handover", "transition", "checklist", "readiness")):
+            candidate_agent_ids.append("planning_agent")
 
-        agent_def = AgentRegistry.get(target_agent_id)
-        if not agent_def:
-            agent_def = AgentRegistry.get("knowledge_agent")
+        # Fallback to knowledge_agent if no specific domain triggered
+        if not candidate_agent_ids:
+            candidate_agent_ids.append("knowledge_agent")
 
-        if agent_def:
+        # Enforce bounded execution (max 2 agents) to preserve token budget & latency
+        selected_agent_ids = candidate_agent_ids[:2]
+
+        for target_agent_id in selected_agent_ids:
+            agent_def = AgentRegistry.get(target_agent_id)
+            if not agent_def:
+                continue
+
             # Emit agent_selected event
             await self.registry.emit_event(
                 state.investigation_id,
@@ -340,7 +352,7 @@ class ProjectIntelligenceOrchestrator:
                     {"finding_id": finding.finding_id, "agent_id": agent_def.agent_id},
                 )
             except Exception as exc:
-                logger.warning("Agent worker execution failed non-fatally: %s", exc)
+                logger.warning("Agent worker '%s' execution failed non-fatally: %s", target_agent_id, exc)
                 await self.registry.emit_event(
                     state.investigation_id,
                     "agent_failed",
@@ -361,9 +373,18 @@ class ProjectIntelligenceOrchestrator:
         )
 
         available_labels = [c.citation_label for c in state.citations_manifest]
+        
+        # Integrate dynamic agent findings into synthesis prompt context
+        combined_evidence = state.evidence_prompt or ""
+        if state.agent_findings:
+            agent_summary_lines = ["\n\n--- SPECIALIZED AGENT FINDINGS ---"]
+            for f in state.agent_findings:
+                agent_summary_lines.append(f"[{f.agent_id}]: {f.claim_text}")
+            combined_evidence += "\n".join(agent_summary_lines)
+
         payload, telemetry = self.llm_reasoner.generate_answer(
             question=state.query,
-            evidence_prompt=state.evidence_prompt,
+            evidence_prompt=combined_evidence,
             response_mode=state.response_mode,
             available_citation_labels=available_labels,
         )

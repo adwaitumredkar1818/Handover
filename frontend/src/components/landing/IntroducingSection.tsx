@@ -1,50 +1,101 @@
 "use client";
 
-import React, { useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import {
-  ArrowRight,
   Check,
   ShieldCheck,
   Lightbulb,
   UserRound,
   AlertTriangle,
   Network,
+  Sparkles,
+  ArrowRight,
 } from "lucide-react";
-import { LogoMark, SourceIcon } from "../brand";
+import { SourceIcon } from "../brand";
 import { OrganicScene } from "../brand/OrganicScene";
+import { useReveal } from "./hooks/useReveal";
+import { useElementScrollProgress } from "./motion/useElementScrollProgress";
+import { useReducedMotion } from "./motion/useReducedMotion";
 
-function useReveal<T extends HTMLElement>() {
-  const ref = useRef<T>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((e) => {
-          if (e.isIntersecting) {
-            e.target.classList.add("is-in");
-            io.unobserve(e.target);
-          }
-        });
-      },
-      { threshold: 0.12 }
-    );
-    el.querySelectorAll(".reveal").forEach((n) => io.observe(n));
-    return () => io.disconnect();
-  }, []);
-  return ref;
-}
+const STAGES = [
+  {
+    num: 1 as const,
+    tag: "STAGE 1 — BRING IT TOGETHER",
+    title: "Bring It Together",
+    subtitle: "Authorized sources converge without disrupting workflows",
+    description:
+      "Scattered repositories, Jira sprints, Slack architecture threads, and runbook PDFs converge toward a unified project knowledge core without disrupting daily tools.",
+    items: [
+      { type: "github" as const, name: "payment-core", label: "Pull requests & commits" },
+      { type: "jira" as const, name: "PAY · SPRINT-34", label: "Sprint issues & blockers" },
+      { type: "slack" as const, name: "#payments-arch", label: "Threaded discussions" },
+      { type: "docs" as const, name: "ADR-007 & Runbooks", label: "Uploaded PDF & DOCX" },
+    ],
+  },
+  {
+    num: 2 as const,
+    tag: "STAGE 2 — RECONSTRUCT AND STRUCTURE",
+    title: "Reconstruct and Structure",
+    subtitle: "AI maps findings across eight canonical domains",
+    description:
+      "Fragmented artifacts transform into organized findings across eight canonical domains, preserving source provenance, author timestamps, and contradiction flags.",
+    features: [
+      "Extract decisions, ownership, and risks",
+      "Link candidate findings to original evidence",
+      "Surface contradictions and missing context",
+      "Preserve four-tier epistemic separation",
+    ],
+  },
+  {
+    num: 3 as const,
+    tag: "STAGE 3 — VERIFY AND HAND OVER",
+    title: "Verify and Hand Over",
+    subtitle: "Human reviewers evaluate and sign off verified knowledge",
+    description:
+      "Human reviewers validate candidate findings with distinct teal verification, assembling an auditable handover dossier ready for the incoming team.",
+    verifications: [
+      { type: "Decision", name: "Event-driven settlement via Kafka", status: "Verified" },
+      { type: "Responsibility", name: "Acquirer credential rotation", status: "Verified" },
+      { type: "Risk", name: "No retry on acquirer timeouts", status: "Review" },
+      { type: "Dependency", name: "Settlement -> Platform Vault", status: "Review" },
+    ],
+  },
+] as const;
 
 export function IntroducingSection() {
-  const ref = useReveal<HTMLElement>();
+  const revealRef = useReveal<HTMLDivElement>();
+  const { ref: scrollRef, progress: scrollProgress } = useElementScrollProgress<HTMLElement>({
+    startOffset: 0.85,
+    endOffset: 0.2,
+  });
+  const reducedMotion = useReducedMotion();
+
+  const scrollDerivedStage: 1 | 2 | 3 =
+    scrollProgress < 0.38 ? 1 : scrollProgress < 0.72 ? 2 : 3;
+
+  const [activeStage, setActiveStage] = useState<1 | 2 | 3>(1);
+
+  // Sync scroll progress smoothly unless user manually clicks
+  useEffect(() => {
+    setActiveStage(scrollDerivedStage);
+  }, [scrollDerivedStage]);
+
+  const sceneProgress =
+    activeStage === 1
+      ? 0.35
+      : activeStage === 2
+      ? 0.72
+      : 1.0;
+
+  const currentStage = STAGES.find((s) => s.num === activeStage) ?? STAGES[0]!;
 
   return (
     <section
-      ref={ref}
-      id="product"
-      className="ambient-section relative overflow-hidden py-24 sm:py-32"
+      ref={scrollRef}
+      id="introducing"
+      className="ambient-section relative overflow-x-clip py-24 sm:py-32 bg-[#F8FAFD] border-y border-[#D9E1F0]/70"
     >
-      <div className="mx-auto w-full max-w-[1240px] px-5 sm:px-8">
+      <div ref={revealRef} className="mx-auto w-full max-w-[1240px] px-5 sm:px-8">
         {/* Section Heading */}
         <div className="mx-auto max-w-3xl text-center">
           <div className="reveal flex justify-center">
@@ -54,206 +105,240 @@ export function IntroducingSection() {
             </p>
           </div>
           <h2 className="reveal mt-5 text-[34px] font-semibold leading-[1.06] tracking-[-0.035em] text-[#203653] sm:text-[44px] lg:text-[52px]">
-            One place for everything your project knows.
+            One system. Complete project understanding.
           </h2>
           <p className="reveal mx-auto mt-6 max-w-2xl text-[17px] leading-[1.65] text-[#56657c]">
-            Handover connects authorized organizational sources, reconstructs fragmented project context into structured records with full provenance, surfaces conflicts, and produces auditable transition packages.
+            Handover connects authorized organizational sources, reconstructs fragmented context into structured records with full provenance, surfaces conflicts, and produces auditable transition packages.
           </p>
         </div>
 
-        {/* Dynamic Assembly Canvas — Organic Knowledge Core */}
-        <div className="reveal relative mx-auto mt-12 max-w-[1140px] rounded-2xl border border-[#D9E1F0]/70 bg-gradient-to-b from-white/70 via-[#F6F8FC]/50 to-white/80 p-2 sm:p-4 shadow-[0_4px_24px_-4px_rgba(32,54,83,0.06)] backdrop-blur-xs">
-          <div className="h-[360px] w-full sm:h-[440px] lg:h-[480px]">
-            <OrganicScene
-              variant="assemble"
-              className="h-full w-full"
-              aria-label="Dimensional knowledge reconstruction core: scattered sources flowing into an organic knowledge core and reconstructing structured, verified project knowledge"
-            />
-          </div>
-          <div className="pointer-events-none absolute inset-x-0 bottom-3 flex items-center justify-between px-3 font-mono text-[9.5px] uppercase tracking-[0.08em] text-[#718096] sm:px-8 sm:text-[10.5px] sm:tracking-[0.14em]">
-            <span className="flex items-center gap-1.5 sm:gap-2">
-              <span className="inline-block size-1.5 rounded-full bg-[#7997BE]/80" />
-              Scattered sources
-            </span>
-            <span className="hidden sm:flex items-center gap-2 font-medium text-[#315FBA]">
-              <span className="inline-block size-1.5 rounded-full bg-[#315FBA] animate-pulse" />
-              Knowledge reconstruction
-            </span>
-            <span className="flex items-center gap-1.5 sm:gap-2 font-medium text-[#299B80]">
-              <span className="inline-block size-1.5 rounded-full bg-[#299B80]" />
-              Structured knowledge
-            </span>
+        {/* 3-Stage Interactive Stepper Bar */}
+        <div className="reveal mt-12 flex justify-center">
+          <div className="inline-flex max-w-full overflow-x-auto rounded-2xl border border-[#D9E1F0] bg-white p-1.5 shadow-sm">
+            {STAGES.map((st) => {
+              const isActive = activeStage === st.num;
+              const isVerified = st.num === 3;
+              return (
+                <button
+                  key={st.num}
+                  type="button"
+                  onClick={() => setActiveStage(st.num)}
+                  className={`flex items-center gap-2.5 rounded-xl px-4 py-2.5 text-left transition-all duration-300 cursor-pointer shrink-0 ${
+                    isActive
+                      ? isVerified
+                        ? "bg-teal-50 text-[#1d6e5b] shadow-xs ring-1 ring-teal-500/30"
+                        : "bg-blue-50 text-[#315FBA] shadow-xs ring-1 ring-blue-500/30"
+                      : "text-[#56657c] hover:bg-slate-50 hover:text-[#203653]"
+                  }`}
+                >
+                  <span
+                    className={`flex size-6 items-center justify-center rounded-lg font-mono text-[11px] font-bold ${
+                      isActive
+                        ? isVerified
+                          ? "bg-[#299B80] text-white"
+                          : "bg-[#315FBA] text-white"
+                        : "bg-slate-100 text-[#718096]"
+                    }`}
+                  >
+                    0{st.num}
+                  </span>
+                  <span className="text-[13px] font-semibold whitespace-nowrap">
+                    {st.title}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
 
-        {/* 3-Column Architecture Progression */}
-        <div className="reveal mt-12 grid gap-4 lg:grid-cols-[1fr_auto_1.15fr_auto_1.2fr] lg:items-stretch">
-          {/* Column 1: Connected Sources */}
-          <div className="tile rounded-[16px] border border-[#D9E1F0] bg-white p-6 shadow-card">
-            <p className="font-mono text-[11.5px] font-medium text-[#718096]">
-              01 · Connected sources
-            </p>
-            <ul className="mt-5 space-y-3">
-              {[
-                { type: "github" as const, name: "core-ledger-repo", label: "Pull requests & commits" },
-                { type: "jira" as const, name: "PAY · SPRINT-34", label: "Sprint issues & blockers" },
-                { type: "slack" as const, name: "#arch-decisions", label: "Threaded discussions" },
-                { type: "docs" as const, name: "ADRs & Runbooks", label: "Uploaded PDF & DOCX" },
-              ].map((s) => (
-                <li key={s.name} className="flex items-center gap-3">
-                  <SourceIcon type={s.type} size={30} />
-                  <span className="flex-1 min-w-0">
-                    <span className="block truncate font-mono text-[12.5px] font-semibold text-[#203653]">
-                      {s.name}
-                    </span>
-                    <span className="block text-[11.5px] text-[#718096]">
-                      {s.label}
-                    </span>
-                  </span>
-                  <span className="size-2 rounded-full bg-[#299B80] animate-pulse-soft" />
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          {/* Animated Flowing Synapse Stream 1 */}
-          <div className="hidden items-center justify-center lg:flex px-1" aria-hidden="true">
-            <svg width="44" height="24" viewBox="0 0 44 24" fill="none" className="overflow-visible">
-              <path d="M0 12 H38" stroke="#D9E1F0" strokeWidth="1.5" />
-              <path d="M0 12 H38" stroke="#315FBA" strokeWidth="1.5" className="animate-stream-flow" />
-              <polygon points="36,8 44,12 36,16" fill="#315FBA" />
-              <circle cx="0" cy="12" r="2.5" fill="#315FBA">
-                <animate attributeName="cx" values="0;38" dur="2.2s" repeatCount="indefinite" />
-                <animate attributeName="opacity" values="0;1;1;0" dur="2.2s" repeatCount="indefinite" />
-              </circle>
-            </svg>
-          </div>
-
-          {/* Column 2: Handover Intelligence */}
-          <div className="relative overflow-hidden rounded-[20px] border border-[#2c4566] bg-[#203653] p-6 text-white shadow-pop">
-            <div className="absolute inset-0 opacity-[0.08] dot-grid" />
-            <div className="relative">
-              <p className="font-mono text-[11.5px] text-[#a9b8d0]">
-                02 · Handover intelligence
-              </p>
-              <div className="mt-5 flex items-center gap-3">
-                <span className="flex size-11 items-center justify-center rounded-xl bg-white shadow-xs">
-                  <LogoMark size={28} />
+        {/* Unified Interactive Transformation Workspace */}
+        <div className="reveal mt-10 rounded-[28px] border border-[#D9E1F0] bg-white p-6 sm:p-8 lg:p-10 shadow-pop">
+          <div className="grid gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
+            {/* Left Column: Active Stage Demonstration Details */}
+            <div className="space-y-6">
+              <div>
+                <span
+                  className={`font-mono text-[11px] font-semibold uppercase tracking-wider ${
+                    activeStage === 3 ? "text-[#299B80]" : "text-[#315FBA]"
+                  }`}
+                >
+                  {currentStage.tag}
                 </span>
-                <div>
-                  <p className="text-[15px] font-semibold">Reconstructing knowledge</p>
-                  <p className="text-[12px] text-[#a9b8d0]">Full provenance · Strict ACLs</p>
-                </div>
+                <h3 className="mt-2 text-[26px] sm:text-[30px] font-semibold tracking-[-0.025em] text-[#203653]">
+                  {currentStage.subtitle}
+                </h3>
+                <p className="mt-3 text-[15px] leading-relaxed text-[#56657c]">
+                  {currentStage.description}
+                </p>
               </div>
 
-              <ol className="mt-6 space-y-3">
-                {[
-                  "Extract decisions, ownership and risks",
-                  "Link findings to original evidence",
-                  "Surface contradictions and missing context",
-                  "Four-tier epistemic separation",
-                ].map((item, i) => (
-                  <li key={item} className="flex items-center gap-3 text-[13px]">
-                    <span
-                      className={`flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
-                        i < 3
-                          ? "bg-[#299B80] text-white"
-                          : "border border-[#5a7091] text-[#a9b8d0]"
-                      }`}
-                    >
-                      {i < 3 ? <Check className="size-3" /> : i + 1}
-                    </span>
-                    <span className={i < 3 ? "text-white" : "text-[#a9b8d0]"}>
-                      {item}
-                    </span>
-                  </li>
-                ))}
-              </ol>
+              {/* Stage-Specific Visual Artifact Container */}
+              <div className="rounded-2xl border border-[#D9E1F0] bg-[#F8FAFD] p-5 shadow-xs">
+                {activeStage === 1 && (
+                  <div className="space-y-3">
+                    <p className="font-mono text-[11px] font-semibold uppercase tracking-wider text-[#718096] mb-3">
+                      Converging Source Streams
+                    </p>
+                    {STAGES[0].items.map((s) => (
+                      <div
+                        key={s.name}
+                        className="flex items-center justify-between gap-3 rounded-xl border border-[#D9E1F0] bg-white p-3 shadow-xs"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <SourceIcon type={s.type} size={28} />
+                          <div className="min-w-0">
+                            <span className="block truncate font-mono text-[12.5px] font-semibold text-[#203653]">
+                              {s.name}
+                            </span>
+                            <span className="block text-[11px] text-[#718096]">
+                              {s.label}
+                            </span>
+                          </div>
+                        </div>
+                        <span className="flex items-center gap-1.5 font-mono text-[10.5px] text-[#299B80] shrink-0 font-semibold">
+                          <span className="size-2 rounded-full bg-[#299B80] animate-pulse-soft" />
+                          Streaming
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
-              <div className="mt-6 h-1.5 overflow-hidden rounded-full bg-white/10">
-                <div className="h-full w-[82%] rounded-full bg-gradient-to-r from-[#7997BE] to-[#A5A0D9]" />
+                {activeStage === 2 && (
+                  <div className="space-y-3">
+                    <p className="font-mono text-[11px] font-semibold uppercase tracking-wider text-[#718096] mb-3">
+                      Reconstructed Knowledge Core
+                    </p>
+                    <div className="rounded-xl border border-[#D9E1F0] bg-white p-4 shadow-xs">
+                      <div className="flex items-center justify-between mb-3 border-b border-[#D9E1F0]/70 pb-2.5">
+                        <span className="font-mono text-[11.5px] font-semibold text-[#315FBA]">
+                          Canonical Knowledge Extraction
+                        </span>
+                        <span className="rounded-full bg-indigo-50 px-2 py-0.5 font-mono text-[10px] font-semibold text-[#8B78C9] ring-1 ring-indigo-500/20">
+                          AI Reconstruction
+                        </span>
+                      </div>
+                      <ul className="space-y-2.5 text-[13px] text-[#203653]">
+                        {STAGES[1].features.map((f) => (
+                          <li key={f} className="flex items-center gap-2.5">
+                            <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-[#315FBA]/10 text-[#315FBA]">
+                              <Check className="size-3" />
+                            </span>
+                            <span>{f}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                )}
+
+                {activeStage === 3 && (
+                  <div className="space-y-3">
+                    <p className="font-mono text-[11px] font-semibold uppercase tracking-wider text-[#718096] mb-3">
+                      Human Verification Sign-Off
+                    </p>
+                    <div className="space-y-2">
+                      {STAGES[2].verifications.map((v) => (
+                        <div
+                          key={v.name}
+                          className="flex items-center justify-between gap-3 rounded-xl border border-[#D9E1F0] bg-white p-3 shadow-xs"
+                        >
+                          <div className="min-w-0">
+                            <span className="block font-mono text-[10.5px] font-semibold text-[#718096] uppercase">
+                              {v.type}
+                            </span>
+                            <span className="block text-[13px] font-semibold text-[#203653] truncate">
+                              {v.name}
+                            </span>
+                          </div>
+                          <span
+                            className={`rounded-full px-2.5 py-0.5 font-mono text-[10px] font-semibold shrink-0 ${
+                              v.status === "Verified"
+                                ? "bg-teal-50 text-[#299B80] ring-1 ring-teal-600/20 flex items-center gap-1"
+                                : "bg-amber-50 text-amber-700 ring-1 ring-amber-600/20"
+                            }`}
+                          >
+                            {v.status === "Verified" && <ShieldCheck className="size-3" />}
+                            {v.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
-          </div>
 
-          {/* Animated Flowing Synapse Stream 2 */}
-          <div className="hidden items-center justify-center lg:flex px-1" aria-hidden="true">
-            <svg width="44" height="24" viewBox="0 0 44 24" fill="none" className="overflow-visible">
-              <path d="M0 12 H38" stroke="#D9E1F0" strokeWidth="1.5" />
-              <path d="M0 12 H38" stroke="#299B80" strokeWidth="1.5" className="animate-stream-flow" />
-              <polygon points="36,8 44,12 36,16" fill="#299B80" />
-              <circle cx="0" cy="12" r="2.5" fill="#299B80">
-                <animate attributeName="cx" values="0;38" dur="2.2s" repeatCount="indefinite" begin="0.7s" />
-                <animate attributeName="opacity" values="0;1;1;0" dur="2.2s" repeatCount="indefinite" begin="0.7s" />
-              </circle>
-            </svg>
-          </div>
-
-          {/* Column 3: Structured Project Knowledge */}
-          <div className="tile rounded-[16px] border border-[#D9E1F0] bg-white p-6 shadow-card">
-            <p className="font-mono text-[11.5px] font-medium text-[#718096]">
-              03 · Structured project knowledge
-            </p>
-            <ul className="mt-5 divide-y divide-[#D9E1F0]">
-              {[
-                {
-                  icon: Lightbulb,
-                  color: "#315FBA",
-                  kind: "Decision",
-                  title: "Event-driven settlement via Kafka",
-                  verified: true,
-                },
-                {
-                  icon: UserRound,
-                  color: "#299B80",
-                  kind: "Responsibility",
-                  title: "Acquirer credential rotation",
-                  verified: true,
-                },
-                {
-                  icon: AlertTriangle,
-                  color: "#D36D72",
-                  kind: "Risk",
-                  title: "No retry on acquirer timeouts",
-                  verified: false,
-                },
-                {
-                  icon: Network,
-                  color: "#D39B43",
-                  kind: "Dependency",
-                  title: "Settlement → Platform Vault",
-                  verified: false,
-                },
-              ].map((item) => (
-                <li key={item.title} className="flex items-center gap-3 py-3">
-                  <item.icon
-                    className="size-4 shrink-0"
-                    style={{ color: item.color }}
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-[11px] font-medium text-[#718096]">
-                      {item.kind}
-                    </span>
-                    <span className="block truncate text-[13px] font-semibold text-[#203653]">
-                      {item.title}
-                    </span>
+            {/* Right Column: 3D Transformation Knowledge Core */}
+            <div>
+              <div className="relative overflow-hidden rounded-[24px] border border-[#D9E1F0] bg-gradient-to-b from-white via-[#F6F8FC] to-white p-4 sm:p-5 shadow-card">
+                {/* Header Badge */}
+                <div className="flex items-center justify-between border-b border-[#D9E1F0]/70 pb-3 px-2">
+                  <span className="font-mono text-[10.5px] font-semibold uppercase tracking-wider text-[#718096]">
+                    Organic Reconstruction Engine
                   </span>
-                  {item.verified ? (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 px-2 py-0.5 text-[10.5px] font-semibold text-teal-700 ring-1 ring-inset ring-teal-600/20">
-                      <ShieldCheck className="size-3" />
-                      Verified
-                    </span>
-                  ) : (
-                    <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10.5px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-600/20">
-                      Review
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
+                  <span
+                    className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 font-mono text-[10.5px] font-semibold ${
+                      activeStage === 3
+                        ? "bg-teal-50 text-[#299B80] ring-1 ring-inset ring-teal-600/20"
+                        : activeStage === 2
+                        ? "bg-indigo-50 text-[#8B78C9] ring-1 ring-inset ring-indigo-600/20"
+                        : "bg-blue-50 text-[#315FBA] ring-1 ring-inset ring-blue-600/20"
+                    }`}
+                  >
+                    <span
+                      className={`size-1.5 rounded-full ${
+                        activeStage === 3
+                          ? "bg-[#299B80]"
+                          : activeStage === 2
+                          ? "bg-[#8B78C9] animate-pulse"
+                          : "bg-[#315FBA]"
+                      }`}
+                    />
+                    Stage 0{activeStage} of 03
+                  </span>
+                </div>
+
+                {/* 3D Canvas */}
+                <div className="h-[320px] sm:h-[380px] w-full">
+                  <OrganicScene
+                    variant="assemble"
+                    progress={sceneProgress}
+                    showTags={activeStage >= 2}
+                    className="h-full w-full"
+                    label="Dimensional knowledge reconstruction core transforming scattered sources into verified structure"
+                  />
+                </div>
+
+                {/* Quick Stage Controls */}
+                <div className="flex items-center justify-between border-t border-[#D9E1F0]/70 pt-3 px-2 font-mono text-[10.5px] text-[#718096]">
+                  <span>Knowledge State:</span>
+                  <div className="flex gap-2">
+                    {[1, 2, 3].map((num) => (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => setActiveStage(num as 1 | 2 | 3)}
+                        className={`size-6 rounded-md font-bold transition cursor-pointer flex items-center justify-center ${
+                          activeStage === num
+                            ? num === 3
+                              ? "bg-[#299B80] text-white"
+                              : "bg-[#315FBA] text-white"
+                            : "bg-slate-100 text-[#718096] hover:bg-slate-200"
+                        }`}
+                      >
+                        {num}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </section>
   );
 }
+
+export default IntroducingSection;

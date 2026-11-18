@@ -1,61 +1,40 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
-
-function useReveal<T extends HTMLElement>() {
-  const ref = useRef<T>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((e) => {
-          if (e.isIntersecting) {
-            e.target.classList.add("is-in");
-            io.unobserve(e.target);
-          }
-        });
-      },
-      { threshold: 0.12 }
-    );
-    el.querySelectorAll(".reveal").forEach((n) => io.observe(n));
-    return () => io.disconnect();
-  }, []);
-  return ref;
-}
+import React, { useState } from "react";
+import { useReveal } from "./hooks/useReveal";
 
 const FAQ_ITEMS = [
   {
-    q: "What does Handover do?",
-    a: "Handover connects authorized organizational tools (GitHub, Jira, Slack, uploaded documents), reconstructs fragmented project context into structured findings (decisions, technical architecture, responsibilities, risks, and dependencies), enables human verification against raw evidence, and produces auditable transition packages for successors.",
+    q: "What does The Handover do?",
+    a: "The Handover connects authorized organizational tools (GitHub, Jira, Slack, and uploaded project documents), reconstructs fragmented project context into structured records across eight canonical domains, surfaces contradictions and missing information, supports human verification, and produces certified, role-tailored handover dossiers for incoming team members.",
   },
   {
-    q: "Which tools can Handover connect to?",
-    a: "Handover supports fine-grained read-only integrations with GitHub repositories, Jira projects, Slack channels, and direct uploads of PDF and DOCX documentation (such as Architecture Decision Records and operational runbooks). You choose explicitly which repositories and channels to index.",
+    q: "Which tools can The Handover connect to?",
+    a: "The Handover supports fine-grained read-only integrations with GitHub repositories, Jira projects, Slack channels, and direct uploads of PDF and DOCX documentation (such as Architecture Decision Records and operational runbooks). Source connections use delegated per-user authorizations with strict read-time permission checks.",
   },
   {
-    q: "Does Handover replace our existing project management tools?",
-    a: "No. Handover is not a task tracker or issue management system. It reads from the tools your engineering and product teams already use and focuses on preserving architectural memory, critical context, and transition management. Daily work continues in GitHub and Jira.",
+    q: "Does The Handover replace our existing project management tools?",
+    a: "No. The Handover is not an issue tracker, sprint board, or documentation editor. It reads from the tools your engineering and product teams already use and focuses exclusively on preserving architectural memory, operational context, and transition governance. Daily work continues in GitHub and Jira.",
   },
   {
-    q: "How does Handover use AI?",
-    a: "AI models extract candidate findings from authorized evidence chunks, detect contradictions across sources, score extraction confidence, and synthesize draft summaries. The LLM is strictly not a source of truth—it cannot independently approve handovers, override source permissions, or invent project facts.",
+    q: "How does The Handover use AI?",
+    a: "AI models extract candidate findings from authorized evidence chunks, detect contradictions across sources, score extraction confidence, and synthesize draft summaries. The LLM is strictly not a source of truth—it cannot independently approve handovers, override source permissions, or invent project facts without grounding.",
   },
   {
     q: "Can team members verify AI-generated findings?",
-    a: "Yes. Human verification is a mandatory platform gate. Outgoing members and project leads inspect findings, review citations, edit descriptions, flag conflicts, or reject invalid candidates. Only human-verified items contribute to official handover completeness scores.",
+    a: "Yes. Human verification is a mandatory platform gate. Outgoing members and technical reviewers inspect candidate findings, review supporting citations, edit descriptions, flag conflicts, or reject invalid candidates. Only human-verified items contribute to official handover completeness scores.",
   },
   {
-    q: "Who can use Handover?",
-    a: "Engineering leaders, project managers, technical leads, outgoing employees, incoming successors, researchers, and student developers transitioning responsibilities. Workspaces support role-based access control with granular project-level permissions.",
+    q: "How does The Handover handle permissions and access control?",
+    a: "Project membership does not grant automatic access to private repositories or restricted issues. External source ACLs are strictly evaluated at read time before any evidence or finding enters retrieval context or assistant prompts. The system fails closed if permissions cannot be established.",
   },
   {
-    q: "Can users belong to multiple projects with different transition roles?",
-    a: "Yes. Roles and transition participation are assigned per project. A team member can be an outgoing contributor on one project, an approving project manager on another, and an incoming successor on a third.",
+    q: "Can users participate in multiple transitions with different roles?",
+    a: "Yes. Roles and transition participation are assigned per project. A team member can be a departing contributor on one project, an approving technical reviewer on another, and an incoming successor on a third, with tailored workspace views for each responsibility.",
   },
   {
-    q: "Can existing project documentation be uploaded?",
-    a: "Yes. Teams can upload PDF and DOCX documents such as architecture proposals, onboarding guides, and post-mortems. They are parsed, indexed with OCR where appropriate, and linked into the knowledge graph alongside repository and issue tracker evidence.",
+    q: "What does an approved handover package contain?",
+    a: "A certified handover dossier contains an executive system overview, verified findings across all eight knowledge domains (decisions, technical architecture, work status, ownership, dependencies, risks, procedures, and discussions), role-tailored views, and cryptographic provenance links back to original source evidence.",
   },
 ];
 
@@ -80,8 +59,11 @@ export function FaqSection() {
               </p>
             </div>
             <h2 className="reveal mt-5 text-[32px] font-semibold leading-[1.06] tracking-[-0.035em] text-[#203653] sm:text-[40px] lg:text-[44px]">
-              Questions about keeping knowledge in motion?
+              Common questions about The Handover.
             </h2>
+            <p className="reveal mt-4 text-[15px] leading-relaxed text-[#718096]">
+              Everything you need to know about knowledge continuity, source integrations, and verification governance.
+            </p>
           </div>
 
           {/* Accordion Column */}
@@ -89,11 +71,12 @@ export function FaqSection() {
             {FAQ_ITEMS.map((item, i) => (
               <li key={item.q}>
                 <button
+                  type="button"
                   onClick={() => toggle(i)}
                   aria-expanded={openIndex === i}
-                  className="flex w-full items-center justify-between gap-6 py-5 text-left cursor-pointer focus:outline-none"
+                  className="flex w-full items-center justify-between gap-6 py-5 text-left cursor-pointer rounded-lg px-2 -mx-2 focus-visible:ring-2 focus-visible:ring-[#315FBA]"
                 >
-                  <span className="text-[17px] font-semibold tracking-[-0.01em] text-[#203653]">
+                  <span className="text-[16.5px] font-semibold tracking-[-0.01em] text-[#203653]">
                     {item.q}
                   </span>
                   <span
@@ -114,7 +97,7 @@ export function FaqSection() {
                   }`}
                 >
                   <div className="overflow-hidden">
-                    <p className="max-w-2xl pb-6 text-[15px] leading-relaxed text-[#56657c]">
+                    <p className="max-w-2xl pb-6 text-[14.5px] leading-relaxed text-[#56657c]">
                       {item.a}
                     </p>
                   </div>
