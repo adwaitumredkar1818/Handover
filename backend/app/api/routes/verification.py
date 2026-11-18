@@ -13,7 +13,8 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -74,6 +75,11 @@ from app.services.verification_review import (
 router = APIRouter(tags=["Verification Center"])
 
 
+class DirectReviewFindingRequest(BaseModel):
+    action: str = Field(description="'approve', 'flag', or 'reject'")
+    notes: str | None = Field(default=None)
+
+
 def _invalidate_project_caches(project_id: uuid.UUID) -> None:
     """Clear short-lived L1 response caches on verification mutations."""
     local_response_cache.invalidate_prefix(f"ki_graph:{project_id}:")
@@ -81,6 +87,7 @@ def _invalidate_project_caches(project_id: uuid.UUID) -> None:
     local_response_cache.invalidate_prefix(f"ki_summary:{project_id}:")
     local_response_cache.invalidate_prefix(f"rel_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"contrib_graph:{project_id}:")
+    local_response_cache.invalidate_prefix(f"verification_summary:{project_id}:")
 
 
 def _str_val(val: Any) -> str:
@@ -377,8 +384,15 @@ def get_verification_summary(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
     db_session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationSummaryResponse:
+    bind_id = id(db_session.get_bind())
+    cache_key = f"verification_summary:{project_ctx.project.id}:{bind_id}"
+    cached = local_response_cache.get(cache_key)
+    if isinstance(cached, dict):
+        return VerificationSummaryResponse(**cached)
+
     repo = VerificationCaseRepository(db_session)
     summary_data = repo.get_summary(project_ctx.project.id)
+    local_response_cache.set(cache_key, summary_data, ttl_seconds=30)
     return VerificationSummaryResponse(**summary_data)
 
 
@@ -445,17 +459,23 @@ def get_case_evidence_details(
             .scalars()
             .all()
         )
-        for link in links:
-            ev = link.evidence_item
-            if not ev:
-                continue
-            accessible, _ = check_evidence_accessibility(
+        ev_items = [link.evidence_item for link in links if link.evidence_item]
+        ev_ids = [ev.id for ev in ev_items]
+        accessible_set: set[uuid.UUID] = set()
+        if ev_ids:
+            _, accessible_set = check_evidence_accessibility(
                 db_session,
-                [ev.id],
+                ev_ids,
                 project_id=case.project_id,
                 viewer_user_id=project_ctx.user_id,
                 has_project_manage=has_manage,
             )
+
+        for link in links:
+            ev = link.evidence_item
+            if not ev:
+                continue
+            accessible = ev.id in accessible_set
             if not accessible:
                 supporting_evidence.append(
                     {
@@ -802,6 +822,78 @@ def assign_case_reviewer(
     except Exception as exc:
         db_session.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    has_manage = project_ctx.has_permission("project.manage")
+    return _to_case_detail_response(
+        case, db_session, viewer_user_id=project_ctx.user_id, has_manage=has_manage
+    )
+
+
+@router.post(
+    "/projects/{project_id}/verification/findings/{finding_id}/review",
+    response_model=VerificationCaseDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Directly review and verify, flag, or reject a knowledge finding in one atomic step",
+)
+def direct_review_finding(
+    finding_id: uuid.UUID,
+    payload: Annotated[DirectReviewFindingRequest, Body()],
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.knowledge.review"))
+    ],
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> VerificationCaseDetailResponse:
+    repo = VerificationCaseRepository(db_session)
+    existing_case = repo.get_by_target(
+        project_ctx.project.id, VerificationTargetType.KNOWLEDGE_ITEM, finding_id
+    )
+    if not existing_case:
+        item = db_session.get(KnowledgeItem, finding_id)
+        if not item or item.project_id != project_ctx.project.id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge item not found."
+            )
+        engine = DeterministicVerificationEngine(db_session)
+        res = engine.assess_knowledge_item(item)
+        existing_case = engine.persist_assessment(res)
+        db_session.flush()
+
+    service = HumanReviewService(db_session)
+    act = payload.action.lower().strip()
+    notes = payload.notes or f"Reviewed directly in Knowledge Intelligence ({act})"
+
+    try:
+        if act == "approve":
+            case = service.approve(
+                case_id=existing_case.id,
+                reviewer_user_id=project_ctx.user_id,
+                expected_version=existing_case.version,
+                review_notes=notes,
+            )
+        elif act in ("flag", "mark_unresolved", "needs_clarification"):
+            case = service.mark_unresolved(
+                case_id=existing_case.id,
+                reviewer_user_id=project_ctx.user_id,
+                expected_version=existing_case.version,
+                explanation=notes,
+            )
+        elif act == "reject":
+            case = service.reject(
+                case_id=existing_case.id,
+                reviewer_user_id=project_ctx.user_id,
+                expected_version=existing_case.version,
+                review_notes=notes,
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported review action '{payload.action}'. Must be 'approve', 'flag', or 'reject'.",
+            )
+        db_session.commit()
+        _invalidate_project_caches(project_ctx.project.id)
+    except ConcurrencyConflictError as exc:
+        db_session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     has_manage = project_ctx.has_permission("project.manage")
     return _to_case_detail_response(

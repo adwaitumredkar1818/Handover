@@ -938,12 +938,10 @@ class ProjectService:
         if cached_data is None:
             cached_data = local_response_cache.get(local_key)
         if cached_data is not None:
-            print("RETURNING CACHED DATA FROM local_response_cache! local_key =", local_key)
             try:
                 return ProjectOverviewResponse.model_validate(cached_data)
             except Exception:
                 local_response_cache.delete(local_key)
-        print("COMPUTING FRESH OVERVIEW! all_evidence count =", len(self._project_repo.list_active_evidence_items(project.id)))
 
         transition = self._project_repo.get_transition(project.id)
         source_metrics = self._project_repo.get_source_metrics(project.id)
