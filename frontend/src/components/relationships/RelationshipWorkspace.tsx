@@ -897,25 +897,21 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
       } else if (tab === "identity_review" || tab === "responsibilities") {
         const contribKey = `rel_contrib_list:${projectId}`;
         const attrKey = `rel_attributions:${projectId}`;
-        if (!forceRefresh) {
-          const cachedContrib = getCachedGraph<ContributorRecord[]>(contribKey);
-          const cachedAttrs = getCachedGraph<Array<Record<string, unknown>>>(attrKey);
-          if (cachedContrib && cachedAttrs && cachedContrib.length > 0) {
-            setContributors(cachedContrib);
-            setAttributions(cachedAttrs);
-            return;
-          }
+        const cachedContrib = !forceRefresh ? getCachedGraph<ContributorRecord[]>(contribKey) : null;
+        const cachedAttrs = !forceRefresh ? getCachedGraph<Array<Record<string, unknown>>>(attrKey) : null;
+        if (cachedContrib && cachedAttrs && cachedContrib.length > 0) {
+          setContributors(cachedContrib);
+          setAttributions(cachedAttrs);
+          return;
         }
-        if (contributors.length === 0 || attributions.length === 0 || forceRefresh) {
-          const [contribs, attrs] = await Promise.all([
-            api.relationships.listContributors(projectId),
-            api.roster.listAttributions(projectId),
-          ]);
-          setContributors(contribs);
-          setAttributions(attrs as unknown as Array<Record<string, unknown>>);
-          setCachedGraph(contribKey, contribs);
-          setCachedGraph(attrKey, attrs as unknown as Array<Record<string, unknown>>);
-        }
+        const [contribs, attrs] = await Promise.all([
+          api.relationships.listContributors(projectId),
+          api.roster.listAttributions(projectId),
+        ]);
+        setContributors(contribs);
+        setAttributions(attrs as unknown as Array<Record<string, unknown>>);
+        setCachedGraph(contribKey, contribs);
+        setCachedGraph(attrKey, attrs as unknown as Array<Record<string, unknown>>);
       } else if (tab === "traceability") {
         const cacheKey = `rel_traceability:${projectId}`;
         if (!forceRefresh) {
