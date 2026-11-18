@@ -395,7 +395,12 @@ class KnowledgeRepository:
             reason="evidence_chunks_replaced",
         )
 
-    def has_stale_items_for_evidence(self, evidence_id: uuid.UUID) -> bool:
+    def has_stale_items_for_evidence(
+        self,
+        evidence_id: uuid.UUID,
+        *,
+        semantic_only: bool = False,
+    ) -> bool:
         """Return True if any non-deleted knowledge item citing `evidence_id` is currently stale."""
         stmt = (
             select(KnowledgeItem.id)
@@ -410,7 +415,146 @@ class KnowledgeRepository:
             )
             .limit(1)
         )
+        if semantic_only:
+            stmt = stmt.where(KnowledgeItem.extraction_run_id.is_not(None))
         return self._session.execute(stmt).scalar_one_or_none() is not None
+
+    def has_items_for_evidence(
+        self,
+        evidence_id: uuid.UUID,
+        *,
+        semantic_only: bool = False,
+    ) -> bool:
+        """Return True if any non-deleted knowledge item currently cites `evidence_id`."""
+        stmt = (
+            select(KnowledgeEvidenceLink.id)
+            .join(
+                KnowledgeItem,
+                KnowledgeItem.id == KnowledgeEvidenceLink.knowledge_item_id,
+            )
+            .where(
+                KnowledgeEvidenceLink.evidence_id == evidence_id,
+                KnowledgeItem.is_deleted.is_(False),
+            )
+            .limit(1)
+        )
+        if semantic_only:
+            stmt = stmt.where(
+                KnowledgeItem.extraction_run_id.is_not(None),
+                KnowledgeItem.is_stale.is_(False),
+            )
+        return self._session.execute(stmt).scalar_one_or_none() is not None
+
+    def is_evidence_extracted(
+        self,
+        evidence: EvidenceItem,
+        *,
+        model_name: str,
+        prompt_version: str,
+        schema_version: str = "v1",
+    ) -> bool:
+        """Check whether an evidence item has already been successfully extracted with matching inputs."""
+        fp = (evidence.metadata_json or {}).get("extraction_fingerprint")
+        if isinstance(fp, dict):
+            # Authoritative fingerprint comparison across all 4 input dimensions:
+            return bool(
+                fp.get("content_hash") == evidence.content_hash
+                and fp.get("model_name") == model_name
+                and fp.get("prompt_version") == prompt_version
+                and fp.get("schema_version") == schema_version
+            )
+
+        # Legacy fallback ONLY when extraction_fingerprint metadata is absent:
+        # Require matching model_name, prompt_version, and completed run for this evidence
+        stmt = (
+            select(KnowledgeExtractionRun.id)
+            .where(
+                KnowledgeExtractionRun.evidence_id == evidence.id,
+                KnowledgeExtractionRun.status.in_(
+                    [ExtractionRunStatus.COMPLETED.value, ExtractionRunStatus.PARTIALLY_COMPLETED.value]
+                ),
+                KnowledgeExtractionRun.model_name == model_name,
+                KnowledgeExtractionRun.prompt_version == prompt_version,
+            )
+            .limit(1)
+        )
+        has_completed_run = self._session.execute(stmt).scalar_one_or_none() is not None
+        if not has_completed_run:
+            return False
+
+        if self.has_items_for_evidence(evidence.id, semantic_only=True) and not self.has_stale_items_for_evidence(
+            evidence.id, semantic_only=True
+        ):
+            return True
+
+        return has_completed_run
+
+    def get_extracted_evidence_ids_for_project(
+        self,
+        *,
+        project_id: uuid.UUID,
+        model_name: str,
+        prompt_version: str,
+    ) -> set[uuid.UUID]:
+        """Batch load evidence IDs in project that are already up-to-date with current model/prompt."""
+        # 1. Evidence items with matching completed extraction runs
+        run_ev_ids = set(
+            self._session.execute(
+                select(KnowledgeExtractionRun.evidence_id).where(
+                    KnowledgeExtractionRun.project_id == project_id,
+                    KnowledgeExtractionRun.status.in_(
+                        [ExtractionRunStatus.COMPLETED.value, ExtractionRunStatus.PARTIALLY_COMPLETED.value]
+                    ),
+                    KnowledgeExtractionRun.model_name == model_name,
+                    KnowledgeExtractionRun.prompt_version == prompt_version,
+                    KnowledgeExtractionRun.evidence_id.is_not(None),
+                )
+            ).scalars().all()
+        )
+        # 2. Evidence items with existing non-stale Stage-2 semantic knowledge items
+        stale_ev_ids = set(
+            self._session.execute(
+                select(KnowledgeEvidenceLink.evidence_id)
+                .join(KnowledgeItem, KnowledgeEvidenceLink.knowledge_item_id == KnowledgeItem.id)
+                .where(
+                    KnowledgeEvidenceLink.project_id == project_id,
+                    KnowledgeItem.is_deleted == False,
+                    KnowledgeItem.is_stale == True,
+                    KnowledgeItem.extraction_run_id.is_not(None),
+                )
+            ).scalars().all()
+        )
+        linked_ev_ids = set(
+            self._session.execute(
+                select(KnowledgeEvidenceLink.evidence_id)
+                .join(KnowledgeItem, KnowledgeEvidenceLink.knowledge_item_id == KnowledgeItem.id)
+                .where(
+                    KnowledgeEvidenceLink.project_id == project_id,
+                    KnowledgeItem.is_deleted == False,
+                    KnowledgeItem.extraction_run_id.is_not(None),
+                )
+            ).scalars().all()
+        )
+        valid_linked = linked_ev_ids - stale_ev_ids
+
+        # 3. Evidence items with durable extraction fingerprint matching current model, prompt, and content_hash
+        ev_items = self._session.execute(
+            select(EvidenceItem).where(
+                EvidenceItem.project_id == project_id,
+                EvidenceItem.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        fp_ev_ids = {
+            ev.id
+            for ev in ev_items
+            if isinstance(ev.metadata_json, dict)
+            and isinstance(ev.metadata_json.get("extraction_fingerprint"), dict)
+            and ev.metadata_json["extraction_fingerprint"].get("model_name") == model_name
+            and ev.metadata_json["extraction_fingerprint"].get("prompt_version") == prompt_version
+            and ev.metadata_json["extraction_fingerprint"].get("content_hash") == ev.content_hash
+        }
+
+        return run_ev_ids | valid_linked | fp_ev_ids
 
     def delete_synthetic_for_project(self, project_id: uuid.UUID) -> int:
         """Clean helper if synthetic fixture rows need removal in tests."""
