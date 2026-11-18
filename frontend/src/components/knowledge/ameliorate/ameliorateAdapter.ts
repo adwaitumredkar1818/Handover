@@ -332,14 +332,545 @@ export function resolveNodeTier(node: HandoverGraphNode): number {
   return 2;
 }
 
+export interface AdaptiveLayoutOptions {
+  viewportWidth?: number;
+  viewportHeight?: number;
+  nodeDimensions?: Map<string, { width: number; height: number }>;
+}
+
+interface NodeBox {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+const DEFAULT_NODE_W = 204;
+const DEFAULT_NODE_H = 104;
+const MIN_NODE_GAP_X = 76;
+const MIN_NODE_GAP_Y = 76;
+
+function getNodeSize(
+  id: string,
+  dims?: Map<string, { width: number; height: number }>
+): { w: number; h: number } {
+  const m = dims?.get(id);
+  return {
+    w: m && m.width > 40 ? m.width : DEFAULT_NODE_W,
+    h: m && m.height > 40 ? m.height : DEFAULT_NODE_H,
+  };
+}
+
 /**
- * Compute Ameliorate-style layered flowchart positions with balanced centered tiers
- * so nodes form a clean hierarchical flowchart exactly like Image 3 with zero node crossings.
+ * Deterministic AABB overlap resolution pass. Ensures no two node cards ever overlap
+ * while preserving relative layout order and balanced spacing.
+ */
+function resolveOverlaps(
+  positions: Map<string, { x: number; y: number }>,
+  ids: string[],
+  dims?: Map<string, { width: number; height: number }>,
+  padding = 34
+): void {
+  const sortedIds = [...ids].sort();
+  const boxes: NodeBox[] = sortedIds.map((id) => {
+    const pos = positions.get(id) ?? { x: 0, y: 0 };
+    const { w, h } = getNodeSize(id, dims);
+    return { id, x: pos.x, y: pos.y, w, h };
+  });
+
+  for (let iter = 0; iter < 18; iter++) {
+    let moved = false;
+    for (let i = 0; i < boxes.length; i++) {
+      const a = boxes[i]!;
+      for (let j = i + 1; j < boxes.length; j++) {
+        const b = boxes[j]!;
+        const axCenter = a.x + a.w / 2;
+        const ayCenter = a.y + a.h / 2;
+        const bxCenter = b.x + b.w / 2;
+        const byCenter = b.y + b.h / 2;
+
+        const reqDx = (a.w + b.w) / 2 + padding;
+        const reqDy = (a.h + b.h) / 2 + padding;
+        const dx = bxCenter - axCenter;
+        const dy = byCenter - ayCenter;
+
+        if (Math.abs(dx) < reqDx && Math.abs(dy) < reqDy) {
+          moved = true;
+          const overlapX = reqDx - Math.abs(dx);
+          const overlapY = reqDy - Math.abs(dy);
+
+          // Push apart along the axis with smaller penetration (deterministic tie-break)
+          if (overlapX < overlapY) {
+            const sign = dx === 0 ? (i % 2 === 0 ? -1 : 1) : Math.sign(dx);
+            const shift = overlapX / 2 + 2;
+            a.x -= sign * shift;
+            b.x += sign * shift;
+          } else {
+            const sign = dy === 0 ? (i % 2 === 0 ? -1 : 1) : Math.sign(dy);
+            const shift = overlapY / 2 + 2;
+            a.y -= sign * shift;
+            b.y += sign * shift;
+          }
+        }
+      }
+    }
+    if (!moved) break;
+  }
+
+  for (const box of boxes) {
+    positions.set(box.id, { x: Math.round(box.x), y: Math.round(box.y) });
+  }
+}
+
+/**
+ * Partition graph into connected components (sorted largest-first, deterministic by ID).
+ */
+function findConnectedComponents(
+  nodes: HandoverGraphNode[],
+  edges: HandoverGraphEdge[]
+): HandoverGraphNode[][] {
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  const adj = new Map<string, Set<string>>();
+  for (const n of nodes) adj.set(n.id, new Set());
+  for (const e of edges) {
+    if (nodeMap.has(e.source) && nodeMap.has(e.target)) {
+      adj.get(e.source)!.add(e.target);
+      adj.get(e.target)!.add(e.source);
+    }
+  }
+
+  const visited = new Set<string>();
+  const components: HandoverGraphNode[][] = [];
+  const sortedNodes = [...nodes].sort((a, b) => a.id.localeCompare(b.id));
+
+  for (const start of sortedNodes) {
+    if (visited.has(start.id)) continue;
+    const comp: HandoverGraphNode[] = [];
+    const queue = [start.id];
+    visited.add(start.id);
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      const node = nodeMap.get(curr);
+      if (node) comp.push(node);
+      const neighbors = Array.from(adj.get(curr) || []).sort();
+      for (const nxt of neighbors) {
+        if (!visited.has(nxt)) {
+          visited.add(nxt);
+          queue.push(nxt);
+        }
+      }
+    }
+    components.push(comp);
+  }
+
+  components.sort((a, b) => b.length - a.length || a[0]!.id.localeCompare(b[0]!.id));
+  return components;
+}
+
+/**
+ * Count approximate straight-line edge crossings for a candidate node layout.
+ */
+function countEdgeCrossings(
+  positions: Map<string, { x: number; y: number }>,
+  edges: HandoverGraphEdge[],
+  dims?: Map<string, { width: number; height: number }>
+): number {
+  const segs: Array<{ x1: number; y1: number; x2: number; y2: number; s: string; t: string }> = [];
+  for (const e of edges) {
+    const sp = positions.get(e.source);
+    const tp = positions.get(e.target);
+    if (!sp || !tp || e.source === e.target) continue;
+    const ss = getNodeSize(e.source, dims);
+    const ts = getNodeSize(e.target, dims);
+    segs.push({
+      x1: sp.x + ss.w / 2,
+      y1: sp.y + ss.h / 2,
+      x2: tp.x + ts.w / 2,
+      y2: tp.y + ts.h / 2,
+      s: e.source,
+      t: e.target,
+    });
+  }
+
+  let crossings = 0;
+  for (let i = 0; i < segs.length; i++) {
+    const a = segs[i]!;
+    for (let j = i + 1; j < segs.length; j++) {
+      const b = segs[j]!;
+      if (a.s === b.s || a.s === b.t || a.t === b.s || a.t === b.t) continue;
+      const ccw = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) =>
+        (cy - ay) * (bx - ax) > (by - ay) * (cx - ax);
+      if (
+        ccw(a.x1, a.y1, b.x1, b.y1, b.x2, b.y2) !== ccw(a.x2, a.y2, b.x1, b.y1, b.x2, b.y2) &&
+        ccw(a.x1, a.y1, a.x2, a.y2, b.x1, b.y1) !== ccw(a.x1, a.y1, a.x2, a.y2, b.x2, b.y2)
+      ) {
+        crossings++;
+      }
+    }
+  }
+  return crossings;
+}
+
+/**
+ * Lay out a single connected component using topology classification:
+ * - Small (n <= 4): compact centered arrangement
+ * - Hub-and-spoke: balanced multi-column fan around primary hub
+ * - Hierarchical / Layered DAG: topological longest-path layers + barycenter ordering + balanced row wrapping
+ * - Dense / Large: deterministic grid-seeded spring relaxation + collision resolution
+ */
+function layoutComponent(
+  compNodes: HandoverGraphNode[],
+  compEdges: HandoverGraphEdge[],
+  aspectRatio: number,
+  dims?: Map<string, { width: number; height: number }>
+): Map<string, { x: number; y: number }> {
+  const pos = new Map<string, { x: number; y: number }>();
+  const n = compNodes.length;
+  if (n === 0) return pos;
+
+  const colStep = DEFAULT_NODE_W + MIN_NODE_GAP_X + 34; // ~314px
+  const rowStep = DEFAULT_NODE_H + MIN_NODE_GAP_Y + 64; // ~244px
+
+  // Build adjacency & degrees
+  const inDeg = new Map<string, number>();
+  const outDeg = new Map<string, number>();
+  const incoming = new Map<string, string[]>();
+  const outgoing = new Map<string, string[]>();
+  for (const node of compNodes) {
+    inDeg.set(node.id, 0);
+    outDeg.set(node.id, 0);
+    incoming.set(node.id, []);
+    outgoing.set(node.id, []);
+  }
+  for (const e of compEdges) {
+    if (e.source === e.target) continue;
+    outgoing.get(e.source)?.push(e.target);
+    incoming.get(e.target)?.push(e.source);
+    outDeg.set(e.source, (outDeg.get(e.source) || 0) + 1);
+    inDeg.set(e.target, (inDeg.get(e.target) || 0) + 1);
+  }
+
+  const totalDeg = (id: string) => (inDeg.get(id) || 0) + (outDeg.get(id) || 0);
+  const sortedByDeg = [...compNodes].sort(
+    (a, b) => totalDeg(b.id) - totalDeg(a.id) || a.label.localeCompare(b.label)
+  );
+  const maxDeg = totalDeg(sortedByDeg[0]!.id);
+  const edgeDensity = compEdges.length / Math.max(1, n);
+
+  // 1. SMALL GRAPHS (n <= 4): Compact centered layout
+  if (n <= 4) {
+    if (n === 1) {
+      pos.set(compNodes[0]!.id, { x: 0, y: 0 });
+      return pos;
+    }
+    if (n === 2) {
+      const ordered = [...compNodes].sort((a, b) => resolveNodeTier(a) - resolveNodeTier(b) || a.label.localeCompare(b.label));
+      if (aspectRatio >= 1.25 && resolveNodeTier(ordered[0]!) === resolveNodeTier(ordered[1]!)) {
+        pos.set(ordered[0]!.id, { x: 0, y: 0 });
+        pos.set(ordered[1]!.id, { x: colStep, y: 0 });
+      } else {
+        pos.set(ordered[0]!.id, { x: 0, y: 0 });
+        pos.set(ordered[1]!.id, { x: 0, y: rowStep * 0.9 });
+      }
+      return pos;
+    }
+    // 3 or 4 nodes: root/hub on top, remaining in balanced row below
+    const root = sortedByDeg[0]!;
+    const rest = compNodes.filter((x) => x.id !== root.id).sort((a, b) => a.label.localeCompare(b.label));
+    const topWidth = (rest.length - 1) * colStep;
+    pos.set(root.id, { x: topWidth / 2, y: 0 });
+    rest.forEach((item, idx) => {
+      pos.set(item.id, { x: idx * colStep, y: rowStep });
+    });
+    resolveOverlaps(pos, compNodes.map((x) => x.id), dims);
+    return pos;
+  }
+
+  // 2. HUB-AND-SPOKE GRAPHS (one dominant central node connected to >= 4 leaves, low cross-links)
+  const isHubAndSpoke =
+    maxDeg >= Math.max(4, Math.floor(n * 0.55)) &&
+    edgeDensity <= 1.45 &&
+    n <= 32;
+
+  if (isHubAndSpoke) {
+    const hub = sortedByDeg[0]!;
+    const spokes = compNodes
+      .filter((x) => x.id !== hub.id)
+      .sort((a, b) => totalDeg(b.id) - totalDeg(a.id) || a.label.localeCompare(b.label));
+
+    const maxCols = Math.max(2, Math.min(5, Math.ceil(Math.sqrt(spokes.length * Math.max(0.8, aspectRatio)))));
+    const rows: HandoverGraphNode[][] = [];
+    for (let i = 0; i < spokes.length; i += maxCols) {
+      rows.push(spokes.slice(i, i + maxCols));
+    }
+
+    const maxRowWidth = (Math.min(spokes.length, maxCols) - 1) * colStep;
+    pos.set(hub.id, { x: maxRowWidth / 2, y: 0 });
+
+    rows.forEach((rowItems, rIdx) => {
+      const rw = (rowItems.length - 1) * colStep;
+      const startX = (maxRowWidth - rw) / 2;
+      rowItems.forEach((item, cIdx) => {
+        pos.set(item.id, { x: startX + cIdx * colStep, y: (rIdx + 1) * rowStep });
+      });
+    });
+
+    resolveOverlaps(pos, compNodes.map((x) => x.id), dims);
+    return pos;
+  }
+
+  // 3. LAYERED HIERARCHICAL LAYOUT (Topological + Architectural Tier + Barycenter Crossing Minimization)
+  // Compute topological depth via Kahn's algorithm (gracefully handles cycles)
+  const remainingIn = new Map(inDeg);
+  const topoDepth = new Map<string, number>();
+  const queue: string[] = [];
+  for (const node of compNodes) {
+    if ((remainingIn.get(node.id) || 0) === 0) {
+      queue.push(node.id);
+      topoDepth.set(node.id, 0);
+    }
+  }
+  queue.sort();
+
+  const processed = new Set<string>();
+  while (queue.length > 0) {
+    const curr = queue.shift()!;
+    processed.add(curr);
+    const d = topoDepth.get(curr) || 0;
+    for (const nxt of outgoing.get(curr) || []) {
+      topoDepth.set(nxt, Math.max(topoDepth.get(nxt) || 0, d + 1));
+      const nextIn = (remainingIn.get(nxt) || 0) - 1;
+      remainingIn.set(nxt, nextIn);
+      if (nextIn === 0) {
+        queue.push(nxt);
+      }
+    }
+  }
+
+  // Assign any cyclic/remaining nodes using architectural tier or neighbor depth
+  for (const node of compNodes) {
+    if (!topoDepth.has(node.id)) {
+      const parentDepths = (incoming.get(node.id) || [])
+        .map((p) => topoDepth.get(p))
+        .filter((d): d is number => d !== undefined);
+      const fallback = parentDepths.length > 0 ? Math.max(...parentDepths) + 1 : resolveNodeTier(node);
+      topoDepth.set(node.id, fallback);
+    }
+  }
+
+  // Blend with semantic architectural tier when graph has weak topological depth (e.g. flat bipartite or tier-driven)
+  const maxTopo = Math.max(...Array.from(topoDepth.values()), 0);
+  const byLayer = new Map<number, HandoverGraphNode[]>();
+  for (const node of compNodes) {
+    const layer = maxTopo >= 2 ? (topoDepth.get(node.id) ?? 0) : resolveNodeTier(node);
+    const bucket = byLayer.get(layer) || [];
+    bucket.push(node);
+    byLayer.set(layer, bucket);
+  }
+
+  // Determine ideal max items per row based on viewport aspect ratio and graph size
+  const targetCols = Math.max(
+    3,
+    Math.min(6, Math.round(Math.sqrt(n * Math.max(0.85, aspectRatio)) * 1.15))
+  );
+
+  // Build wrapped visual rows
+  const sortedLayers = Array.from(byLayer.keys()).sort((a, b) => a - b);
+  const visualRows: HandoverGraphNode[][] = [];
+  for (const layerKey of sortedLayers) {
+    const items = [...(byLayer.get(layerKey) || [])].sort(
+      (a, b) => totalDeg(b.id) - totalDeg(a.id) || a.label.localeCompare(b.label)
+    );
+    for (let i = 0; i < items.length; i += targetCols) {
+      visualRows.push(items.slice(i, i + targetCols));
+    }
+  }
+
+  const maxRowItems = Math.max(...visualRows.map((r) => r.length), 1);
+  const totalWidth = (maxRowItems - 1) * colStep;
+
+  // Initial row placement
+  const assignRows = () => {
+    visualRows.forEach((rowItems, rIdx) => {
+      const rw = (rowItems.length - 1) * colStep;
+      const startX = (totalWidth - rw) / 2;
+      rowItems.forEach((item, cIdx) => {
+        pos.set(item.id, { x: startX + cIdx * colStep, y: rIdx * rowStep });
+      });
+    });
+  };
+  assignRows();
+
+  // 2 forward/backward barycenter sweeps to minimize edge crossings
+  for (let sweep = 0; sweep < 2; sweep++) {
+    for (let rIdx = 1; rIdx < visualRows.length; rIdx++) {
+      visualRows[rIdx]!.sort((a, b) => {
+        const aNbrs = [...(incoming.get(a.id) || []), ...(outgoing.get(a.id) || [])];
+        const bNbrs = [...(incoming.get(b.id) || []), ...(outgoing.get(b.id) || [])];
+        const aAvg =
+          aNbrs.length > 0
+            ? aNbrs.reduce((s, id) => s + (pos.get(id)?.x ?? totalWidth / 2), 0) / aNbrs.length
+            : totalWidth / 2;
+        const bAvg =
+          bNbrs.length > 0
+            ? bNbrs.reduce((s, id) => s + (pos.get(id)?.x ?? totalWidth / 2), 0) / bNbrs.length
+            : totalWidth / 2;
+        return aAvg - bAvg || a.label.localeCompare(b.label);
+      });
+    }
+    assignRows();
+  }
+
+  // 4. DENSE GRAPH ALTERNATIVE: If dense cross-connections exist, evaluate deterministic force-directed relaxation
+  if (edgeDensity >= 1.6 && n >= 8 && n <= 80) {
+    const layeredCrossings = countEdgeCrossings(pos, compEdges, dims);
+
+    const forcePos = new Map<string, { x: number; y: number }>();
+    const gridCols = Math.max(3, Math.ceil(Math.sqrt(n * Math.max(0.85, aspectRatio))));
+    sortedByDeg.forEach((node, idx) => {
+      const r = Math.floor(idx / gridCols);
+      const c = idx % gridCols;
+      forcePos.set(node.id, { x: c * colStep, y: r * rowStep });
+    });
+
+    // Deterministic spring-repulsion relaxation (45 iterations)
+    const ids = sortedByDeg.map((x) => x.id);
+    const idealLen = Math.max(colStep, rowStep) * 1.15;
+    for (let iter = 0; iter < 45; iter++) {
+      const disp = new Map<string, { dx: number; dy: number }>(
+        ids.map((id) => [id, { dx: 0, dy: 0 }])
+      );
+      const cooling = 1 - iter / 50;
+
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          const u = ids[i]!;
+          const v = ids[j]!;
+          const pu = forcePos.get(u)!;
+          const pv = forcePos.get(v)!;
+          const dx = pv.x - pu.x;
+          const dy = pv.y - pu.y;
+          const dist = Math.max(60, Math.hypot(dx, dy));
+          const rep = (idealLen * idealLen) / dist;
+          const rx = (dx / dist) * rep * 0.22;
+          const ry = (dy / dist) * rep * 0.22;
+          disp.get(u)!.dx -= rx;
+          disp.get(u)!.dy -= ry;
+          disp.get(v)!.dx += rx;
+          disp.get(v)!.dy += ry;
+        }
+      }
+
+      for (const e of compEdges) {
+        if (e.source === e.target) continue;
+        const pu = forcePos.get(e.source);
+        const pv = forcePos.get(e.target);
+        if (!pu || !pv) continue;
+        const dx = pv.x - pu.x;
+        const dy = pv.y - pu.y;
+        const dist = Math.max(1, Math.hypot(dx, dy));
+        const att = (dist * dist) / idealLen;
+        const ax = (dx / dist) * att * 0.14;
+        const ay = (dy / dist) * att * 0.14;
+        disp.get(e.source)!.dx += ax;
+        disp.get(e.source)!.dy += ay;
+        disp.get(e.target)!.dx -= ax;
+        disp.get(e.target)!.dy -= ay;
+      }
+
+      for (const id of ids) {
+        const p = forcePos.get(id)!;
+        const d = disp.get(id)!;
+        const mag = Math.hypot(d.dx, d.dy);
+        const cap = 75 * cooling;
+        if (mag > 0) {
+          const scale = Math.min(mag, cap) / mag;
+          p.x += d.dx * scale;
+          p.y += d.dy * scale;
+        }
+      }
+    }
+
+    resolveOverlaps(forcePos, ids, dims);
+    const forceCrossings = countEdgeCrossings(forcePos, compEdges, dims);
+    if (forceCrossings < layeredCrossings) {
+      return forcePos;
+    }
+  }
+
+  resolveOverlaps(pos, compNodes.map((x) => x.id), dims);
+  return pos;
+}
+
+/**
+ * Resolve positions for incremental background knowledge updates:
+ * - Preserves all existing node coordinates.
+ * - Places newly arrived nodes near their connected neighbors (or fallback pos) and resolves local overlaps.
+ */
+export function resolveIncrementalNodePositions(
+  newLayoutNodes: Node<AmeliorateNodeData>[],
+  edges: Edge<AmeliorateEdgeData>[],
+  existingPositions: Map<string, { x: number; y: number }>,
+  dims?: Map<string, { width: number; height: number }>
+): Node<AmeliorateNodeData>[] {
+  const resultPositions = new Map<string, { x: number; y: number }>();
+  const addedIds: string[] = [];
+
+  for (const n of newLayoutNodes) {
+    const prev = existingPositions.get(n.id);
+    if (prev) {
+      resultPositions.set(n.id, prev);
+    } else {
+      addedIds.push(n.id);
+    }
+  }
+
+  // Place new nodes near connected existing neighbors if available
+  for (const id of addedIds) {
+    const layoutFallback = newLayoutNodes.find((x) => x.id === id)?.position ?? { x: 80, y: 80 };
+    const neighborCoords: Array<{ x: number; y: number }> = [];
+    for (const e of edges) {
+      if (e.source === id && resultPositions.has(e.target)) {
+        neighborCoords.push(resultPositions.get(e.target)!);
+      } else if (e.target === id && resultPositions.has(e.source)) {
+        neighborCoords.push(resultPositions.get(e.source)!);
+      }
+    }
+
+    if (neighborCoords.length > 0) {
+      const avgX = neighborCoords.reduce((s, p) => s + p.x, 0) / neighborCoords.length;
+      const avgY = neighborCoords.reduce((s, p) => s + p.y, 0) / neighborCoords.length;
+      resultPositions.set(id, { x: Math.round(avgX + 40), y: Math.round(avgY + 210) });
+    } else {
+      resultPositions.set(id, layoutFallback);
+    }
+  }
+
+  if (addedIds.length > 0) {
+    resolveOverlaps(
+      resultPositions,
+      newLayoutNodes.map((n) => n.id),
+      dims
+    );
+  }
+
+  return newLayoutNodes.map((n) => {
+    const pos = resultPositions.get(n.id) ?? n.position;
+    existingPositions.set(n.id, pos);
+    return { ...n, position: pos };
+  });
+}
+
+/**
+ * Compute adaptive, deterministic Ameliorate-style flowchart positions based on
+ * graph topology, connected components, viewport aspect ratio, and measured node dimensions.
  */
 export function buildAmeliorateFlowchartElements(
   rawNodes: HandoverGraphNode[],
   rawEdges: HandoverGraphEdge[],
-  selectedNodeId: string | null
+  selectedNodeId: string | null,
+  options?: AdaptiveLayoutOptions
 ): {
   nodes: Node<AmeliorateNodeData>[];
   edges: Edge<AmeliorateEdgeData>[];
@@ -351,109 +882,108 @@ export function buildAmeliorateFlowchartElements(
   const visibleIds = new Set(rawNodes.map((n) => n.id));
   const validEdges = rawEdges.filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target));
 
-  const incoming = new Map<string, string[]>();
   const neighborSet = new Set<string>();
-
-  for (const n of rawNodes) {
-    incoming.set(n.id, []);
-  }
   for (const e of validEdges) {
-    incoming.get(e.target)?.push(e.source);
     if (selectedNodeId) {
       if (e.source === selectedNodeId) neighborSet.add(e.target);
       if (e.target === selectedNodeId) neighborSet.add(e.source);
     }
   }
 
-  // Group nodes into balanced architectural tiers
-  const byTier = new Map<number, HandoverGraphNode[]>();
-  for (const n of rawNodes) {
-    const tier = resolveNodeTier(n);
-    const bucket = byTier.get(tier) || [];
-    bucket.push(n);
-    byTier.set(tier, bucket);
-  }
+  const vpW = options?.viewportWidth && options.viewportWidth > 200 ? options.viewportWidth : 1100;
+  const vpH = options?.viewportHeight && options.viewportHeight > 200 ? options.viewportHeight : 680;
+  const aspectRatio = vpW / vpH;
+  const dims = options?.nodeDimensions;
 
-  // Multi-row visual grid (wrap tiers with >3 items into centered sub-rows)
-  const visualRows: HandoverGraphNode[][] = [];
-  const sortedTiers = Array.from(byTier.keys()).sort((a, b) => a - b);
-
-  for (const t of sortedTiers) {
-    const items = [...(byTier.get(t) || [])];
-    items.sort((a, b) => a.label.localeCompare(b.label));
-
-    // Wrap tier into sub-rows of at most 3 items
-    const MAX_ITEMS_PER_ROW = 3;
-    for (let i = 0; i < items.length; i += MAX_ITEMS_PER_ROW) {
-      visualRows.push(items.slice(i, i + MAX_ITEMS_PER_ROW));
-    }
-  }
-
-  const NODE_COL_GAP = 330;
-  const NODE_ROW_GAP = 280;
-
-  // Standard max width: 3 nodes
-  const maxRowItems = Math.min(Math.max(...visualRows.map((r) => r.length), 1), 3);
-  const canvasWidth = (maxRowItems - 1) * NODE_COL_GAP;
-
+  const components = findConnectedComponents(rawNodes, validEdges);
   const nodePosMap = new Map<string, { x: number; y: number }>();
-  const nodes: Node<AmeliorateNodeData>[] = [];
 
-  visualRows.forEach((rowItems, rowIdx) => {
-    // Sort items by their parent's average X position to minimize line crossings
-    rowItems.sort((a, b) => {
-      const aParents = incoming.get(a.id) || [];
-      const bParents = incoming.get(b.id) || [];
-      const aAvgX =
-        aParents.length > 0
-          ? aParents.reduce((acc, pid) => acc + (nodePosMap.get(pid)?.x ?? canvasWidth / 2), 0) / aParents.length
-          : canvasWidth / 2;
-      const bAvgX =
-        bParents.length > 0
-          ? bParents.reduce((acc, pid) => acc + (nodePosMap.get(pid)?.x ?? canvasWidth / 2), 0) / bParents.length
-          : canvasWidth / 2;
-      return aAvgX - bAvgX;
-    });
+  // Pack connected components in a balanced 2D grid matching viewport aspect ratio
+  const COMP_GAP_X = 140;
+  const COMP_GAP_Y = 120;
+  const targetRowWidth = Math.max(vpW * 1.15, 950);
 
-    const rowWidth = (rowItems.length - 1) * NODE_COL_GAP;
-    const startX = (canvasWidth - rowWidth) / 2 + 50;
-    const y = rowIdx * NODE_ROW_GAP + 40;
+  let cursorX = 50;
+  let cursorY = 40;
+  let rowMaxH = 0;
 
-    rowItems.forEach((item, colIdx) => {
-      const x = startX + colIdx * NODE_COL_GAP;
-      nodePosMap.set(item.id, { x, y });
+  for (const comp of components) {
+    const compIds = new Set(comp.map((n) => n.id));
+    const compEdges = validEdges.filter((e) => compIds.has(e.source) && compIds.has(e.target));
+    const localPos = layoutComponent(comp, compEdges, aspectRatio, dims);
 
-      const spotlight: AmeliorateSpotlight =
-        selectedNodeId === item.id
-          ? "primary"
-          : selectedNodeId && neighborSet.has(item.id)
-            ? "secondary"
-            : "normal";
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const node of comp) {
+      const p = localPos.get(node.id) ?? { x: 0, y: 0 };
+      const sz = getNodeSize(node.id, dims);
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x + sz.w);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y + sz.h);
+    }
 
-      nodes.push({
-        id: item.id,
-        type: "ameliorateNode",
-        position: { x, y },
-        selected: selectedNodeId === item.id,
-        data: {
-          raw: item,
-          theme: resolveAmeliorateNodeTheme(item),
-          spotlight,
-        },
+    const compW = Math.max(DEFAULT_NODE_W, maxX - minX);
+    const compH = Math.max(DEFAULT_NODE_H, maxY - minY);
+
+    if (cursorX > 50 && cursorX + compW > targetRowWidth) {
+      cursorX = 50;
+      cursorY += rowMaxH + COMP_GAP_Y;
+      rowMaxH = 0;
+    }
+
+    for (const node of comp) {
+      const p = localPos.get(node.id) ?? { x: 0, y: 0 };
+      nodePosMap.set(node.id, {
+        x: Math.round(cursorX + (p.x - minX)),
+        y: Math.round(cursorY + (p.y - minY)),
       });
-    });
+    }
+
+    cursorX += compW + COMP_GAP_X;
+    rowMaxH = Math.max(rowMaxH, compH);
+  }
+
+  // Final global overlap safeguard across all components
+  resolveOverlaps(
+    nodePosMap,
+    rawNodes.map((n) => n.id),
+    dims
+  );
+
+  const nodes: Node<AmeliorateNodeData>[] = rawNodes.map((item) => {
+    const pos = nodePosMap.get(item.id) ?? { x: 50, y: 40 };
+    const spotlight: AmeliorateSpotlight =
+      selectedNodeId === item.id
+        ? "primary"
+        : selectedNodeId && neighborSet.has(item.id)
+          ? "secondary"
+          : "normal";
+
+    return {
+      id: item.id,
+      type: "ameliorateNode",
+      position: pos,
+      selected: selectedNodeId === item.id,
+      data: {
+        raw: item,
+        theme: resolveAmeliorateNodeTheme(item),
+        spotlight,
+      },
+    };
   });
 
-  // Node card bounding boxes for collision checking (card is 196w x ~96h, give 28px safety halo)
-  const NODE_W = 196;
-  const NODE_H = 96;
+  // Node card bounding boxes for edge-label collision checking
   const nodeBoxes: Array<{ xmin: number; xmax: number; ymin: number; ymax: number }> = [];
-  nodePosMap.forEach(({ x, y }) => {
+  nodePosMap.forEach(({ x, y }, id) => {
+    const { w, h } = getNodeSize(id, dims);
     nodeBoxes.push({
       xmin: x - 28,
-      xmax: x + NODE_W + 28,
+      xmax: x + w + 28,
       ymin: y - 28,
-      ymax: y + NODE_H + 28,
+      ymax: y + h + 28,
     });
   });
 
@@ -512,9 +1042,11 @@ export function buildAmeliorateFlowchartElements(
     const tPos = nodePosMap.get(e.target);
 
     if (e.label && sPos && tPos) {
-      const sx = sPos.x + NODE_W / 2;
-      const sy = sPos.y + NODE_H;
-      const tx = tPos.x + NODE_W / 2;
+      const sSz = getNodeSize(e.source, dims);
+      const tSz = getNodeSize(e.target, dims);
+      const sx = sPos.x + sSz.w / 2;
+      const sy = sPos.y + sSz.h;
+      const tx = tPos.x + tSz.w / 2;
       const ty = tPos.y;
       const dy = ty - sy;
 
