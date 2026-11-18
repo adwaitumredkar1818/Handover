@@ -23,6 +23,13 @@ import {
 import { api } from "@/lib/api";
 import { useLiveApp } from "@/context/LiveAppContext";
 import { AmeliorateFlowchartCanvas } from "@/components/knowledge/ameliorate/AmeliorateFlowchartCanvas";
+import {
+  buildExpandableProjection,
+  DEFAULT_GROUP_REVEAL_LIMIT,
+  GROUP_REVEAL_STEP,
+  isLargeExpandableGraph,
+  LARGE_GRAPH_THRESHOLD,
+} from "@/components/knowledge/ameliorate/expandableGraph";
 import { getCachedGraph, setCachedGraph, invalidateGraphCache } from "@/lib/graphCache";
 import { useProjectProcessingStatus } from "@/hooks/useProjectProcessingStatus";
 import { ProcessingEmptyStateCard } from "@/components/knowledge/LiveProcessingBanner";
@@ -157,6 +164,13 @@ export function KnowledgeIntelligenceWorkspace({
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [reloadCounter, setReloadCounter] = useState(0);
 
+  // Expandable overview state (strictly active ONLY for > 24 authorised nodes and non-features views)
+  const presentationPreferenceRef = useRef<Record<string, "overview" | "full">>({});
+  const [presentationMode, setPresentationMode] = useState<"overview" | "full">("full");
+  const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(() => new Set());
+  const [revealedCountsByGroup, setRevealedCountsByGroup] = useState<Map<string, number>>(() => new Map());
+  const [grewAboveThresholdNotice, setGrewAboveThresholdNotice] = useState(false);
+
   const handleRefresh = useCallback(() => {
     invalidateGraphCache(`ki_graph:${projectId}`);
     invalidateGraphCache(`ki_domains:${projectId}`);
@@ -195,6 +209,16 @@ export function KnowledgeIntelligenceWorkspace({
   useEffect(() => {
     lastGraphSignatureRef.current = "";
     setSelectedNodeDetail(null);
+    setExpandedGroupIds(new Set());
+    setRevealedCountsByGroup(new Map());
+    setGrewAboveThresholdNotice(false);
+    const prefKey = `${projectId}:${mode}`;
+    const existingPref = presentationPreferenceRef.current[prefKey];
+    if (existingPref) {
+      setPresentationMode(existingPref);
+    } else {
+      setPresentationMode("full");
+    }
   }, [projectId, mode]);
 
   const loadDomains = useCallback(async () => {
@@ -254,6 +278,19 @@ export function KnowledgeIntelligenceWorkspace({
         const nextSig = computeGraphSignature(nextNodes, nextEdges);
         if (nextSig !== lastGraphSignatureRef.current) {
           lastGraphSignatureRef.current = nextSig;
+          const prefKey = `${projectId}:${mode}`;
+          const existingPref = presentationPreferenceRef.current[prefKey];
+          const eligible = isLargeExpandableGraph(nextNodes.length, mode);
+          if (!existingPref && nextNodes.length > 0) {
+            const initialPref: "overview" | "full" = eligible ? "overview" : "full";
+            presentationPreferenceRef.current[prefKey] = initialPref;
+            setPresentationMode(initialPref);
+            setGrewAboveThresholdNotice(false);
+          } else if (existingPref === "full" && eligible && rawNodes.length > 0 && rawNodes.length <= LARGE_GRAPH_THRESHOLD) {
+            // Live update crossed 24 -> 25+ nodes while user is viewing full graph:
+            // preserve their current view and offer a non-disruptive switch option.
+            setGrewAboveThresholdNotice(true);
+          }
           setRawNodes(nextNodes);
           setRawEdges(nextEdges);
         }
@@ -281,6 +318,19 @@ export function KnowledgeIntelligenceWorkspace({
         const nextSig = computeGraphSignature(nextNodes, nextEdges);
         if (nextSig !== lastGraphSignatureRef.current) {
           lastGraphSignatureRef.current = nextSig;
+          const prefKey = `${projectId}:${mode}`;
+          const existingPref = presentationPreferenceRef.current[prefKey];
+          const eligible = isLargeExpandableGraph(nextNodes.length, mode);
+          if (!existingPref && nextNodes.length > 0) {
+            const initialPref: "overview" | "full" = eligible ? "overview" : "full";
+            presentationPreferenceRef.current[prefKey] = initialPref;
+            setPresentationMode(initialPref);
+            setGrewAboveThresholdNotice(false);
+          } else if (existingPref === "full" && eligible && rawNodes.length > 0 && rawNodes.length <= LARGE_GRAPH_THRESHOLD) {
+            // Live update crossed 24 -> 25+ nodes while user is viewing full graph:
+            // preserve their current view and offer a non-disruptive switch option.
+            setGrewAboveThresholdNotice(true);
+          }
           setRawNodes(nextNodes);
           setRawEdges(nextEdges);
         }
@@ -300,10 +350,55 @@ export function KnowledgeIntelligenceWorkspace({
     };
   }, [projectId, mode, searchQuery, statusFilter, verificationFilter, includeSuggested, reloadCounter]);
 
+  const isExpandableEligible = isLargeExpandableGraph(rawNodes.length, mode);
+  const isOverviewActive = isExpandableEligible && presentationMode === "overview";
+
+  const expandableProjection = useMemo(() => {
+    if (!isOverviewActive) return null;
+    return buildExpandableProjection({
+      rawNodes,
+      rawEdges,
+      mode,
+      expandedGroupIds,
+      revealedCountsByGroup,
+      searchQuery,
+    });
+  }, [isOverviewActive, rawNodes, rawEdges, mode, expandedGroupIds, revealedCountsByGroup, searchQuery]);
+
+  const displayedNodes = isOverviewActive && expandableProjection ? expandableProjection.nodes : rawNodes;
+  const displayedEdges = isOverviewActive && expandableProjection ? expandableProjection.edges : rawEdges;
+  const effectiveSelectedNodeId =
+    selectedNodeDetail?.node.id ??
+    (isOverviewActive && expandableProjection ? expandableProjection.highlightedNodeId : null);
+
+  const handleTogglePresentationMode = useCallback(
+    (nextMode: "overview" | "full") => {
+      const prefKey = `${projectId}:${mode}`;
+      presentationPreferenceRef.current[prefKey] = nextMode;
+      setPresentationMode(nextMode);
+      setGrewAboveThresholdNotice(false);
+    },
+    [projectId, mode]
+  );
+
   const handleSelectNode = async (_: unknown, node: Node) => {
     if (mode === "domains") return;
     const raw = (node.data as { raw?: KIGraphNode })?.raw;
     if (!raw) return;
+    const meta = (raw.metadata ?? {}) as Record<string, unknown>;
+    if (meta.is_presentation_group && typeof meta.group_id === "string") {
+      const groupId = meta.group_id;
+      setExpandedGroupIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(groupId)) {
+          next.delete(groupId);
+        } else {
+          next.add(groupId);
+        }
+        return next;
+      });
+      return;
+    }
     try {
       const detail = await api.knowledgeIntelligence.getGraphNodeDetail(projectId, mode, raw.id);
       setSelectedNodeDetail({
@@ -572,11 +667,77 @@ export function KnowledgeIntelligenceWorkspace({
             </div>
           ) : (
             <CanvasErrorBoundary onReset={handleRefresh}>
+              {isExpandableEligible && (
+                <div className="absolute top-3 left-3 z-20 flex flex-wrap items-center gap-2 bg-white/95 backdrop-blur-xs border border-slate-200 rounded-lg px-2.5 py-1.5 shadow-xs text-xs">
+                  {isOverviewActive ? (
+                    <>
+                      <span className="font-medium text-slate-700">
+                        Grouped Overview ({rawNodes.length} nodes)
+                      </span>
+                      {expandableProjection && expandableProjection.groups.some((g) => g.expanded) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setExpandedGroupIds(new Set());
+                            setRevealedCountsByGroup(new Map());
+                          }}
+                          className="px-2 py-1 rounded border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 font-medium"
+                        >
+                          Back to Overview
+                        </button>
+                      )}
+                      {expandableProjection?.groups
+                        .filter((g) => g.expanded && g.revealedCount < g.totalCount)
+                        .map((g) => (
+                          <button
+                            key={g.groupId}
+                            type="button"
+                            onClick={() =>
+                              setRevealedCountsByGroup((prev) => {
+                                const next = new Map(prev);
+                                next.set(
+                                  g.groupId,
+                                  (next.get(g.groupId) ?? DEFAULT_GROUP_REVEAL_LIMIT) + GROUP_REVEAL_STEP
+                                );
+                                return next;
+                              })
+                            }
+                            className="px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 font-medium"
+                          >
+                            Show more {g.label} (+{g.totalCount - g.revealedCount})
+                          </button>
+                        ))}
+                      <button
+                        type="button"
+                        onClick={() => handleTogglePresentationMode("full")}
+                        className="px-2 py-1 rounded border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 font-medium"
+                      >
+                        Show Full Graph
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="font-medium text-slate-700">
+                        {grewAboveThresholdNotice
+                          ? `Graph grew to ${rawNodes.length} nodes`
+                          : `Full Graph (${rawNodes.length} nodes)`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleTogglePresentationMode("overview")}
+                        className="px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 font-medium"
+                      >
+                        Switch to Grouped Overview
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
               <AmeliorateFlowchartCanvas
                 key={mode}
-                rawNodes={rawNodes}
-                rawEdges={rawEdges}
-                selectedNodeId={selectedNodeDetail?.node.id ?? null}
+                rawNodes={displayedNodes}
+                rawEdges={displayedEdges}
+                selectedNodeId={effectiveSelectedNodeId}
                 onSelectNode={(node) => handleSelectNode(null, node)}
               />
             </CanvasErrorBoundary>
