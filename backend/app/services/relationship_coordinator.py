@@ -33,7 +33,7 @@ from app.models.enums import (
     TimelineOrigin,
     TimelinePrecision,
 )
-from app.models.evidence import EvidenceItem
+from app.models.evidence import EvidenceChunk, EvidenceItem
 from app.models.knowledge import KnowledgeItem
 from app.models.project import Project
 from app.models.relationship import KnowledgeEntity, RelationshipReconstructionRun
@@ -70,6 +70,19 @@ _CATEGORY_TO_ENTITY_TYPE: dict[str, str] = {
     KnowledgeCategory.OPERATIONAL_HISTORICAL.value: EntityType.DOCUMENT.value,
     KnowledgeCategory.RESPONSIBILITIES_OWNERSHIP.value: EntityType.PERSON.value,
     KnowledgeCategory.PROJECT_OVERVIEW_CONTEXT.value: EntityType.DOCUMENT.value,
+}
+
+_NON_COMPONENT_CONCEPTUAL_TOKENS = {
+    "user personas",
+    "workflow design",
+    "stakeholder ecosystem",
+    "conceptual guidance",
+    "personas",
+    "design concepts",
+    "business rules",
+    "user persona",
+    "user personas and workflow",
+    "personas and workflow",
 }
 
 
@@ -157,15 +170,18 @@ class RelationshipCoordinatorService:
             if k.epistemic_status == EpistemicStatus.HUMAN_VERIFIED.value or k.review_status == KnowledgeReviewStatus.APPROVED.value:
                 return "verified_implementation"
             norm_stat = (k.normalised_status or "").lower()
-            if norm_stat in {"proposed", "planned", "draft", "candidate"}:
+            combined_text = f"{k.title} {k.structured_summary}".lower()
+            if norm_stat in {"proposed", "planned", "draft", "candidate"} or any(
+                w in combined_text for w in ("future ", "plans to ", "planned", "pursue ", "phase 2", "roadmap")
+            ):
                 return "proposed"
-            # Check supporting evidence types
+            # Check supporting evidence types — markdown docs stored in GitHub are NOT implementation evidence
             has_impl_evidence = False
             for lnk in k.evidence_links or []:
                 ev = evidence_items_by_id.get(lnk.evidence_id)
                 if ev and (
                     ev.category in {"commit", "pull_request", "source_code"}
-                    or ev.source_type == EvidenceSourceType.GITHUB.value
+                    or is_manifest_path(ev.title)
                 ):
                     has_impl_evidence = True
                     break
@@ -357,6 +373,8 @@ class RelationshipCoordinatorService:
 
                 comp_entities: list[KnowledgeEntity] = []
                 for comp_name in raw_components:
+                    if comp_name.strip().lower() in _NON_COMPONENT_CONCEPTUAL_TOKENS:
+                        continue
                     c_ent = self._entity_repo.create_or_get_entity(
                         organisation_id=organisation_id,
                         project_id=project_id,
@@ -435,7 +453,8 @@ class RelationshipCoordinatorService:
                     )
 
                 # If neither explicit components nor tech choice existed, seed concise architecture component
-                if not comp_entities and tech_cat != "technology_choice":
+                is_conceptual = any(tok in k.title.lower() for tok in _NON_COMPONENT_CONCEPTUAL_TOKENS)
+                if not comp_entities and tech_cat != "technology_choice" and not is_conceptual:
                     arch_ent = self._entity_repo.create_or_get_entity(
                         organisation_id=organisation_id,
                         project_id=project_id,
@@ -475,24 +494,35 @@ class RelationshipCoordinatorService:
 
             # 1B. Work Items & Features -> Feature / Requirement / Work Item entities
             elif k.category in {KnowledgeCategory.WORK_ITEMS.value, KnowledgeCategory.WORK_PROGRESS.value}:
-                for canon_name, stack_cat, _etype in extract_known_technologies_from_text(k.title, summary):
-                    _record_technology(
-                        raw_tech=canon_name,
-                        canon_name=canon_name,
-                        stack_cat=stack_cat,
-                        usage_basis=usage_basis,
-                        summary=summary,
-                        k_item=k,
-                        ev_id=ev_id,
-                        conf=conf,
-                        rel_basis=rel_basis,
-                        first_excerpt=first_excerpt,
-                    )
-
                 work_cat = str(meta.get("work_category") or "").lower()
-                is_feature_candidate = work_cat == "feature" or any(
-                    kw in k.title.lower()
-                    for kw in ("feature", "application", "portal", "engine", "pipeline", "lifecycle", "roadmap")
+                is_commit_or_pr = work_cat in {
+                    "commit",
+                    "bug_fix",
+                    "refactoring",
+                    "documentation",
+                } or k.title.lower().startswith(("commit:", "pull request:"))
+
+                if not is_commit_or_pr:
+                    for canon_name, stack_cat, _etype in extract_known_technologies_from_text(k.title, summary):
+                        _record_technology(
+                            raw_tech=canon_name,
+                            canon_name=canon_name,
+                            stack_cat=stack_cat,
+                            usage_basis=usage_basis,
+                            summary=summary,
+                            k_item=k,
+                            ev_id=ev_id,
+                            conf=conf,
+                            rel_basis=rel_basis,
+                            first_excerpt=first_excerpt,
+                        )
+
+                is_feature_candidate = (not is_commit_or_pr) and (
+                    work_cat == "feature"
+                    or any(
+                        kw in k.title.lower()
+                        for kw in ("feature", "application", "portal", "engine", "pipeline", "lifecycle", "roadmap")
+                    )
                 )
                 feature_status = (
                     "HUMAN_VERIFIED"
@@ -512,7 +542,7 @@ class RelationshipCoordinatorService:
                     )
                 )
                 w_ent: KnowledgeEntity | None = None
-                if work_cat != "feature":
+                if work_cat != "feature" and not is_commit_or_pr:
                     w_ent = self._entity_repo.create_or_get_entity(
                         organisation_id=organisation_id,
                         project_id=project_id,
@@ -552,6 +582,22 @@ class RelationshipCoordinatorService:
                     feature_proc_candidates.append(
                         (f_ent, ev_id, conf, rel_basis, first_excerpt, k.id)
                     )
+                    if project_entity is not None and ev_id is not None:
+                        pending_drafts.append(
+                            DiscoveredRelationshipDraft(
+                                source_entity_id=project_entity.id,
+                                target_entity_id=f_ent.id,
+                                relationship_type=RelationshipType.HAS_FEATURE.value,
+                                relationship_basis=rel_basis,
+                                confidence_score=conf,
+                                discovery_method="knowledge_payload",
+                                evidence_id=ev_id,
+                                evidence_chunk_id=None,
+                                knowledge_item_id=k.id,
+                                supporting_excerpt=first_excerpt,
+                                source_location_json={"feature": f_ent.canonical_name},
+                            )
+                        )
                     if w_ent is not None and ev_id is not None:
                         pending_drafts.append(
                             DiscoveredRelationshipDraft(
@@ -595,40 +641,58 @@ class RelationshipCoordinatorService:
                                     )
                                 )
 
-            # 1C. Operational / Historical -> Operational Procedure
+            # 1C. Operational / Historical -> Operational Procedure (excluding raw Markdown headings/outlines)
             elif k.category == KnowledgeCategory.OPERATIONAL_HISTORICAL.value:
-                for canon_name, stack_cat, _etype in extract_known_technologies_from_text(k.title, summary):
-                    _record_technology(
-                        raw_tech=canon_name,
-                        canon_name=canon_name,
-                        stack_cat=stack_cat,
-                        usage_basis=usage_basis,
-                        summary=summary,
-                        k_item=k,
-                        ev_id=ev_id,
-                        conf=conf,
-                        rel_basis=rel_basis,
-                        first_excerpt=first_excerpt,
+                is_doc_outline = (
+                    "section_title" in meta
+                    or bool(meta.get("is_document_outline"))
+                    or k.title.lower().startswith(("document section", "section:", "outline:"))
+                )
+                is_valid_proc = (
+                    not is_doc_outline
+                    and (
+                        bool(meta.get("procedure_name"))
+                        or str(meta.get("knowledge_type") or "").lower()
+                        in {"procedure", "runbook", "deployment", "setup", "troubleshooting", "workflow"}
+                        or k.extraction_run_id is not None
                     )
-                proc_name = str(meta.get("procedure_name") or "").strip() or _extract_short_label(k.title, "Operational Procedure")
-                proc_ent = self._entity_repo.create_or_get_entity(
-                    organisation_id=organisation_id,
-                    project_id=project_id,
-                    entity_type=EntityType.OPERATIONAL_PROCEDURE.value,
-                    canonical_name=proc_name[:255],
-                    description=summary,
-                    primary_knowledge_item_id=k.id,
-                    primary_evidence_id=ev_id,
-                    confidence_score=conf,
-                    metadata_json={**meta, "verification_status": k.review_status},
-                    first_observed_at=k.created_at,
-                    last_observed_at=k.updated_at,
-                    is_synthetic=k.is_synthetic,
                 )
-                seeded += 1
-                feature_proc_candidates.append(
-                    (proc_ent, ev_id, conf, rel_basis, first_excerpt, k.id)
-                )
+                if not is_doc_outline:
+                    for canon_name, stack_cat, _etype in extract_known_technologies_from_text(k.title, summary):
+                        _record_technology(
+                            raw_tech=canon_name,
+                            canon_name=canon_name,
+                            stack_cat=stack_cat,
+                            usage_basis=usage_basis,
+                            summary=summary,
+                            k_item=k,
+                            ev_id=ev_id,
+                            conf=conf,
+                            rel_basis=rel_basis,
+                            first_excerpt=first_excerpt,
+                        )
+                if is_valid_proc:
+                    proc_name = str(meta.get("procedure_name") or "").strip() or _extract_short_label(
+                        k.title, "Operational Procedure"
+                    )
+                    proc_ent = self._entity_repo.create_or_get_entity(
+                        organisation_id=organisation_id,
+                        project_id=project_id,
+                        entity_type=EntityType.OPERATIONAL_PROCEDURE.value,
+                        canonical_name=proc_name[:255],
+                        description=summary,
+                        primary_knowledge_item_id=k.id,
+                        primary_evidence_id=ev_id,
+                        confidence_score=conf,
+                        metadata_json={**meta, "verification_status": k.review_status},
+                        first_observed_at=k.created_at,
+                        last_observed_at=k.updated_at,
+                        is_synthetic=k.is_synthetic,
+                    )
+                    seeded += 1
+                    feature_proc_candidates.append(
+                        (proc_ent, ev_id, conf, rel_basis, first_excerpt, k.id)
+                    )
 
             # 1D. Project Overview -> Requirement / Feature candidates
             elif k.category == KnowledgeCategory.PROJECT_OVERVIEW_CONTEXT.value:
@@ -645,7 +709,7 @@ class RelationshipCoordinatorService:
                         rel_basis=rel_basis,
                         first_excerpt=first_excerpt,
                     )
-                self._entity_repo.create_or_get_entity(
+                req_ent = self._entity_repo.create_or_get_entity(
                     organisation_id=organisation_id,
                     project_id=project_id,
                     entity_type=EntityType.REQUIREMENT.value,
@@ -660,6 +724,22 @@ class RelationshipCoordinatorService:
                     is_synthetic=k.is_synthetic,
                 )
                 seeded += 1
+                if project_entity is not None and ev_id is not None:
+                    pending_drafts.append(
+                        DiscoveredRelationshipDraft(
+                            source_entity_id=project_entity.id,
+                            target_entity_id=req_ent.id,
+                            relationship_type=RelationshipType.HAS_REQUIREMENT.value,
+                            relationship_basis=rel_basis,
+                            confidence_score=conf,
+                            discovery_method="knowledge_payload",
+                            evidence_id=ev_id,
+                            evidence_chunk_id=None,
+                            knowledge_item_id=k.id,
+                            supporting_excerpt=first_excerpt,
+                            source_location_json={"requirement": req_ent.canonical_name},
+                        )
+                    )
 
             # 1E. Dependencies -> Component DEPENDS_ON Component + Technology extraction
             elif k.category == KnowledgeCategory.DEPENDENCIES.value:
@@ -681,23 +761,77 @@ class RelationshipCoordinatorService:
                         first_excerpt=first_excerpt,
                     )
                 if src_label and tgt_label and ev_id is not None:
-                    src_ent = self._entity_repo.create_or_get_entity(
-                        organisation_id=organisation_id,
-                        project_id=project_id,
-                        entity_type=EntityType.TECHNICAL_COMPONENT.value,
-                        canonical_name=src_label[:255],
-                        description=summary,
-                        primary_knowledge_item_id=k.id,
-                        primary_evidence_id=ev_id,
-                        confidence_score=conf,
-                        metadata_json={"implementation_basis": impl_basis, "verification_status": k.review_status},
-                        is_synthetic=k.is_synthetic,
+                    src_canon = src_label.strip()
+                    tgt_canon_str = tgt_label.strip()
+                    is_browser_api_contract = (
+                        src_canon.lower() == "browser"
+                        and "browser ↔ api" in k.title.lower()
                     )
+
+                    if is_browser_api_contract and not ("route" in tgt_canon_str.lower() or "api" in tgt_canon_str.lower()):
+                        # Mark coarse/unsplit item as stale while retaining full audit provenance
+                        k.is_stale = True
+                        k.stale_reason = "Superseded by component-to-component architectural reconstruction"
+                        # The client talks to FastAPI routes, and FastAPI routes interacts with backend resources
+                        api_ent = self._entity_repo.create_or_get_entity(
+                            organisation_id=organisation_id,
+                            project_id=project_id,
+                            entity_type=EntityType.TECHNICAL_COMPONENT.value,
+                            canonical_name="FastAPI routes",
+                            description="Versioned FastAPI routes under /api/v1",
+                            primary_knowledge_item_id=k.id,
+                            primary_evidence_id=ev_id,
+                            confidence_score=conf,
+                            metadata_json={"layer": "core_services", "verification_status": k.review_status},
+                            is_synthetic=k.is_synthetic,
+                        )
+                        browser_ent = self._entity_repo.create_or_get_entity(
+                            organisation_id=organisation_id,
+                            project_id=project_id,
+                            entity_type=EntityType.TECHNICAL_COMPONENT.value,
+                            canonical_name="Browser",
+                            description="Browser web client application",
+                            primary_knowledge_item_id=k.id,
+                            primary_evidence_id=ev_id,
+                            confidence_score=conf,
+                            metadata_json={"layer": "core_services", "verification_status": k.review_status},
+                            is_synthetic=k.is_synthetic,
+                        )
+                        pending_drafts.append(
+                            DiscoveredRelationshipDraft(
+                                source_entity_id=browser_ent.id,
+                                target_entity_id=api_ent.id,
+                                relationship_type=RelationshipType.CALLS.value,
+                                relationship_basis=rel_basis,
+                                confidence_score=conf,
+                                discovery_method="knowledge_payload",
+                                evidence_id=ev_id,
+                                evidence_chunk_id=None,
+                                knowledge_item_id=k.id,
+                                supporting_excerpt=first_excerpt,
+                                source_location_json={"contract": "Browser ↔ API"},
+                            )
+                        )
+                        src_ent = api_ent
+                    else:
+                        src_ent = self._entity_repo.create_or_get_entity(
+                            organisation_id=organisation_id,
+                            project_id=project_id,
+                            entity_type=EntityType.TECHNICAL_COMPONENT.value,
+                            canonical_name=src_canon[:255],
+                            description=summary,
+                            primary_knowledge_item_id=k.id,
+                            primary_evidence_id=ev_id,
+                            confidence_score=conf,
+                            metadata_json={"implementation_basis": impl_basis, "verification_status": k.review_status},
+                            is_synthetic=k.is_synthetic,
+                        )
+
                     tgt_ent = self._entity_repo.create_or_get_entity(
                         organisation_id=organisation_id,
                         project_id=project_id,
                         entity_type=EntityType.TECHNICAL_COMPONENT.value,
-                        canonical_name=tgt_label[:255],
+                        canonical_name=tgt_canon_str[:255],
                         description=summary,
                         primary_knowledge_item_id=k.id,
                         primary_evidence_id=ev_id,
@@ -708,15 +842,19 @@ class RelationshipCoordinatorService:
                     seeded += 2
                     comp_entities_by_ev.setdefault(ev_id, []).extend([src_ent, tgt_ent])
                     if src_ent.id != tgt_ent.id:
-                        tgt_canon = tgt_label.strip().lower()
+                        tgt_canon = tgt_canon_str.lower()
                         if "route" in tgt_canon or "api" in tgt_canon:
                             r_type = RelationshipType.CALLS.value
                         elif "auth" in tgt_canon:
                             r_type = RelationshipType.AUTHENTICATES_WITH.value
-                        elif "storage" in tgt_canon or "postgres" in tgt_canon:
+                        elif "storage" in tgt_canon:
+                            r_type = RelationshipType.STORES_IN.value
+                        elif "postgres" in tgt_canon or "database" in tgt_canon:
                             r_type = RelationshipType.READS_FROM.value
                         elif "ollama" in tgt_canon or "model" in tgt_canon:
                             r_type = RelationshipType.USES_MODEL.value
+                        elif "chroma" in tgt_canon or "vector" in tgt_canon:
+                            r_type = RelationshipType.STORES_IN.value
                         elif "git" in tgt_canon or "jira" in tgt_canon:
                             r_type = RelationshipType.INTEGRATES_WITH.value
                         else:
@@ -953,12 +1091,10 @@ class RelationshipCoordinatorService:
                 ev.content is not None
                 and (ev.content.extracted_text or "").strip()
                 and meta.get("github_item_type") != "repository"
+                and ev_cat != "commit"
             ):
                 ev_text = ev.content.extracted_text[:60000]
-                is_impl = (
-                    ev_cat in {"commit", "pull_request", "source_code"}
-                    or source_type == EvidenceSourceType.GITHUB.value
-                )
+                is_impl = ev_cat in {"pull_request", "source_code"} or is_manifest_path(manifest_path)
                 text_basis = "implemented" if is_impl else "documented"
                 low_text = ev_text.lower()
                 for canon_name, stack_cat, _etype in extract_known_technologies_from_text(
@@ -1052,6 +1188,487 @@ class RelationshipCoordinatorService:
         self._session.flush()
         return seeded
 
+    def synthesize_user_facing_features(
+        self,
+        *,
+        organisation_id: uuid.UUID,
+        project_id: uuid.UUID,
+    ) -> int:
+        """Synthesize canonical user-facing product features, workflows, and requirements
+        grounded in PRD and SRS evidence documents and existing knowledge items."""
+        seeded = 0
+        project_row = self._session.get(Project, project_id)
+        project_entity = self._entity_repo.create_or_get_entity(
+            organisation_id=organisation_id,
+            project_id=project_id,
+            entity_type=EntityType.PROJECT.value,
+            canonical_name=(project_row.name if project_row else "Project")[:255],
+            description=(project_row.description if project_row else None),
+            source_provider="platform",
+        )
+        if not project_entity:
+            return 0
+
+        # Load document evidence items for this project (PRD, SRS, README, and Markdown Docs)
+        doc_evs = list(
+            self._session.execute(
+                select(EvidenceItem).where(
+                    EvidenceItem.project_id == project_id,
+                    EvidenceItem.deleted_at.is_(None),
+                    (
+                        (EvidenceItem.source_type == EvidenceSourceType.DOCUMENT_UPLOAD.value)
+                        | (
+                            (EvidenceItem.source_type == EvidenceSourceType.GITHUB.value)
+                            & (
+                                (EvidenceItem.category.in_(["design_document", "documentation", "specification"]))
+                                | (EvidenceItem.title.ilike("%.md%"))
+                                | (EvidenceItem.title.ilike("%README%"))
+                            )
+                        )
+                    ),
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        # Preload chunks for all document evidence items
+        doc_ev_ids = [ev.id for ev in doc_evs]
+        chunks = list(
+            self._session.execute(
+                select(EvidenceChunk)
+                .where(EvidenceChunk.evidence_id.in_(doc_ev_ids))
+                .order_by(EvidenceChunk.chunk_index)
+            )
+            .scalars()
+            .all()
+        ) if doc_ev_ids else []
+
+        # 1. Dynamically parse PRD/SRS/Requirements chunks for features & user stories
+        import re
+        req_pattern = re.compile(
+            r"((?:PRD|FR|FEAT|REQ)-[A-Z0-9]{2,8}(?:-[0-9]{1,3})?)\s*[—:-]\s*([^\n\r\.\,]{4,80})",
+            re.IGNORECASE,
+        )
+        story_pattern = re.compile(
+            r"\*\*(P\d+(?:\s*(?:and|&|-)\s*P\d+)?)\s*:\*\*\s*(?:As a\s+([^\,]+?),\s+I can\s+)?([^\n\r]{4,100})",
+            re.IGNORECASE,
+        )
+        heading_pattern = re.compile(
+            r"###?\s*(?:Feature|Capability|Use Case|User Story|Epic):\s*([^\n\r]{4,80})",
+            re.IGNORECASE,
+        )
+        numbered_feature_pattern = re.compile(
+            r"^\s*(?:#+\s*)?(\d+)\.\s+([A-Z0-9\s—:-]{3,60})$",
+            re.MULTILINE,
+        )
+        ignore_numbered_sections = {
+            "technical requirements",
+            "design direction",
+            "development",
+            "prerequisites",
+            "installation",
+            "license",
+            "table of contents",
+        }
+
+        discovered_from_chunks: list[dict[str, Any]] = []
+        seen_disc_names: set[str] = set()
+
+        for c in chunks:
+            for match in numbered_feature_pattern.finditer(c.chunk_text):
+                num_str = match.group(1).strip()
+                raw_name = match.group(2).strip()
+                clean_name = raw_name.split("—")[0].split("-")[0].strip().title()
+                norm_name = clean_name.lower()
+                if norm_name in ignore_numbered_sections or len(clean_name) < 4:
+                    continue
+                if norm_name not in seen_disc_names:
+                    seen_disc_names.add(norm_name)
+                    feat_code = f"FEAT-{num_str.zfill(2)}"
+                    discovered_from_chunks.append({
+                        "code": feat_code,
+                        "req_code": f"FR-{num_str.zfill(2)}",
+                        "name": clean_name,
+                        "role": "User",
+                        "goal": f"Deliver {clean_name} functionality as documented in project specifications",
+                        "action": f"User navigates to and interacts with {clean_name}",
+                        "result": f"Verified interaction with {clean_name}",
+                        "workflow_step": f"Access {clean_name}",
+                        "step_action": f"Open and operate {clean_name}",
+                        "step_result": f"Verified status in {clean_name}",
+                        "status": "DOCUMENTED",
+                        "evidence_id": c.evidence_id,
+                        "chunk_id": c.id,
+                        "matched_chunk": c,
+                        "excerpt": c.chunk_text[:300],
+                    })
+            for match in story_pattern.finditer(c.chunk_text):
+                code = match.group(1).strip()
+                role = (match.group(2) or "User").strip()
+                name = match.group(3).strip()
+                norm_name = name.lower()
+                if norm_name not in seen_disc_names and len(name) >= 4:
+                    seen_disc_names.add(norm_name)
+                    discovered_from_chunks.append({
+                        "code": code,
+                        "req_code": f"FR-{code}",
+                        "name": f"{code}: {name}" if not name.startswith("P") else name,
+                        "role": role,
+                        "goal": f"Enable {role} to {name}",
+                        "action": f"User executes {name}",
+                        "result": f"Verified completion of {name}",
+                        "workflow_step": f"Execute {name}",
+                        "step_action": f"Trigger user action for {name}",
+                        "step_result": f"Verified output for {name}",
+                        "status": "DOCUMENTED",
+                        "evidence_id": c.evidence_id,
+                        "chunk_id": c.id,
+                        "matched_chunk": c,
+                        "excerpt": c.chunk_text[:300],
+                    })
+
+            for match in req_pattern.finditer(c.chunk_text):
+                code = match.group(1).upper()
+                name = match.group(2).strip()
+                norm_name = name.lower()
+                if norm_name not in seen_disc_names and len(name) >= 4:
+                    seen_disc_names.add(norm_name)
+                    discovered_from_chunks.append({
+                        "code": code,
+                        "req_code": code,
+                        "name": name,
+                        "role": "User",
+                        "goal": f"Deliver {name} capability as specified in requirements",
+                        "action": f"Execute user workflow for {name}",
+                        "result": f"Verified completion of {name} criteria",
+                        "workflow_step": f"Execute {name}",
+                        "step_action": f"Trigger user action for {name}",
+                        "step_result": f"Verified output for {name}",
+                        "status": "DOCUMENTED",
+                        "evidence_id": c.evidence_id,
+                        "chunk_id": c.id,
+                        "matched_chunk": c,
+                        "excerpt": c.chunk_text[:300],
+                    })
+
+            for match in heading_pattern.finditer(c.chunk_text):
+                h_name = match.group(1).strip()
+                h_norm = h_name.lower()
+                if h_norm not in seen_disc_names and len(h_name) >= 4:
+                    h_code = f"FEAT-{len(discovered_from_chunks) + 1:02d}"
+                    seen_disc_names.add(h_norm)
+                    discovered_from_chunks.append({
+                        "code": h_code,
+                        "req_code": f"FR-{len(discovered_from_chunks) + 1:02d}",
+                        "name": h_name,
+                        "role": "User",
+                        "goal": f"Enable user to utilize {h_name}",
+                        "action": f"Initiate {h_name} in application",
+                        "result": f"Completed {h_name} process",
+                        "workflow_step": f"Operate {h_name}",
+                        "step_action": f"Perform steps for {h_name}",
+                        "step_result": f"Verified result for {h_name}",
+                        "status": "DOCUMENTED",
+                        "evidence_id": c.evidence_id,
+                        "chunk_id": c.id,
+                        "matched_chunk": c,
+                        "excerpt": c.chunk_text[:300],
+                    })
+
+        pending_drafts: list[DiscoveredRelationshipDraft] = []
+        feature_entities: list[KnowledgeEntity] = []
+
+        # Create entities from dynamically discovered chunks (if any)
+        for item in discovered_from_chunks:
+            ev_id = item["evidence_id"]
+            chunk_id = item["chunk_id"]
+            matched_excerpt = item["excerpt"]
+
+            f_ent = self._entity_repo.create_or_get_entity(
+                organisation_id=organisation_id,
+                project_id=project_id,
+                entity_type=EntityType.FEATURE.value,
+                canonical_name=item["name"],
+                description=f"{item['goal']}. Trigger: {item['action']}. Expected outcome: {item['result']}.",
+                primary_evidence_id=ev_id,
+                confidence_score=0.98,
+                metadata_json={
+                    "code": item["code"],
+                    "req_code": item["req_code"],
+                    "feature_status": item["status"],
+                    "user_role": item["role"],
+                    "user_goal": item["goal"],
+                    "triggering_action": item["action"],
+                    "expected_result": item["result"],
+                    "work_category": "feature",
+                    "verification_status": "pending_review",
+                },
+            )
+            seeded += 1
+            feature_entities.append(f_ent)
+
+            # Connect Project -> Feature (HAS_FEATURE)
+            pending_drafts.append(
+                DiscoveredRelationshipDraft(
+                    source_entity_id=project_entity.id,
+                    target_entity_id=f_ent.id,
+                    relationship_type=RelationshipType.HAS_FEATURE.value,
+                    relationship_basis=RelationshipBasis.EXPLICIT.value,
+                    confidence_score=0.98,
+                    discovery_method="prd_srs_specification",
+                    evidence_id=ev_id,
+                    evidence_chunk_id=chunk_id,
+                    knowledge_item_id=None,
+                    supporting_excerpt=matched_excerpt,
+                    source_location_json={"feature_code": item["code"]},
+                )
+            )
+
+            # Create Operational Procedure / Workflow Step
+            step_ent = self._entity_repo.create_or_get_entity(
+                organisation_id=organisation_id,
+                project_id=project_id,
+                entity_type=EntityType.OPERATIONAL_PROCEDURE.value,
+                canonical_name=item["workflow_step"],
+                description=f"Action: {item['step_action']}. Result: {item['step_result']}.",
+                primary_evidence_id=ev_id,
+                confidence_score=0.95,
+                metadata_json={
+                    "work_category": "workflow_step",
+                    "parent_feature": item["name"],
+                    "step_action": item["step_action"],
+                    "step_result": item["step_result"],
+                    "verification_status": "pending_review",
+                },
+            )
+            seeded += 1
+
+            # Connect Feature -> Workflow Step (HAS_WORKFLOW_STEP)
+            pending_drafts.append(
+                DiscoveredRelationshipDraft(
+                    source_entity_id=f_ent.id,
+                    target_entity_id=step_ent.id,
+                    relationship_type=RelationshipType.HAS_WORKFLOW_STEP.value,
+                    relationship_basis=RelationshipBasis.EXPLICIT.value,
+                    confidence_score=0.95,
+                    discovery_method="prd_srs_specification",
+                    evidence_id=ev_id,
+                    evidence_chunk_id=chunk_id,
+                    knowledge_item_id=None,
+                    supporting_excerpt=matched_excerpt,
+                    source_location_json={"feature_code": item["code"]},
+                )
+            )
+
+            # Create Requirement entity
+            req_ent = self._entity_repo.create_or_get_entity(
+                organisation_id=organisation_id,
+                project_id=project_id,
+                entity_type=EntityType.REQUIREMENT.value,
+                canonical_name=f"{item['req_code']} — {item['name']}",
+                description=f"Requirement specification for {item['name']}: {item['goal']}",
+                primary_evidence_id=ev_id,
+                confidence_score=0.95,
+                metadata_json={
+                    "req_code": item["req_code"],
+                    "parent_feature": item["name"],
+                    "feature_status": "PLANNED",
+                    "verification_status": "pending_review",
+                },
+            )
+            seeded += 1
+
+            # Connect Feature -> Requirement (HAS_REQUIREMENT)
+            pending_drafts.append(
+                DiscoveredRelationshipDraft(
+                    source_entity_id=f_ent.id,
+                    target_entity_id=req_ent.id,
+                    relationship_type=RelationshipType.HAS_REQUIREMENT.value,
+                    relationship_basis=RelationshipBasis.EXPLICIT.value,
+                    confidence_score=0.95,
+                    discovery_method="prd_srs_specification",
+                    evidence_id=ev_id,
+                    evidence_chunk_id=chunk_id,
+                    knowledge_item_id=None,
+                    supporting_excerpt=matched_excerpt,
+                    source_location_json={"req_code": item["req_code"]},
+                )
+            )
+
+        # 2. ALSO query existing KnowledgeEntity rows for this project (e.g. seeded from KnowledgeItems)
+        existing_features = list(self._session.execute(
+            select(KnowledgeEntity).where(
+                KnowledgeEntity.project_id == project_id,
+                KnowledgeEntity.entity_type == EntityType.FEATURE.value,
+                KnowledgeEntity.is_deleted.is_(False),
+                KnowledgeEntity.is_stale.is_(False),
+            )
+        ).scalars().all())
+
+        existing_reqs = list(self._session.execute(
+            select(KnowledgeEntity).where(
+                KnowledgeEntity.project_id == project_id,
+                KnowledgeEntity.entity_type == EntityType.REQUIREMENT.value,
+                KnowledgeEntity.is_deleted.is_(False),
+                KnowledgeEntity.is_stale.is_(False),
+            )
+        ).scalars().all())
+
+        existing_procs = list(self._session.execute(
+            select(KnowledgeEntity).where(
+                KnowledgeEntity.project_id == project_id,
+                KnowledgeEntity.entity_type == EntityType.OPERATIONAL_PROCEDURE.value,
+                KnowledgeEntity.is_deleted.is_(False),
+                KnowledgeEntity.is_stale.is_(False),
+            )
+        ).scalars().all())
+
+        # Filter conventional commit noise
+        _NOISE_TOKENS = {"feat", "fix", "chore", "docs", "refactor", "style", "test", "perf", "ci", "build", "merge"}
+        all_clean_features: list[KnowledgeEntity] = []
+        for f in existing_features:
+            n_low = f.canonical_name.strip().lower()
+            if n_low in _NOISE_TOKENS or n_low.startswith("commit ") or "commit:" in n_low or ("@" in n_low and len(n_low.split("@")[-1]) >= 7):
+                continue
+            all_clean_features.append(f)
+
+        fallback_ev_id = doc_evs[0].id if doc_evs else (project_entity.primary_evidence_id or None)
+
+        # Connect Project -> Feature for all clean features
+        for f in all_clean_features:
+            ev_id = f.primary_evidence_id or fallback_ev_id
+            if ev_id:
+                pending_drafts.append(
+                    DiscoveredRelationshipDraft(
+                        source_entity_id=project_entity.id,
+                        target_entity_id=f.id,
+                        relationship_type=RelationshipType.HAS_FEATURE.value,
+                        relationship_basis=RelationshipBasis.EXPLICIT.value,
+                        confidence_score=0.95,
+                        discovery_method="project_feature_hierarchy",
+                        evidence_id=ev_id,
+                        evidence_chunk_id=None,
+                        knowledge_item_id=f.primary_knowledge_item_id,
+                        supporting_excerpt=f"Project feature: {f.canonical_name}",
+                        source_location_json={"feature": f.canonical_name},
+                    )
+                )
+
+        # Connect Sequential Feature Dependencies (e.g. P01 -> P02 -> P03 ...)
+        def _feature_order_key(name: str):
+            m = re.search(r"P0?(\d+)", name, re.IGNORECASE)
+            if m:
+                return (1, int(m.group(1)))
+            m = re.search(r"(?:FR|FEAT|REQ)-?0?(\d+)", name, re.IGNORECASE)
+            if m:
+                return (2, int(m.group(1)))
+            return (3, name.lower())
+
+        ordered_features = sorted(all_clean_features, key=lambda f: _feature_order_key(f.canonical_name))
+        seq_features = [f for f in ordered_features if _feature_order_key(f.canonical_name)[0] in (1, 2)]
+        for i in range(len(seq_features) - 1):
+            f_curr = seq_features[i]
+            f_next = seq_features[i + 1]
+            if f_curr.canonical_name.strip().lower() == f_next.canonical_name.strip().lower():
+                continue
+            ev_id = f_next.primary_evidence_id or f_curr.primary_evidence_id or fallback_ev_id
+            if ev_id:
+                pending_drafts.append(
+                    DiscoveredRelationshipDraft(
+                        source_entity_id=f_curr.id,
+                        target_entity_id=f_next.id,
+                        relationship_type=RelationshipType.DEPENDS_ON.value,
+                        relationship_basis=RelationshipBasis.EXPLICIT.value,
+                        confidence_score=0.90,
+                        discovery_method="user_journey_sequence",
+                        evidence_id=ev_id,
+                        evidence_chunk_id=None,
+                        knowledge_item_id=f_next.primary_knowledge_item_id,
+                        supporting_excerpt=f"Sequential workflow dependency: {f_curr.canonical_name} precedes {f_next.canonical_name}",
+                        source_location_json={"sequence": f"{f_curr.canonical_name} -> {f_next.canonical_name}"},
+                    )
+                )
+
+        # Connect Feature -> Requirement & Project -> Requirement
+        for r in existing_reqs:
+            ev_id = r.primary_evidence_id or fallback_ev_id
+            if not ev_id:
+                continue
+            linked = False
+            r_low = r.canonical_name.lower()
+            for f in all_clean_features:
+                f_low = f.canonical_name.lower()
+                if any(tok in r_low for tok in f_low.split() if len(tok) > 4):
+                    pending_drafts.append(
+                        DiscoveredRelationshipDraft(
+                            source_entity_id=f.id,
+                            target_entity_id=r.id,
+                            relationship_type=RelationshipType.HAS_REQUIREMENT.value,
+                            relationship_basis=RelationshipBasis.EXPLICIT.value,
+                            confidence_score=0.92,
+                            discovery_method="feature_requirement_link",
+                            evidence_id=ev_id,
+                            evidence_chunk_id=None,
+                            knowledge_item_id=r.primary_knowledge_item_id,
+                            supporting_excerpt=f"Requirement for {f.canonical_name}: {r.canonical_name}",
+                            source_location_json={"requirement": r.canonical_name},
+                        )
+                    )
+                    linked = True
+                    break
+            if not linked:
+                pending_drafts.append(
+                    DiscoveredRelationshipDraft(
+                        source_entity_id=project_entity.id,
+                        target_entity_id=r.id,
+                        relationship_type=RelationshipType.HAS_REQUIREMENT.value,
+                        relationship_basis=RelationshipBasis.EXPLICIT.value,
+                        confidence_score=0.90,
+                        discovery_method="project_requirement_hierarchy",
+                        evidence_id=ev_id,
+                        evidence_chunk_id=None,
+                        knowledge_item_id=r.primary_knowledge_item_id,
+                        supporting_excerpt=f"Project requirement: {r.canonical_name}",
+                        source_location_json={"requirement": r.canonical_name},
+                    )
+                )
+
+        # Connect Feature -> Operational Procedure (HAS_WORKFLOW_STEP)
+        for p in existing_procs:
+            ev_id = p.primary_evidence_id or fallback_ev_id
+            if not ev_id:
+                continue
+            p_low = p.canonical_name.lower()
+            for f in all_clean_features:
+                f_low = f.canonical_name.lower()
+                if f.primary_evidence_id == p.primary_evidence_id or any(tok in p_low for tok in f_low.split() if len(tok) > 4):
+                    pending_drafts.append(
+                        DiscoveredRelationshipDraft(
+                            source_entity_id=f.id,
+                            target_entity_id=p.id,
+                            relationship_type=RelationshipType.HAS_WORKFLOW_STEP.value,
+                            relationship_basis=RelationshipBasis.EXPLICIT.value,
+                            confidence_score=0.90,
+                            discovery_method="feature_workflow_step",
+                            evidence_id=ev_id,
+                            evidence_chunk_id=None,
+                            knowledge_item_id=p.primary_knowledge_item_id,
+                            supporting_excerpt=f"Workflow step for {f.canonical_name}: {p.canonical_name}",
+                            source_location_json={"procedure": p.canonical_name},
+                        )
+                    )
+                    break
+
+        if pending_drafts:
+            self._discovery_engine.persist_discovered_relationships(
+                organisation_id=organisation_id,
+                project_id=project_id,
+                drafts=pending_drafts,
+            )
+
+        return seeded
+
     def run_reconstruction(
         self,
         *,
@@ -1079,24 +1696,36 @@ class RelationshipCoordinatorService:
                 project_id=project_id,
             )
 
-            # 2. Discover Exact Identifier Links
+            # 2. Synthesize User-Facing Product Features & Workflows
+            self.synthesize_user_facing_features(
+                organisation_id=organisation_id,
+                project_id=project_id,
+            )
+
+            # 3. Discover Exact Identifier Links
             exact_drafts = self._discovery_engine.discover_exact_identifier_links(
                 project_id=project_id,
                 organisation_id=organisation_id,
             )
 
-            # 3. Discover Structured Connector Links
+            # 4. Discover Structured Connector Links
             connector_drafts = self._discovery_engine.discover_structured_connector_links(
                 project_id=project_id,
                 organisation_id=organisation_id,
             )
 
-            # 4. Discover Contextual File Path Matches
+            # 5. Discover Contextual File Path Matches
             contextual_drafts = self._discovery_engine.discover_contextual_path_matches(
                 project_id=project_id,
             )
 
-            # 5. Optional LLM Extraction
+            # 6. Discover Grounded Architecture & Component Relationships
+            arch_drafts = self._discovery_engine.discover_architecture_relationships(
+                project_id=project_id,
+                organisation_id=organisation_id,
+            )
+
+            # 7. Optional LLM Extraction
             llm_drafts = []
             if include_llm_suggestions:
                 llm_drafts = self._discovery_engine.discover_llm_assisted_relationships(
@@ -1104,7 +1733,7 @@ class RelationshipCoordinatorService:
                     organisation_id=organisation_id,
                 )
 
-            all_drafts = exact_drafts + connector_drafts + contextual_drafts + llm_drafts
+            all_drafts = exact_drafts + connector_drafts + contextual_drafts + arch_drafts + llm_drafts
 
             # Persist Relationships
             created_count, updated_count = self._discovery_engine.persist_discovered_relationships(
@@ -1128,6 +1757,7 @@ class RelationshipCoordinatorService:
                     .where(
                         KnowledgeEntity.project_id == project_id,
                         KnowledgeEntity.is_deleted.is_(False),
+                        KnowledgeEntity.is_stale.is_(False),
                     )
                 )
                 .scalars()
