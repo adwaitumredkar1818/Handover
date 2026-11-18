@@ -1,0 +1,17 @@
+{
+  "carryover_a_recovered": true,
+  "carryover_a_node_preserved": true,
+  "carryover_a_events_replayed": true,
+  "carryover_b_exactly_one_succeeded": true,
+  "carryover_b_idempotency_rejected": true,
+  "carryover_b_handler_executed_once": true,
+  "carryover_c_resumed_count": 3,
+  "carryover_c_seamless_resumption": true,
+  "workflow_1_project_understanding": true,
+  "workflow_2_deep_research": true,
+  "workflow_3_provenance_citations": true,
+  "workflow_4_gap_detection": true,
+  "workflow_5_tool_approval_gate": true,
+  "workflow_6_degraded_mode": true,
+  "workflow_7_sse_streaming_ux": true
+}

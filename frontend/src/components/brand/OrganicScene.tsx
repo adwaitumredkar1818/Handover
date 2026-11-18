@@ -14,8 +14,10 @@ import { useEffect, useRef } from "react";
 
 export type SceneVariant =
   | "hero"
+  | "fragmented"
   | "assemble"
   | "network"
+  | "dossier"
   | "continuity"
   | "reconstruct"
   | "empty"
@@ -649,6 +651,7 @@ export interface SceneProps {
   variant?: SceneVariant;
   emptyKind?: EmptyKind;
   progress?: number;
+  highlightCluster?: number | null;
   camZoom?: number;
   camOffset?: [number, number];
   dark?: boolean;
@@ -657,12 +660,14 @@ export interface SceneProps {
   accent?: string;
   interactive?: boolean;
   label?: string;
+  onReady?: () => void;
 }
 
 export function OrganicScene({
   variant = "hero",
   emptyKind = "knowledge",
   progress: controlledProgress,
+  highlightCluster = null,
   camZoom = 1,
   camOffset = [0, 0],
   dark = false,
@@ -671,6 +676,7 @@ export function OrganicScene({
   accent,
   interactive = true,
   label,
+  onReady,
 }: SceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -678,12 +684,17 @@ export function OrganicScene({
   accentRef.current = accent;
   const progRef = useRef(controlledProgress);
   progRef.current = controlledProgress;
+  const highlightRef = useRef(highlightCluster);
+  highlightRef.current = highlightCluster;
   const zoomRef = useRef(camZoom);
   zoomRef.current = camZoom;
   const offRef = useRef(camOffset);
   offRef.current = camOffset;
   const darkRef = useRef(dark);
   darkRef.current = dark;
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
+  const readyFiredRef = useRef(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -742,6 +753,14 @@ export function OrganicScene({
           ? level === "low"
             ? 40
             : 70
+          : variant === "fragmented"
+          ? level === "low"
+            ? 28
+            : 52
+          : variant === "dossier"
+          ? level === "low"
+            ? 32
+            : 64
           : isEmpty
           ? emptyKind === "project"
             ? 12
@@ -776,6 +795,40 @@ export function OrganicScene({
           nd.baseP = [...nd.p];
           const pal = [C.navy, C.blue, C.lav, C.teal];
           nd.color = pal[idx % 4] ?? C.blue;
+        });
+      }
+
+      if (variant === "fragmented") {
+        const fragOffsets: V3[] = [
+          [-1.35, -0.58, 0.25],
+          [1.25, -0.45, -0.22],
+          [-0.95, 0.68, -0.18],
+          [1.38, 0.55, 0.22],
+        ];
+        nodes.forEach((nd, idx) => {
+          const offset = fragOffsets[idx % 4] ?? [0, 0, 0];
+          nd.p = [offset[0] + nd.p[0] * 0.42, offset[1] + nd.p[1] * 0.42, offset[2] + nd.p[2] * 0.42];
+          nd.baseP = [...nd.p];
+          nd.cluster = idx % 4;
+          nd.color = idx % 3 === 0 ? C.sky : idx % 3 === 1 ? C.lav : "211,109,114";
+        });
+      }
+
+      if (variant === "dossier") {
+        // Horizontal ordered strata layers for structured handover compilation
+        nodes.forEach((nd, idx) => {
+          const row = Math.floor(idx / 8);
+          const col = idx % 8;
+          const baseP: V3 = [
+            -1.05 + (col / 7) * 2.1,
+            -0.72 + (row / Math.max(1, Math.ceil(nodes.length / 8) - 1)) * 1.44,
+            Math.sin(col * 0.9) * 0.14,
+          ];
+          nd.p = [...baseP];
+          nd.baseP = [...baseP];
+          nd.cluster = col % 3;
+          nd.color = row % 3 === 0 ? C.teal : row % 3 === 1 ? C.blue : C.lav;
+          nd.hub = col === 0 || col === 7;
         });
       }
 
@@ -1299,6 +1352,8 @@ export function OrganicScene({
         })
         .sort((a, b) => a.z - b.z);
 
+      const hl = highlightRef.current;
+
       for (const { i, z } of edgeOrder) {
         const edge = geo.edges[i];
         if (!edge) continue;
@@ -1308,7 +1363,9 @@ export function OrganicScene({
         if (!nodeA || !nodeB) continue;
 
         const depth = smooth(-1, 1, z);
-        const alpha = (0.05 + depth * 0.34) * opts.edgeAlpha * assembled;
+        const isHlEdge = hl !== null && hl !== undefined && (nodeA.cluster === hl || nodeB.cluster === hl);
+        const hlBoost = hl === null || hl === undefined ? 1 : isHlEdge ? 1.8 : 0.45;
+        const alpha = Math.min(0.95, (0.05 + depth * 0.34) * opts.edgeAlpha * assembled * hlBoost);
         if (alpha < 0.01) continue;
 
         const pa = pathProj[i];
@@ -1317,28 +1374,41 @@ export function OrganicScene({
         const projA = proj[a];
         const projB = proj[b];
         const pts =
-          (variant === "assemble" || variant === "reconstruct" || variant === "cinematic") &&
+          (variant === "assemble" || variant === "reconstruct" || variant === "cinematic" || variant === "dossier") &&
           progress < 0.88 &&
           projA &&
           projB
             ? [projA, projB]
             : pa;
 
-        const edgeCol =
-          depth > 0.6
-            ? darkRef.current
-              ? C.lav
-              : C.blue
-            : depth > 0.3
-            ? C.sky
-            : C.lav;
+        const edgeCol = isHlEdge
+          ? C.teal
+          : depth > 0.6
+          ? darkRef.current
+            ? C.lav
+            : C.blue
+          : depth > 0.3
+          ? C.sky
+          : C.lav;
 
-        strokePath(
-          pts,
-          edgeCol,
-          alpha * (darkRef.current ? 1.3 : 1),
-          0.6 + depth * 0.65
-        );
+        if (variant === "fragmented") {
+          ctx!.save();
+          ctx!.setLineDash([3, 6]);
+          strokePath(
+            pts,
+            edgeCol,
+            alpha * 0.65,
+            0.5 + depth * 0.4
+          );
+          ctx!.restore();
+        } else {
+          strokePath(
+            pts,
+            edgeCol,
+            alpha * (darkRef.current ? 1.3 : 1),
+            (isHlEdge ? 1.15 : 0.6) + depth * 0.65
+          );
+        }
       }
 
       if (opts.shell && shellStrength > 0.15) {
@@ -1983,7 +2053,7 @@ export function OrganicScene({
     function render(t: number, dt: number) {
       if (variant === "assemble") {
         progress = progRef.current !== undefined ? progRef.current : 1;
-      } else if (variant === "reconstruct" || variant === "cinematic") {
+      } else if (variant === "reconstruct" || variant === "cinematic" || variant === "fragmented" || variant === "dossier") {
         if (progRef.current !== undefined) {
           progress += (progRef.current - progress) * Math.min(1, dt * 6);
         } else {
@@ -1999,7 +2069,7 @@ export function OrganicScene({
 
       if (!reduced) {
         // Calm, continuous, stately rotation
-        rotYa += dt * (variant === "network" ? 0.025 : variant === "assemble" ? 0.022 : 0.038);
+        rotYa += dt * (variant === "network" ? 0.025 : variant === "assemble" || variant === "dossier" ? 0.022 : variant === "fragmented" ? 0.018 : 0.038);
         px += (targetTx - px) * Math.min(1, dt * 2.2);
         py += (targetTy - py) * Math.min(1, dt * 2.2);
       }
@@ -2021,6 +2091,18 @@ export function OrganicScene({
           shell: true,
           tags: showTags ?? true,
           edgeAlpha: 1.15,
+        });
+      } else if (variant === "fragmented") {
+        drawNetwork(t, dt, cx, cy, Math.min(W, H) * 0.42 * z, {
+          shell: false,
+          tags: false,
+          edgeAlpha: Math.max(0.15, 0.85 - progress * 0.65),
+        });
+      } else if (variant === "dossier") {
+        drawNetwork(t, dt, cx, cy, Math.min(W, H) * 0.38 * z, {
+          shell: true,
+          tags: false,
+          edgeAlpha: 0.75 + progress * 0.45,
         });
       } else if (variant === "network") {
         // Ambient network extending across the section
@@ -2080,12 +2162,22 @@ export function OrganicScene({
       } else {
         drawContinuity(t, dt);
       }
+
+      if (!readyFiredRef.current) {
+        readyFiredRef.current = true;
+        onReadyRef.current?.();
+      }
     }
 
+    let resizeRaf = 0;
     const ro = new ResizeObserver(() => {
-      resize();
-      const isLowDetail = (detail as string) === "low";
-      if (reduced || isLowDetail) render(2, 0.016);
+      cancelAnimationFrame(resizeRaf);
+      resizeRaf = requestAnimationFrame(() => {
+        if (!running) return;
+        resize();
+        const isLowDetail = (detail as string) === "low";
+        if (reduced || isLowDetail) render(2, 0.016);
+      });
     });
     ro.observe(wrap);
     resize();
@@ -2114,6 +2206,7 @@ export function OrganicScene({
     return () => {
       running = false;
       cancelAnimationFrame(raf);
+      cancelAnimationFrame(resizeRaf);
       ro.disconnect();
       io.disconnect();
       document.removeEventListener("visibilitychange", onVis);

@@ -1,0 +1,11 @@
+{
+  "invalid_jwt_rejected": true,
+  "expired_jwt_rejected": true,
+  "tenant_isolation_passed": true,
+  "source_acl_enforced": true,
+  "unapproved_execution_blocked": true,
+  "valid_approved_execution_succeeded": true,
+  "replay_attack_blocked": true,
+  "tampered_unapproved_blocked": true,
+  "tenant_leakage_prevented": true
+}
