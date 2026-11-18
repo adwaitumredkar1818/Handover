@@ -725,21 +725,30 @@ export async function layoutWithElk(
   const visibleIds = new Set(nodes.map((n) => n.id));
   const validEdges = edges.filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target) && e.source !== e.target);
 
+  const sortedNodesForElk = [...nodes].sort(
+    (a, b) =>
+      resolveNodeTier(a.data.raw) - resolveNodeTier(b.data.raw) ||
+      (a.data.raw.entity_type || "").localeCompare(b.data.raw.entity_type || "") ||
+      a.data.raw.label.localeCompare(b.data.raw.label)
+  );
+
   const elkGraph = {
     id: "root",
     layoutOptions: {
       "elk.algorithm": "layered",
       "elk.direction": "DOWN",
-      "elk.spacing.nodeNode": "48",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "95",
-      "elk.spacing.edgeNode": "28",
+      "elk.edgeRouting": "SPLINES",
+      "elk.spacing.nodeNode": "36",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "80",
+      "elk.spacing.edgeNode": "22",
       "elk.separateConnectedComponents": "true",
-      "elk.spacing.componentComponent": "80",
+      "elk.spacing.componentComponent": "64",
       "elk.aspectRatio": String(Number(aspectRatio.toFixed(2))),
       "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
       "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
+      "elk.layered.considerModelOrder.strategy": "PREFER_NODES",
     },
-    children: nodes.map((n) => {
+    children: sortedNodesForElk.map((n) => {
       const sz = getNodeSize(n.id, dims);
       return { id: n.id, width: sz.w, height: sz.h };
     }),
@@ -760,10 +769,10 @@ export async function layoutWithElk(
       });
     }
 
-    // Balance any excessively wide single layer (> maxCols nodes at identical Y) into neat sub-rows
-    const maxCols = Math.max(4, Math.min(6, Math.round(Math.sqrt(nodes.length * aspectRatio))));
+    // Balance any excessively wide single layer (> maxCols nodes at identical Y) into compact sub-rows
+    const maxCols = Math.max(4, Math.min(8, Math.ceil(Math.sqrt(nodes.length * aspectRatio))));
     const byLayerY = new Map<number, Node<AmeliorateNodeData>[]>();
-    for (const n of nodes) {
+    for (const n of sortedNodesForElk) {
       const y = posMap.get(n.id)?.y ?? n.position.y;
       const bucketKey = Math.round(y / 20) * 20;
       const list = byLayerY.get(bucketKey) || [];
@@ -773,8 +782,8 @@ export async function layoutWithElk(
 
     const sortedYKeys = Array.from(byLayerY.keys()).sort((a, b) => a - b);
     let yShift = 0;
-    const colStep = DEFAULT_NODE_W + 56;
-    const rowStep = DEFAULT_NODE_H + 84;
+    const colStep = DEFAULT_NODE_W + 32; // 236px compact horizontal pitch
+    const rowStep = DEFAULT_NODE_H + 48; // 164px compact vertical pitch
 
     for (const yKey of sortedYKeys) {
       const layerNodes = byLayerY.get(yKey)!;
@@ -784,7 +793,7 @@ export async function layoutWithElk(
         const centerRefX =
           layerNodes.reduce((acc, n) => acc + (posMap.get(n.id)?.x ?? 0), 0) / layerNodes.length;
         const maxRowW = (maxCols - 1) * colStep;
-        const baseX = Math.max(40, Math.round(centerRefX - maxRowW / 2));
+        const baseX = Math.round(centerRefX - maxRowW / 2);
 
         layerNodes.forEach((n, idx) => {
           const r = Math.floor(idx / maxCols);
@@ -809,13 +818,33 @@ export async function layoutWithElk(
     resolveOverlaps(
       posMap,
       nodes.map((n) => n.id),
-      dims
+      dims,
+      28
     );
 
-    const updatedNodes = nodes.map((n) => ({
-      ...n,
-      position: posMap.get(n.id) ?? n.position,
-    }));
+    // Ameliorate convention: center the laid-out graph around origin (0, 0)
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const n of nodes) {
+      const p = posMap.get(n.id) ?? n.position;
+      const sz = getNodeSize(n.id, dims);
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x + sz.w);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y + sz.h);
+    }
+    const offsetX = Number.isFinite(minX) ? -Math.round((minX + maxX) / 2) : 0;
+    const offsetY = Number.isFinite(minY) ? -Math.round((minY + maxY) / 2) : 0;
+
+    const updatedNodes = nodes.map((n) => {
+      const p = posMap.get(n.id) ?? n.position;
+      return {
+        ...n,
+        position: { x: p.x + offsetX, y: p.y + offsetY },
+      };
+    });
     const updatedEdges = recomputeEdgeLabelPositions(updatedNodes, edges, dims);
     return { nodes: updatedNodes, edges: updatedEdges };
   } catch {

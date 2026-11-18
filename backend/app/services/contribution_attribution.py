@@ -23,7 +23,9 @@ from app.models.enums import (
 )
 from app.models.evidence import EvidenceItem
 from app.models.integration import UserSourceAuthorisation
-from app.models.project import ProjectMembership
+from app.models.organisation import OrganisationInvitation, OrganisationMembership
+from app.models.project import Project, ProjectMembership
+from app.models.rbac import Role
 from app.models.team_roster import ContributionAttribution, TeamRosterMember
 from app.services.integrations.github_sync import is_bot_identity
 from app.services.llm import LLMGenerationRequest, StructuredLLMClient
@@ -947,6 +949,185 @@ class ContributionAttributionService:
         results.sort(key=lambda x: (-x["contribution_count"], x["display_name"].lower()))
         return results
 
+    def list_selectable_members(
+        self,
+        *,
+        project_id: uuid.UUID,
+        has_project_manage: bool,
+    ) -> list[dict[str, Any]]:
+        """Return canonical selectable members for Identity Review across:
+        1. Active project memberships
+        2. Active organisation memberships in the project's organisation
+        3. Pending project/organisation invitations (clearly labelled, not auto-accepted)
+        4. Unreconciled team roster entries (clearly labelled)
+        """
+        project = self._session.get(Project, project_id)
+        if project is None:
+            return []
+
+        memberships = list(
+            self._session.execute(
+                select(ProjectMembership)
+                .options(selectinload(ProjectMembership.user), selectinload(ProjectMembership.role))
+                .where(ProjectMembership.project_id == project_id, ProjectMembership.status == "active")
+            )
+            .scalars()
+            .all()
+        )
+        org_memberships = list(
+            self._session.execute(
+                select(OrganisationMembership)
+                .options(selectinload(OrganisationMembership.user), selectinload(OrganisationMembership.role))
+                .where(
+                    OrganisationMembership.organisation_id == project.organisation_id,
+                    OrganisationMembership.status == "active",
+                )
+            )
+            .scalars()
+            .all()
+        )
+        invitations = list(
+            self._session.execute(
+                select(OrganisationInvitation)
+                .options(selectinload(OrganisationInvitation.role))
+                .where(
+                    OrganisationInvitation.organisation_id == project.organisation_id,
+                    OrganisationInvitation.status == "pending",
+                    (OrganisationInvitation.project_id == project_id) | (OrganisationInvitation.project_id.is_(None)),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        roster_rows = list(
+            self._session.execute(
+                select(TeamRosterMember).where(TeamRosterMember.project_id == project_id)
+            )
+            .scalars()
+            .all()
+        )
+
+        all_user_ids = list({
+            *(pm.user_id for pm in memberships if pm.user_id),
+            *(om.user_id for om in org_memberships if om.user_id),
+        })
+        auth_rows = list(
+            self._session.execute(
+                select(UserSourceAuthorisation).where(
+                    UserSourceAuthorisation.user_id.in_(all_user_ids),
+                    UserSourceAuthorisation.provider == "github",
+                    UserSourceAuthorisation.status == "active",
+                )
+            )
+            .scalars()
+            .all()
+        ) if all_user_ids else []
+        user_to_gh = {a.user_id: a.external_username.strip() for a in auth_rows if a.external_username}
+
+        results: list[dict[str, Any]] = []
+        seen_user_ids: set[uuid.UUID] = set()
+        seen_emails: set[str] = set()
+
+        for pm in memberships:
+            if pm.user_id:
+                seen_user_ids.add(pm.user_id)
+            raw_email = pm.user.email if pm.user else None
+            if raw_email:
+                seen_emails.add(raw_email.strip().lower())
+            gh = user_to_gh.get(pm.user_id)
+            results.append({
+                "selection_key": f"pm:{pm.id}",
+                "member_source": "project_membership",
+                "membership_state": "active",
+                "selectable_for_match": True,
+                "project_membership_id": pm.id,
+                "user_id": pm.user_id,
+                "invitation_id": None,
+                "roster_member_id": None,
+                "display_name": pm.user.full_name if pm.user and pm.user.full_name else (raw_email or "Project Member"),
+                "email": raw_email if has_project_manage else mask_email(raw_email),
+                "role_name": pm.role.name if getattr(pm, "role", None) else "project_member",
+                "github_login": gh,
+                "review_status": "linked" if gh else "pending_identity",
+                "note": f"Active project member · GitHub @{gh}" if gh else "Active project member · Not linked to GitHub",
+            })
+
+        for om in org_memberships:
+            if om.user_id in seen_user_ids:
+                continue
+            seen_user_ids.add(om.user_id)
+            raw_email = om.user.email if om.user else None
+            if raw_email:
+                seen_emails.add(raw_email.strip().lower())
+            gh = user_to_gh.get(om.user_id)
+            results.append({
+                "selection_key": f"org_user:{om.user_id}",
+                "member_source": "organisation_membership",
+                "membership_state": "org_member_unassigned",
+                "selectable_for_match": True,
+                "project_membership_id": None,
+                "user_id": om.user_id,
+                "invitation_id": None,
+                "roster_member_id": None,
+                "display_name": om.user.full_name if om.user and om.user.full_name else (raw_email or "Organisation Member"),
+                "email": raw_email if has_project_manage else mask_email(raw_email),
+                "role_name": om.role.name if getattr(om, "role", None) else "org_member",
+                "github_login": gh,
+                "review_status": "linked" if gh else "pending_identity",
+                "note": "Organisation member · Will be added to project on match",
+            })
+
+        for inv in invitations:
+            inv_email = (inv.email or "").strip().lower()
+            if inv_email and inv_email in seen_emails:
+                continue
+            if inv_email:
+                seen_emails.add(inv_email)
+            local_name = inv.email.split("@", 1)[0] if inv.email and "@" in inv.email else (inv.email or "Invited User")
+            results.append({
+                "selection_key": f"inv:{inv.id}",
+                "member_source": "invitation",
+                "membership_state": "invited",
+                "selectable_for_match": False,
+                "project_membership_id": None,
+                "user_id": None,
+                "invitation_id": inv.id,
+                "roster_member_id": None,
+                "display_name": local_name,
+                "email": inv.email if has_project_manage else mask_email(inv.email),
+                "role_name": inv.role.name if getattr(inv, "role", None) else "invited_member",
+                "github_login": None,
+                "review_status": "invited",
+                "note": "Pending invitation · User must accept invitation before identity matching",
+            })
+
+        for tr in roster_rows:
+            if tr.matched_user_id and tr.matched_user_id in seen_user_ids:
+                continue
+            tr_email = (tr.email or "").strip().lower()
+            if tr_email and tr_email in seen_emails:
+                continue
+            if tr_email:
+                seen_emails.add(tr_email)
+            results.append({
+                "selection_key": f"roster:{tr.id}",
+                "member_source": "team_roster",
+                "membership_state": "roster_only",
+                "selectable_for_match": False,
+                "project_membership_id": None,
+                "user_id": tr.matched_user_id,
+                "invitation_id": None,
+                "roster_member_id": tr.id,
+                "display_name": tr.display_name,
+                "email": tr.email if has_project_manage else mask_email(tr.email),
+                "role_name": tr.role_title or "roster_member",
+                "github_login": tr.github_handle,
+                "review_status": "roster_only",
+                "note": "Roster record · Add as active project member before identity matching",
+            })
+
+        return results
+
     def review_contributor_identity(
         self,
         *,
@@ -956,6 +1137,7 @@ class ContributionAttributionService:
         action: str,
         reviewer_user_id: uuid.UUID,
         project_membership_id: uuid.UUID | None = None,
+        user_id: uuid.UUID | None = None,
         roster_member_id: uuid.UUID | None = None,
         notes: str | None = None,
     ) -> dict[str, Any]:
@@ -1000,16 +1182,66 @@ class ContributionAttributionService:
         now = utc_now()
         membership: ProjectMembership | None = None
         if action == "match_member":
-            if project_membership_id is None and roster_member_id is None:
+            if project_membership_id is None and user_id is None:
                 from app.core.exceptions import BadRequestError
 
-                raise BadRequestError("project_membership_id or roster_member_id is required.")
+                raise BadRequestError(
+                    "Active project_membership_id or organisation user_id is required. Invited or roster-only entries must become active project members first."
+                )
             if project_membership_id is not None:
                 membership = self._session.get(ProjectMembership, project_membership_id)
-                if membership is None or membership.project_id != project_id:
+                if membership is None or membership.project_id != project_id or membership.status != "active":
                     from app.core.exceptions import NotFoundError
 
-                    raise NotFoundError("Project membership not found.", code="MEMBERSHIP_NOT_FOUND")
+                    raise NotFoundError("Active project membership not found.", code="MEMBERSHIP_NOT_FOUND")
+            elif user_id is not None:
+                existing_pm = self._session.execute(
+                    select(ProjectMembership).where(
+                        ProjectMembership.project_id == project_id,
+                        ProjectMembership.user_id == user_id,
+                    )
+                ).scalar_one_or_none()
+                if existing_pm is not None:
+                    if existing_pm.status != "active":
+                        existing_pm.status = "active"
+                        existing_pm.joined_at = now
+                    membership = existing_pm
+                    project_membership_id = existing_pm.id
+                else:
+                    org_mem = self._session.execute(
+                        select(OrganisationMembership).where(
+                            OrganisationMembership.organisation_id == organisation_id,
+                            OrganisationMembership.user_id == user_id,
+                            OrganisationMembership.status == "active",
+                        )
+                    ).scalar_one_or_none()
+                    if org_mem is None:
+                        from app.core.exceptions import NotFoundError
+
+                        raise NotFoundError("Active organisation membership not found.", code="MEMBERSHIP_NOT_FOUND")
+                    contrib_role = self._session.execute(
+                        select(Role).where(Role.name == "project_contributor")
+                    ).scalar_one_or_none()
+                    if contrib_role is None:
+                        contrib_role = self._session.execute(
+                            select(Role).where(Role.scope == "project")
+                        ).scalars().first()
+                    if contrib_role is None:
+                        from app.core.exceptions import BadRequestError
+
+                        raise BadRequestError("No project role available to assign membership.")
+                    membership = ProjectMembership(
+                        id=uuid.uuid4(),
+                        project_id=project_id,
+                        user_id=user_id,
+                        role_id=contrib_role.id,
+                        assigned_by_id=reviewer_user_id,
+                        status="active",
+                        joined_at=now,
+                    )
+                    self._session.add(membership)
+                    self._session.flush()
+                    project_membership_id = membership.id
             new_type = ContributorType.CONFIRMED_MEMBER.value
             new_status = ContributorReviewStatus.CONFIRMED.value
             new_method = "human_confirmed"

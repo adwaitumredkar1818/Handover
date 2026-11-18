@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 const mockReviewContributor = vi.fn((..._args: unknown[]) => Promise.resolve({ status: "ok" }));
-const mockListMembers = vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[]));
+const mockListSelectableMembers = vi.fn((..._args: unknown[]) => Promise.resolve([] as unknown[]));
 
 const initialMembers = [
   {
@@ -64,12 +64,13 @@ vi.mock("../hooks/useProjectProcessingStatus", () => ({
 vi.mock("../lib/api", () => ({
   api: {
     members: {
-      list: (...args: unknown[]) => mockListMembers(...args),
+      list: vi.fn(async () => []),
     },
     relationships: {
       getContributorsGraph: vi.fn(async () => ({ nodes: [], edges: [], summary: {} })),
       getGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
       listWorkClusters: vi.fn(async () => []),
+      listSelectableMembers: (...args: unknown[]) => mockListSelectableMembers(...args),
       listContributors: vi.fn(async () => [
         {
           contributor_key: "gh:ext-dev",
@@ -120,14 +121,54 @@ import { RelationshipWorkspace } from "../components/relationships/RelationshipW
 describe("Relationship Explorer Identity Review People Selector", () => {
   beforeEach(() => {
     currentLiveMembers = [...initialMembers];
-    mockListMembers.mockReset();
+    mockListSelectableMembers.mockReset();
     mockReviewContributor.mockClear();
   });
 
-  it("displays newly added zero-commit team member in the Identity Review dropdown and persists match action", async () => {
-    mockListMembers
-      .mockResolvedValueOnce(initialMembers)
-      .mockResolvedValueOnce([...initialMembers, addedMember]);
+  it("displays newly added zero-commit team member and invited member in the Identity Review dropdown and persists match action", async () => {
+    const initialSelectable = [
+      {
+        selection_key: "pm:pm-owner-1",
+        member_source: "project_membership",
+        membership_state: "active",
+        selectable_for_match: true,
+        project_membership_id: "pm-owner-1",
+        user_id: "u-owner-1",
+        display_name: "Vernit Garg",
+        email: "vernit@example.com",
+        role_name: "project_manager",
+        review_status: "pending_identity",
+      },
+    ];
+    const updatedSelectable = [
+      ...initialSelectable,
+      {
+        selection_key: "pm:pm-priya-999",
+        member_source: "project_membership",
+        membership_state: "active",
+        selectable_for_match: true,
+        project_membership_id: "pm-priya-999",
+        user_id: "u-priya-999",
+        display_name: "Priya Sharma",
+        email: "priya@company.com",
+        role_name: "project_contributor",
+        review_status: "pending_identity",
+      },
+      {
+        selection_key: "inv:inv-1",
+        member_source: "invitation",
+        membership_state: "invited",
+        selectable_for_match: false,
+        display_name: "invited.dev",
+        email: "invited.dev@company.com",
+        role_name: "project_contributor",
+        review_status: "invited",
+      },
+    ];
+
+    mockListSelectableMembers
+      .mockResolvedValueOnce(initialSelectable)
+      .mockResolvedValue(updatedSelectable);
 
     const { rerender } = render(<RelationshipWorkspace projectId="proj-1" />);
 
@@ -148,12 +189,17 @@ describe("Relationship Explorer Identity Review People Selector", () => {
       ).toBeGreaterThan(0);
     });
 
+    // Invited member is visible and disabled with explicit Invited label
+    const invitedOpts = screen.getAllByRole("option", { name: /Invited \(Pending Acceptance\)/i });
+    expect(invitedOpts.length).toBeGreaterThan(0);
+    expect((invitedOpts[0] as HTMLOptionElement).disabled).toBe(true);
+
     // Verify unlinked pending state text is displayed for Priya
     expect(screen.getAllByText(/Not linked to a source identity/i).length).toBeGreaterThan(0);
 
     // Select Priya Sharma and submit Match Member
     const select = screen.getByLabelText(/Select project member for ext-dev/i);
-    fireEvent.change(select, { target: { value: "pm-priya-999" } });
+    fireEvent.change(select, { target: { value: "pm:pm-priya-999" } });
 
     const matchButtons = screen.getAllByRole("button", { name: /Match Member/i });
     fireEvent.click(matchButtons[0]!);

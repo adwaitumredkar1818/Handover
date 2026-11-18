@@ -185,3 +185,89 @@ class TestTeamMemberIdentitySync:
         ext = next(i for i in identities if i["contributor_key"] == "gh:alex-oss")
         assert ext["matched_project_membership_id"] is None
         assert ext["suggested_project_membership_id"] is None
+
+    def test_list_selectable_members_includes_active_org_invited_and_roster_with_correct_states(self) -> None:
+        org_id = uuid.uuid4()
+        project_id = uuid.uuid4()
+        pm_id = uuid.uuid4()
+        u1_id = uuid.uuid4()
+        u2_id = uuid.uuid4()
+        inv_id = uuid.uuid4()
+        roster_id = uuid.uuid4()
+
+        project = SimpleNamespace(id=project_id, organisation_id=org_id, name="Test")
+        pm = SimpleNamespace(
+            id=pm_id,
+            project_id=project_id,
+            user_id=u1_id,
+            status="active",
+            user=SimpleNamespace(id=u1_id, full_name="Vernit Garg", email="vernit@example.com"),
+            role=SimpleNamespace(name="project_manager"),
+        )
+        om = SimpleNamespace(
+            id=uuid.uuid4(),
+            organisation_id=org_id,
+            user_id=u2_id,
+            status="active",
+            user=SimpleNamespace(id=u2_id, full_name="Adwait Umredkar", email="adwait@example.com"),
+            role=SimpleNamespace(name="org_member"),
+        )
+        inv = SimpleNamespace(
+            id=inv_id,
+            organisation_id=org_id,
+            project_id=None,
+            email="shubham@example.com",
+            status="pending",
+            role=SimpleNamespace(name="project_contributor"),
+        )
+        roster = SimpleNamespace(
+            id=roster_id,
+            project_id=project_id,
+            matched_user_id=None,
+            display_name="Siddhesh Birewar",
+            email="siddhesh@example.com",
+            role_title="Backend Engineer",
+            github_handle=None,
+        )
+
+        class _FakeResult:
+            def __init__(self, items):
+                self._items = items
+
+            def scalars(self):
+                return self
+
+            def all(self):
+                return self._items
+
+        calls = {"n": 0}
+
+        class _FakeSession:
+            def get(self, _model, _id):
+                return project
+
+            def execute(self, _stmt):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return _FakeResult([pm])
+                if calls["n"] == 2:
+                    return _FakeResult([om])
+                if calls["n"] == 3:
+                    return _FakeResult([inv])
+                if calls["n"] == 4:
+                    return _FakeResult([roster])
+                return _FakeResult([])
+
+        service = ContributionAttributionService(_FakeSession())  # type: ignore[arg-type]
+        members = service.list_selectable_members(project_id=project_id, has_project_manage=True)
+
+        assert len(members) == 4
+        by_key = {m["selection_key"]: m for m in members}
+        assert by_key[f"pm:{pm_id}"]["selectable_for_match"] is True
+        assert by_key[f"pm:{pm_id}"]["membership_state"] == "active"
+        assert by_key[f"org_user:{u2_id}"]["selectable_for_match"] is True
+        assert by_key[f"org_user:{u2_id}"]["membership_state"] == "org_member_unassigned"
+        assert by_key[f"inv:{inv_id}"]["selectable_for_match"] is False
+        assert by_key[f"inv:{inv_id}"]["membership_state"] == "invited"
+        assert by_key[f"roster:{roster_id}"]["selectable_for_match"] is False
+        assert by_key[f"roster:{roster_id}"]["membership_state"] == "roster_only"

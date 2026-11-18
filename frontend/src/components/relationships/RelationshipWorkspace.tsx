@@ -367,8 +367,23 @@ export function adaptEntityToHandoverGraph(entityGraph: {
 }
 
 export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps) {
-  const { members: liveMembers, activeProject } = useLiveApp();
-  const [fetchedMembers, setFetchedMembers] = useState<any[]>([]);
+  const { members: liveMembers } = useLiveApp();
+  const [selectableMembers, setSelectableMembers] = useState<
+    Array<{
+      selection_key: string;
+      member_source: string;
+      membership_state: string;
+      selectable_for_match: boolean;
+      project_membership_id?: string | null;
+      user_id?: string | null;
+      display_name: string;
+      email?: string | null;
+      role_name: string;
+      github_login?: string | null;
+      review_status: string;
+      note?: string | null;
+    }>
+  >([]);
   const activeProjectIdRef = useRef(projectId);
 
   useEffect(() => {
@@ -378,36 +393,41 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   const refreshProjectMembersList = useCallback(async () => {
     if (!projectId) return;
     try {
-      const m = await api.members.list(projectId);
+      const res = await api.relationships.listSelectableMembers(projectId);
       if (activeProjectIdRef.current !== projectId) return;
-      if (Array.isArray(m)) {
-        setFetchedMembers(m);
+      if (Array.isArray(res)) {
+        setSelectableMembers(res);
       }
     } catch {
-      // Non-fatal fallback to liveMembers
+      // Fallback to direct project members endpoint only if selectable-members is unavailable
+      try {
+        const m = await api.members.list(projectId);
+        if (activeProjectIdRef.current !== projectId) return;
+        if (Array.isArray(m)) {
+          setSelectableMembers(
+            m.map((item: any) => ({
+              selection_key: `pm:${item.id}`,
+              member_source: "project_membership",
+              membership_state: item.status || "active",
+              selectable_for_match: true,
+              project_membership_id: String(item.id),
+              user_id: item.user_id ? String(item.user_id) : null,
+              display_name: item.user_full_name || item.full_name || "Unknown Member",
+              email: item.user_email || item.email || null,
+              role_name: item.role_name || item.role || "project_member",
+              review_status: "pending_identity",
+            }))
+          );
+        }
+      } catch {
+        // Keep current state cleanly
+      }
     }
   }, [projectId]);
 
   useEffect(() => {
     refreshProjectMembersList();
   }, [refreshProjectMembersList]);
-
-  const projectMembers = useMemo(() => {
-    const byId = new Map<string, any>();
-    for (const m of fetchedMembers) {
-      if (m && m.id && m.status !== "removed") {
-        byId.set(String(m.id), m);
-      }
-    }
-    if (activeProject?.id === projectId && Array.isArray(liveMembers)) {
-      for (const m of liveMembers) {
-        if (m && m.id && m.status !== "removed") {
-          byId.set(String(m.id), m);
-        }
-      }
-    }
-    return Array.from(byId.values());
-  }, [fetchedMembers, liveMembers, activeProject?.id, projectId]);
 
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -616,7 +636,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
 
   // Reset state on project switch to prevent any cross-project leakage
   useEffect(() => {
-    setFetchedMembers([]);
+    setSelectableMembers([]);
     setRawContributorGraph({ nodes: [], edges: [], summary: {} });
     setRawEntityGraph({ nodes: [], edges: [] });
     setContributors([]);
@@ -1114,19 +1134,28 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     setError(null);
     setActionFeedback(null);
     try {
-      const selectedMembershipId = selectedMatchMemberByKey[contributorKey];
-      if (action === "match_member" && !selectedMembershipId) {
-        setError("Select a project member before confirming identity match.");
+      const selectedVal = selectedMatchMemberByKey[contributorKey] || "";
+      if (action === "match_member" && !selectedVal) {
+        setError("Select an active project or organisation member before confirming identity match.");
         return;
       }
+      const isOrgUser = selectedVal.startsWith("org_user:");
+      const resolvedPmId = selectedVal.startsWith("pm:")
+        ? selectedVal.slice(3)
+        : !isOrgUser && selectedVal
+          ? selectedVal
+          : undefined;
+      const resolvedUserId = isOrgUser ? selectedVal.slice(9) : undefined;
       await api.relationships.reviewContributor(projectId, contributorKey, {
         action,
-        project_membership_id: action === "match_member" ? selectedMembershipId : undefined,
+        project_membership_id: action === "match_member" ? resolvedPmId : undefined,
+        user_id: action === "match_member" ? resolvedUserId : undefined,
         notes: `Reviewed in Relationship Explorer (${action})`,
       });
       invalidateGraphCache("rel_");
       setActionFeedback(`Updated contributor identity (${action.replace(/_/g, " ")}).`);
-      // Authoritatively update contributor list & graphs immediately
+      // Authoritatively update selectable members, contributor list & graphs immediately
+      await refreshProjectMembersList();
       const freshContributors = await api.relationships.listContributors(projectId);
       setContributors(freshContributors as unknown as ContributorRecord[]);
       await loadPeopleAndEntityGraphs(true);
@@ -1672,7 +1701,11 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
 
                     <div className="flex flex-wrap items-center gap-2 text-xs">
                       <select
-                        value={selectedMatchMemberByKey[c.contributor_key] || c.matched_project_membership_id || c.suggested_project_membership_id || ""}
+                        value={
+                          selectedMatchMemberByKey[c.contributor_key] ||
+                          (c.matched_project_membership_id ? `pm:${c.matched_project_membership_id}` : "") ||
+                          (c.suggested_project_membership_id ? `pm:${c.suggested_project_membership_id}` : "")
+                        }
                         onChange={(e) =>
                           setSelectedMatchMemberByKey((prev) => ({
                             ...prev,
@@ -1680,17 +1713,30 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                           }))
                         }
                         aria-label={`Select project member for ${c.display_name}`}
-                        className="px-2.5 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700 min-w-[240px]"
+                        className="px-2.5 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700 min-w-[260px]"
                       >
                         <option value="">Select Project Member...</option>
-                        {projectMembers.map((m) => {
-                          const fullName = m.user_full_name || m.full_name || "Unknown Member";
-                          const email = m.user_email || m.email || "";
-                          const rawRole = (m.role_name || m.role || "Member");
-                          const role = rawRole.replace(/_/g, " ").replace(/\b\w/g, (l: string) => l.toUpperCase());
-                          const label = email ? `${fullName} (${email}) — ${role}` : `${fullName} — ${role}`;
+                        {selectableMembers.map((m) => {
+                          const role = (m.role_name || "Member")
+                            .replace(/_/g, " ")
+                            .replace(/\b\w/g, (l: string) => l.toUpperCase());
+                          const stateSuffix =
+                            m.membership_state === "invited"
+                              ? " · Invited (Pending Acceptance)"
+                              : m.membership_state === "roster_only"
+                                ? " · Roster Only (Requires Active Membership)"
+                                : m.membership_state === "org_member_unassigned"
+                                  ? " · Org Member (Links & Adds to Project)"
+                                  : "";
+                          const label = m.email
+                            ? `${m.display_name} (${m.email}) — ${role}${stateSuffix}`
+                            : `${m.display_name} — ${role}${stateSuffix}`;
                           return (
-                            <option key={m.id} value={m.id}>
+                            <option
+                              key={m.selection_key}
+                              value={m.selection_key}
+                              disabled={!m.selectable_for_match}
+                            >
                               {label}
                             </option>
                           );

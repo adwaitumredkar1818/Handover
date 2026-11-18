@@ -853,6 +853,7 @@ class ProjectService:
         """Invalidate Relationship Explorer caches when project membership changes."""
         for prefix in (
             f"rel_contributors:{project_id}:",
+            f"rel_selectable_members:{project_id}:",
             f"contrib_graph:{project_id}:",
             f"work_clusters:{project_id}:",
             f"rel_entities:{project_id}:",

@@ -398,6 +398,25 @@ class ContributorIdentitySummaryResponse(BaseModel):
     review_history: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class IdentitySelectableMemberResponse(BaseModel):
+    """Canonical selectable member/roster/invitation projection for Identity Review."""
+
+    selection_key: str
+    member_source: str
+    membership_state: str
+    selectable_for_match: bool
+    project_membership_id: uuid.UUID | None = None
+    user_id: uuid.UUID | None = None
+    invitation_id: uuid.UUID | None = None
+    roster_member_id: uuid.UUID | None = None
+    display_name: str
+    email: str | None = None
+    role_name: str
+    github_login: str | None = None
+    review_status: str
+    note: str | None = None
+
+
 class ContributorIdentityReviewRequest(BaseModel):
     """Human review decision for a contributor identity."""
 
@@ -408,6 +427,7 @@ class ContributorIdentityReviewRequest(BaseModel):
         )
     )
     project_membership_id: uuid.UUID | None = None
+    user_id: uuid.UUID | None = None
     roster_member_id: uuid.UUID | None = None
     notes: str | None = None
 
