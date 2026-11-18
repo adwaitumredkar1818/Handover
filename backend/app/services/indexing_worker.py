@@ -417,33 +417,42 @@ class IndexingWorkerService:
                     with self._session_factory() as item_session:
                         ev_item = EvidenceRepository(item_session).get_by_id(claimed.evidence_id, include_deleted=False)
                         if ev_item is not None:
-                            fast_extractor = FastKnowledgeExtractor(item_session)
-                            fast_items = fast_extractor.extract_evidence_knowledge(
-                                evidence=ev_item,
-                                force_rerun=False,
-                            )
-                            item_session.commit()
-
                             meta = dict(ev_item.metadata_json or {})
-                            k_count = len(fast_items) if fast_items else meta.get("knowledge_count", 0)
+                            already_fast_extracted = (
+                                meta.get("knowledge_count") is not None
+                                and ev_item.source_type != "upload"
+                            )
+                            fast_items: list[Any] = []
+                            if not already_fast_extracted:
+                                fast_extractor = FastKnowledgeExtractor(item_session)
+                                fast_items = fast_extractor.extract_evidence_knowledge(
+                                    evidence=ev_item,
+                                    force_rerun=False,
+                                )
+                                item_session.commit()
+                                meta = dict(ev_item.metadata_json or {})
+
+                            k_count = len(fast_items) if fast_items else int(meta.get("knowledge_count") or 0)
                             meta["knowledge_count"] = k_count
-                            if k_count > 0:
-                                meta["lifecycle_stage"] = "knowledge_ready"
-                            else:
-                                meta["lifecycle_stage"] = "indexed"
+                            if meta.get("lifecycle_stage") != "graph_updated":
+                                meta["lifecycle_stage"] = (
+                                    "knowledge_ready" if k_count > 0 else "indexed"
+                                )
                             ev_item.metadata_json = meta
                             item_session.commit()
 
-                            # Run progressive relationship reconstruction when new non-outline fast items were created
-                            # or when a high-value item (manifest, repo, PR, issue, doc) was indexed without graph update yet
+                            # Run progressive relationship reconstruction for non-commit high-value items
+                            # so raw commits never stall Lane B with repeated full-project graph rebuilds
                             from app.services.technology_manifest_parser import is_manifest_path
 
-                            has_non_outline_fast_items = any(
+                            is_non_commit = ev_item.category != "commit"
+                            has_non_outline_fast_items = is_non_commit and any(
                                 not (it.structured_payload or {}).get("is_document_outline")
                                 for it in (fast_items or [])
                             )
                             needs_initial_graph_projection = (
-                                k_count > 0
+                                is_non_commit
+                                and k_count > 0
                                 and meta.get("lifecycle_stage") != "graph_updated"
                                 and (
                                     ev_item.category in ("design_document", "project_document", "pull_request", "issue", "architecture")

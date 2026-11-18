@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import base64
 import re
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
+
+import httpx
 
 from app.core.config import Settings
 from app.schemas.integrations import GitHubRepositoryCandidate
@@ -31,8 +34,23 @@ _DOC_PATH_KEYWORDS = (
     "playbook",
     "onboarding",
     "handover",
-    "changelog",
-    "contributing",
+    "prd",
+    "trd",
+    "requirement",
+    "requirements",
+    "spec",
+    "specification",
+    "deployment",
+    "render_deployment",
+    "overview",
+    "roadmap",
+    "guide",
+    "report",
+    "reports/",
+    "research",
+    "system",
+    "security",
+    "api",
     "docs/",
     "doc/",
 )
@@ -74,6 +92,17 @@ _EXCLUDED_PATH_DIRS = frozenset(
         ".turbo",
         ".idea",
         ".vscode",
+        ".agents",
+        ".claude",
+        ".cursor",
+        ".gemini",
+        ".windsurf",
+        ".codex",
+        ".vite",
+        ".cache",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
     }
 )
 _EXCLUDED_BINARY_OR_GENERATED_SUFFIXES = (
@@ -202,8 +231,37 @@ _TECHNICAL_MANIFEST_NAMES = frozenset(
         "compose.yml",
         "docker-compose.yml",
         "docker-compose.yaml",
+        "render.yaml",
+        "cargo.toml",
+        "go.mod",
+        "pom.xml",
     }
 )
+
+_LOW_VALUE_BOILERPLATE_FILENAMES = frozenset(
+    {
+        "changelog.md",
+        "contributing.md",
+        "code_of_conduct.md",
+        "license.md",
+        "security.md",
+        "_contributing.md",
+        "_template.md",
+        "_sections.md",
+        "skill.md",
+        "skill-feedback.md",
+        "feedback-issue-template.md",
+    }
+)
+
+
+def _is_low_value_boilerplate_doc(lowered_path: str) -> bool:
+    basename = lowered_path.split("/")[-1]
+    if basename in _LOW_VALUE_BOILERPLATE_FILENAMES:
+        return True
+    if ".github/issue_template" in lowered_path or ".github/pull_request_template" in lowered_path:
+        return True
+    return False
 
 
 def _is_candidate_doc_path(
@@ -223,12 +281,52 @@ def _is_candidate_doc_path(
     if basename in {"dockerfile", "makefile", "procfile", "caddyfile"}:
         return include_code
     if lowered.endswith(_DOC_EXTENSIONS):
+        if not include_code and _is_low_value_boilerplate_doc(lowered):
+            return False
         if not include_code and lowered.count("/") == 0:
             return any(kw in lowered for kw in _DOC_PATH_KEYWORDS)
         return True
     if include_code and lowered.endswith(_CODE_EXTENSIONS):
         return True
     return False
+
+
+class _ResilientGitHubHttpClient:
+    """Thin wrapper bounding individual GitHub GET calls against transient network/timeout stalls."""
+
+    def __init__(self, inner: Any, *, max_retries: int = 1) -> None:
+        self._inner = inner
+        self._max_retries = max(0, int(max_retries))
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        attempt = 0
+        while True:
+            try:
+                return self._inner.get(url, **kwargs)
+            except httpx.TimeoutException as exc:
+                if attempt < self._max_retries:
+                    attempt += 1
+                    time.sleep(0.5 * attempt)
+                    continue
+                raise IntegrationProviderError(
+                    provider="github",
+                    code="GITHUB_TIMEOUT",
+                    message=f"GitHub API request timed out: {exc}",
+                    status_code=504,
+                    retryable=True,
+                ) from exc
+            except httpx.RequestError as exc:
+                if attempt < self._max_retries:
+                    attempt += 1
+                    time.sleep(0.5 * attempt)
+                    continue
+                raise IntegrationProviderError(
+                    provider="github",
+                    code="GITHUB_NETWORK_ERROR",
+                    message=f"GitHub API network error: {type(exc).__name__}",
+                    status_code=503,
+                    retryable=True,
+                ) from exc
 
 
 class GitHubClient:
@@ -263,15 +361,15 @@ class GitHubClient:
 
     @contextmanager
     def _get_http_client(self) -> Iterator[Any]:
-        """Provide a pooled HTTP client, reusing persistent connection if active."""
+        """Provide a pooled HTTP client wrapped with bounded timeout/retry handling."""
         if self._shared_client is not None and not getattr(self._shared_client, "is_closed", False):
-            yield self._shared_client
+            yield _ResilientGitHubHttpClient(self._shared_client, max_retries=1)
         else:
             with create_integration_http_client(
                 timeout_seconds=self._timeout,
                 transport=self._transport,
             ) as client:
-                yield client
+                yield _ResilientGitHubHttpClient(client, max_retries=1)
 
     def _headers(self, access_token: str, *, etag: str | None = None) -> dict[str, str]:
         headers = {
@@ -769,33 +867,61 @@ class GitHubClient:
                 ]
 
                 def _path_priority(p: str) -> tuple[int, str]:
-                    low = p.lower()
+                    low = p.lower().strip("/")
                     basename = low.split("/")[-1]
-                    if "readme" in low:
+                    if low in {"readme.md", "readme.mdx", "readme.rst", "readme.txt", "readme"}:
                         return (0, p)
                     if basename in _TECHNICAL_MANIFEST_NAMES or basename.startswith("dockerfile."):
                         return (1, p)
-                    if any(kw in low for kw in ("architecture", "adr", "design", "decision", "handover", "onboarding")):
+                    if any(
+                        kw in low
+                        for kw in ("architecture", "adr", "decision", "system-design", "system_design")
+                    ):
                         return (2, p)
-                    if low.startswith("docs/") or "/docs/" in low:
+                    if any(
+                        kw in low
+                        for kw in (
+                            "prd",
+                            "trd",
+                            "requirement",
+                            "design",
+                            "spec",
+                            "handover",
+                            "onboarding",
+                            "runbook",
+                            "playbook",
+                            "deployment",
+                            "data_quality_report",
+                        )
+                    ):
                         return (3, p)
-                    if "/src/" in low or low.startswith("src/"):
+                    if "readme" in low or low.startswith(("docs/", "doc/", "reports/")):
                         return (4, p)
-                    if "/app/" in low or low.startswith("app/"):
+                    if low.endswith(_DOC_EXTENSIONS):
                         return (5, p)
-                    if "/lib/" in low or low.startswith("lib/"):
+                    if "/src/" in low or low.startswith("src/"):
                         return (6, p)
-                    if "test" in low:
+                    if "/app/" in low or low.startswith("app/"):
+                        return (7, p)
+                    if "/lib/" in low or low.startswith("lib/"):
                         return (8, p)
-                    return (7, p)
+                    if "test" in low:
+                        return (10, p)
+                    return (9, p)
 
                 candidate_paths.sort(key=_path_priority)
                 for path in candidate_paths[: max(0, max_docs - len(docs))]:
-                    file_resp = client.get(
-                        f"{self._base()}/repos/{owner}/{repo}/contents/{path}",
-                        headers=headers,
-                        params={"ref": tree_ref} if default_branch else None,
-                    )
+                    try:
+                        file_resp = client.get(
+                            f"{self._base()}/repos/{owner}/{repo}/contents/{path}",
+                            headers=headers,
+                            params={"ref": tree_ref} if default_branch else None,
+                        )
+                    except IntegrationProviderError as exc:
+                        if exc.code in {"GITHUB_TIMEOUT", "GITHUB_NETWORK_ERROR"} and docs:
+                            warnings.append(f"Skipped '{path}' due to transient network timeout.")
+                            continue
+                        raise
                     if file_resp.status_code == 200 and isinstance(file_resp.json(), dict):
                         file_obj = file_resp.json()
                         decoded = self._decode_content_payload(file_obj)

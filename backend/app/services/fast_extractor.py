@@ -49,6 +49,39 @@ _SEMANTIC_ELIGIBLE_CATEGORIES = frozenset(
 )
 
 
+_EXCLUDED_SEMANTIC_PATH_DIRS = frozenset(
+    {
+        ".agents",
+        ".claude",
+        ".cursor",
+        ".gemini",
+        ".windsurf",
+        ".codex",
+        ".vite",
+        "node_modules",
+        "vendor",
+        "dist",
+        "build",
+    }
+)
+
+_BOILERPLATE_SEMANTIC_DOC_FILENAMES = frozenset(
+    {
+        "changelog.md",
+        "contributing.md",
+        "code_of_conduct.md",
+        "license.md",
+        "security.md",
+        "skill.md",
+        "skill-feedback.md",
+        "_contributing.md",
+        "_template.md",
+        "_sections.md",
+        "feedback-issue-template.md",
+    }
+)
+
+
 def is_evidence_semantic_eligible(
     *,
     category: str | None,
@@ -63,9 +96,26 @@ def is_evidence_semantic_eligible(
         return False
     if is_manifest_path(title):
         return False
-    if (metadata_json or {}).get("github_item_type") == "repository":
+    meta = metadata_json or {}
+    if meta.get("github_item_type") == "repository":
         return False
-    if text_len < 20:
+
+    raw_path = str(meta.get("path") or title or "").lower().replace("\\", "/")
+    path_parts = [part for part in raw_path.split("/") if part]
+    if any(part in _EXCLUDED_SEMANTIC_PATH_DIRS for part in path_parts):
+        return False
+    basename = path_parts[-1] if path_parts else raw_path
+    if basename in _BOILERPLATE_SEMANTIC_DOC_FILENAMES:
+        return False
+
+    min_len = 20
+    if meta.get("github_item_type") == "documentation":
+        is_high_signal_doc = any(
+            kw in raw_path
+            for kw in ("readme", "prd", "trd", "adr", "architecture", "design", "requirement")
+        )
+        min_len = 40 if is_high_signal_doc else 80
+    if text_len < min_len:
         return False
     if cat in _SEMANTIC_ELIGIBLE_CATEGORIES:
         return True

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.security import utc_now
 from app.models.enums import (
     BackgroundJobType,
+    EvidenceCategory,
     EvidenceIndexingStatus,
     EvidenceProcessingStatus,
 )
@@ -191,13 +192,14 @@ class SourceEvidenceIngestor:
             )
         if should_create:
             trigger_name = "pipeline_auto" if trigger in ("connector_created", "connector_updated") else trigger
+            job_priority = 80 if item.category != EvidenceCategory.COMMIT.value else 110
             self._job_repo.create_job(
                 organisation_id=item.organisation_id,
                 project_id=item.project_id,
                 evidence_id=item.id,
                 triggered_by_user_id=triggered_by_user_id,
                 job_type=BackgroundJobType.EVIDENCE_INDEXING.value,
-                priority=110,
+                priority=job_priority,
                 payload_json={
                     "target": "full",
                     "force_rechunk": True,

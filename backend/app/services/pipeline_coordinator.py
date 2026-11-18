@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, select, update
+from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.security import utc_now
@@ -802,7 +802,12 @@ class PipelineCoordinatorService:
                 .values(indexing_status=EvidenceIndexingStatus.INDEXED.value, indexed_at=now)
             )
 
-        # Elevate priority of queued jobs for this active project so it is not starved by historical backlogs
+        # Elevate priority of queued jobs for this active project so it is not starved by historical backlogs,
+        # while always keeping non-commit documents/manifests ahead of raw commits in Lane B.
+        non_commit_ev_subq = select(EvidenceItem.id).where(
+            EvidenceItem.project_id == project_id,
+            EvidenceItem.category != EvidenceCategory.COMMIT.value,
+        )
         self.session.execute(
             update(BackgroundJob)
             .where(
@@ -812,7 +817,14 @@ class PipelineCoordinatorService:
             .values(
                 priority=case(
                     (BackgroundJob.job_type == BackgroundJobType.DOCUMENT_INGESTION.value, 1),
-                    (BackgroundJob.job_type == BackgroundJobType.EVIDENCE_INDEXING.value, 1),
+                    (
+                        and_(
+                            BackgroundJob.job_type == BackgroundJobType.EVIDENCE_INDEXING.value,
+                            BackgroundJob.evidence_id.in_(non_commit_ev_subq),
+                        ),
+                        1,
+                    ),
+                    (BackgroundJob.job_type == BackgroundJobType.EVIDENCE_INDEXING.value, 9),
                     (BackgroundJob.job_type == BackgroundJobType.KNOWLEDGE_RECONSTRUCTION.value, 2),
                     (BackgroundJob.job_type == BackgroundJobType.RELATIONSHIP_RECONSTRUCTION.value, 3),
                     else_=10,

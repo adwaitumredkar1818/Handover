@@ -20,8 +20,16 @@ def create_integration_http_client(
     transport: httpx.BaseTransport | None = None,
 ) -> httpx.Client:
     """Create a bounded synchronous HTTPX client with optional mock transport injection."""
+    bounded_read = max(1.0, float(timeout_seconds))
+    bounded_phase = min(10.0, bounded_read)
+    timeout = httpx.Timeout(
+        connect=bounded_phase,
+        read=bounded_read,
+        write=bounded_phase,
+        pool=bounded_phase,
+    )
     kwargs: dict[str, object] = {
-        "timeout": timeout_seconds,
+        "timeout": timeout,
         "follow_redirects": False,
     }
     if transport is not None:
