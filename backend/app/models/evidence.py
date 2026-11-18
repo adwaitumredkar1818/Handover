@@ -327,6 +327,21 @@ class EvidenceItem(Base):
         order_by="BackgroundJob.created_at.desc()",
     )
 
+    @property
+    def lifecycle_stage(self) -> str:
+        meta = self.metadata_json or {}
+        return meta.get("lifecycle_stage") or "imported"
+
+    @property
+    def semantic_status(self) -> str | None:
+        meta = self.metadata_json or {}
+        return meta.get("semantic_status")
+
+    @property
+    def knowledge_count(self) -> int:
+        meta = self.metadata_json or {}
+        return int(meta.get("knowledge_count") or 0)
+
 
 class EvidenceContent(Base):
     """Canonical separated extracted text for an evidence item (kept out of metadata_json)."""

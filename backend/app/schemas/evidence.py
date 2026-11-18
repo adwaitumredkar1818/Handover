@@ -106,8 +106,15 @@ class EvidenceSummaryResponse(BaseSchema):
 
     @model_validator(mode="before")
     @classmethod
-    def _populate_provider(cls, data: Any) -> Any:
+    def _populate_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            meta = data.get("metadata_json") or {}
+            if "lifecycle_stage" in meta and ("lifecycle_stage" not in data or data["lifecycle_stage"] == "imported"):
+                data["lifecycle_stage"] = meta["lifecycle_stage"]
+            if "semantic_status" in meta and "semantic_status" not in data:
+                data["semantic_status"] = meta["semantic_status"]
+            if "knowledge_count" in meta and ("knowledge_count" not in data or data["knowledge_count"] == 0):
+                data["knowledge_count"] = meta["knowledge_count"]
             if not data.get("provider"):
                 cat = str(data.get("category") or "")
                 if cat == "pdf_document":
