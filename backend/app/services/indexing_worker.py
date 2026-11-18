@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import ExtractionSettings, IngestionSettings
@@ -23,8 +24,10 @@ from app.models.enums import (
     EvidenceIndexingStatus,
     EvidenceProcessingStatus,
     ExtractionRunScope,
+    ExtractionRunStatus,
     KnowledgeCategory,
 )
+from app.models.knowledge import KnowledgeExtractionRun
 from app.repositories.audit import AuditLogRepository
 from app.repositories.chunk import EvidenceChunkRepository
 from app.repositories.evidence import EvidenceRepository
@@ -431,14 +434,12 @@ class IndexingWorkerService:
                             ev_item.metadata_json = meta
                             item_session.commit()
 
-                            # If fast items were created or manifest/code/commit was indexed, run progressive relationship reconstruction
-                            is_graph_relevant = (
-                                bool(fast_items)
-                                or ev_item.category in ("source_code", "commit", "pull_request", "documentation", "architecture")
-                                or "package.json" in (ev_item.title or "").lower()
-                                or "requirements.txt" in (ev_item.title or "").lower()
+                            # Run progressive relationship reconstruction ONLY when new non-outline fast items were created
+                            has_non_outline_fast_items = any(
+                                not (it.structured_payload or {}).get("is_document_outline")
+                                for it in (fast_items or [])
                             )
-                            if is_graph_relevant:
+                            if has_non_outline_fast_items:
                                 try:
                                     from app.services.knowledge_graphs import invalidate_knowledge_graph_cache
                                     from app.services.relationship_coordinator import RelationshipCoordinatorService
@@ -463,18 +464,6 @@ class IndexingWorkerService:
                                     logger.warning("Progressive relationship update failed: %s", rel_exc)
                 except Exception as fast_exc:
                     logger.warning("Per-evidence fast extraction skipped: %s", fast_exc)
-
-                trigger = (claimed.payload_json or {}).get("trigger")
-                if trigger == "pipeline_auto":
-                    try:
-                        from app.services.pipeline_coordinator import PipelineCoordinatorService
-
-                        with self._session_factory() as pipe_session:
-                            PipelineCoordinatorService(pipe_session).trigger_auto_pipeline(
-                                project_id=claimed.project_id,
-                            )
-                    except Exception as pipe_exc:
-                        logger.warning("PipelineCoordinator auto trigger failed after indexing: %s", pipe_exc)
 
                 return
 
@@ -964,56 +953,135 @@ class IndexingWorkerService:
                 meta["lifecycle_stage"] = "indexed"
             ev.metadata_json = meta
 
-            if (
-                chunks
-                and self._extraction_settings is not None
-                and self._extraction_settings.auto_reextract_on_update
-            ):
-                k_repo = KnowledgeRepository(session)
-                job_repo = BackgroundJobRepository(session)
-                if k_repo.has_stale_items_for_evidence(ev.id) and (
-                    k_repo.get_active_run_for_evidence(
-                        project_id=ev.project_id,
-                        evidence_id=ev.id,
+            if chunks and self._extraction_settings is not None:
+                from app.services.fast_extractor import is_evidence_semantic_eligible
+
+                text_len = max(
+                    sum(len(c.chunk_text or "") for c in chunks),
+                    int(ev.file_size_bytes or 0),
+                )
+                is_semantic_eligible = is_evidence_semantic_eligible(
+                    category=ev.category,
+                    title=ev.title,
+                    mime_type=ev.mime_type,
+                    text_len=text_len,
+                    metadata_json=ev.metadata_json,
+                )
+                is_not_applicable = (
+                    (ev.metadata_json or {}).get("semantic_status") == "not_applicable"
+                ) or (not is_semantic_eligible)
+
+                if is_not_applicable and (ev.metadata_json or {}).get("semantic_status") != "not_applicable":
+                    meta = dict(ev.metadata_json or {})
+                    meta["semantic_status"] = "not_applicable"
+                    ev.metadata_json = meta
+
+                if not is_not_applicable:
+                    k_repo = KnowledgeRepository(session)
+                    job_repo = BackgroundJobRepository(session)
+
+                    fp = (ev.metadata_json or {}).get("extraction_fingerprint")
+                    has_matching_fingerprint = (
+                        isinstance(fp, dict)
+                        and fp.get("content_hash") == ev.content_hash
                     )
-                    is None
-                ):
-                    categories = [c.value for c in KnowledgeCategory]
-                    is_synth = EvidenceChunkRepository.is_item_synthetic(ev)
-                    auto_run = k_repo.create_extraction_run(
-                        organisation_id=ev.organisation_id,
-                        project_id=ev.project_id,
-                        background_job_id=None,
+                    has_active_run = (
+                        k_repo.get_active_run_for_evidence(
+                            project_id=ev.project_id,
+                            evidence_id=ev.id,
+                        )
+                        is not None
+                    ) or job_repo.has_active_job_for_evidence(
                         evidence_id=ev.id,
-                        triggered_by_user_id=ev.uploaded_by_user_id,
-                        scope_type=ExtractionRunScope.EVIDENCE.value,
-                        target_categories=categories,
-                        model_name=self._llm_model_name,
-                        prompt_version=self._extraction_settings.prompt_version,
-                        is_synthetic=is_synth,
-                        total_evidence_items=1,
-                    )
-                    auto_job = job_repo.create_job(
-                        organisation_id=ev.organisation_id,
-                        project_id=ev.project_id,
-                        evidence_id=ev.id,
-                        triggered_by_user_id=ev.uploaded_by_user_id,
                         job_type=BackgroundJobType.KNOWLEDGE_RECONSTRUCTION.value,
-                        max_attempts=self._settings.worker_max_attempts,
-                        priority=125,
-                        payload_json={
-                            "run_id": str(auto_run.id),
-                            "scope_type": ExtractionRunScope.EVIDENCE.value,
-                            "evidence_ids": [str(ev.id)],
-                            "categories": categories,
-                            "force_rerun": False,
-                            "include_synthetic": is_synth,
-                            "trigger": "auto_reextract_on_update",
-                        },
                     )
-                    auto_run.background_job_id = auto_job.id
+                    has_stale = k_repo.has_stale_items_for_evidence(ev.id, semantic_only=True)
+                    is_unchanged = has_matching_fingerprint and not has_stale
+
+                    # State machine handling per Step 1 specification:
+                    # - Unchanged, successfully processed evidence: skip inference
+                    # - Already active run: skip duplicate scheduling
+                    if not is_unchanged and not has_active_run:
+                        has_prior_knowledge = k_repo.has_items_for_evidence(ev.id, semantic_only=True)
+                        has_completed_run = (
+                            session.execute(
+                                select(KnowledgeExtractionRun.id).where(
+                                    KnowledgeExtractionRun.evidence_id == ev.id,
+                                    KnowledgeExtractionRun.status.in_(
+                                        [
+                                            ExtractionRunStatus.COMPLETED.value,
+                                            ExtractionRunStatus.PARTIALLY_COMPLETED.value,
+                                        ]
+                                    ),
+                                )
+                            ).scalar_one_or_none()
+                            is not None
+                        )
+
+                        is_new_evidence = (
+                            fp is None and not has_prior_knowledge and not has_completed_run
+                        )
+                        is_changed_evidence = (
+                            (fp is not None and fp.get("content_hash") != ev.content_hash)
+                            or has_stale
+                        )
+
+                        # Step 1 Mandate:
+                        # 1. New evidence, never semantically processed: ALWAYS schedule extraction (do NOT gate on auto_reextract_on_update)
+                        # 2. Changed evidence with an outdated content fingerprint: schedule according to auto_reextract_on_update
+                        should_schedule = is_new_evidence or (
+                            is_changed_evidence
+                            and self._extraction_settings.auto_reextract_on_update
+                        )
+
+                        if should_schedule:
+                            categories = [c.value for c in KnowledgeCategory]
+                            is_synth = EvidenceChunkRepository.is_item_synthetic(ev)
+                            auto_run = k_repo.create_extraction_run(
+                                organisation_id=ev.organisation_id,
+                                project_id=ev.project_id,
+                                background_job_id=None,
+                                evidence_id=ev.id,
+                                triggered_by_user_id=ev.uploaded_by_user_id,
+                                scope_type=ExtractionRunScope.EVIDENCE.value,
+                                target_categories=categories,
+                                model_name=self._llm_model_name,
+                                prompt_version=self._extraction_settings.prompt_version,
+                                is_synthetic=is_synth,
+                                total_evidence_items=1,
+                            )
+                            auto_job = job_repo.create_job(
+                                organisation_id=ev.organisation_id,
+                                project_id=ev.project_id,
+                                evidence_id=ev.id,
+                                triggered_by_user_id=ev.uploaded_by_user_id,
+                                job_type=BackgroundJobType.KNOWLEDGE_RECONSTRUCTION.value,
+                                max_attempts=self._settings.worker_max_attempts,
+                                priority=2,
+                                payload_json={
+                                    "run_id": str(auto_run.id),
+                                    "scope_type": ExtractionRunScope.EVIDENCE.value,
+                                    "evidence_ids": [str(ev.id)],
+                                    "categories": categories,
+                                    "force_rerun": False,
+                                    "include_synthetic": is_synth,
+                                    "trigger": "auto_new_evidence"
+                                    if is_new_evidence
+                                    else "auto_reextract_on_update",
+                                },
+                            )
+                            auto_run.background_job_id = auto_job.id
+                            meta = dict(ev.metadata_json or {})
+                            meta["semantic_status"] = "queued"
+                            ev.metadata_json = meta
 
             session.commit()
+            try:
+                from app.services.pipeline_coordinator import invalidate_project_status_cache
+
+                invalidate_project_status_cache(ev.project_id)
+            except Exception:
+                pass
             try:
                 from app.main import signal_worker_activity
 
