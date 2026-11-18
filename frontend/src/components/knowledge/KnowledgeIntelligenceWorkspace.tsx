@@ -176,7 +176,12 @@ export function KnowledgeIntelligenceWorkspace({
   const lastGraphSignatureRef = useRef<string>("");
 
   const computeGraphSignature = (nodes: KIGraphNode[], edges: KIGraphEdge[]) =>
-    `${nodes.map((n) => `${n.id}:${n.status}:${n.verification_status}:${n.evidence_count}`).join("|")}||${edges.map((e) => `${e.id}:${e.relationship_type}:${e.verification_status}`).join("|")}`;
+    `${nodes
+      .map((n) => {
+        const meta = (n.metadata ?? {}) as Record<string, unknown>;
+        return `${n.id}:${n.status ?? ""}:${n.verification_status}:${n.evidence_count}:${String(meta.technology_category ?? "")}:${String(meta.version ?? "")}:${String(meta.usage_status ?? meta.usage_basis ?? "")}:${(n.description ?? "").length}`;
+      })
+      .join("|")}||${edges.map((e) => `${e.id}:${e.relationship_type}:${e.verification_status}`).join("|")}`;
 
   useEffect(() => {
     activeProjectIdRef.current = projectId;

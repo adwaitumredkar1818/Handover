@@ -248,10 +248,26 @@ class RelationshipCoordinatorService:
             rel_basis: str,
             first_excerpt: str,
             comp_entities: list[KnowledgeEntity] | None = None,
+            version: str | None = None,
+            role_in_project: str | None = None,
+            usage_status: str | None = None,
         ) -> KnowledgeEntity | None:
             nonlocal seeded
             if not canon_name:
                 return None
+            tech_meta: dict[str, Any] = {
+                "technology_category": stack_cat,
+                "usage_basis": usage_basis,
+                "purpose": (role_in_project or summary[:280]) if (role_in_project or summary) else None,
+                "verification_status": k_item.review_status,
+            }
+            resolved_ver = version or (getattr(k_item, "structured_payload", None) or {}).get("version")
+            if resolved_ver:
+                tech_meta["version"] = resolved_ver
+            if role_in_project:
+                tech_meta["role_in_project"] = role_in_project
+            if usage_status:
+                tech_meta["usage_status"] = usage_status
             t_ent = self._entity_repo.create_or_get_entity(
                 organisation_id=organisation_id,
                 project_id=project_id,
@@ -261,13 +277,7 @@ class RelationshipCoordinatorService:
                 primary_knowledge_item_id=k_item.id,
                 primary_evidence_id=ev_id,
                 confidence_score=conf,
-                metadata_json={
-                    "technology_category": stack_cat,
-                    "usage_basis": usage_basis,
-                    "purpose": summary[:280] if summary else None,
-                    "version": (getattr(k_item, "structured_payload", None) or {}).get("version"),
-                    "verification_status": k_item.review_status,
-                },
+                metadata_json=tech_meta,
                 first_observed_at=k_item.created_at,
                 last_observed_at=k_item.updated_at,
                 is_synthetic=k_item.is_synthetic,
@@ -353,6 +363,208 @@ class RelationshipCoordinatorService:
                 if k.epistemic_status == EpistemicStatus.HUMAN_VERIFIED.value
                 else RelationshipBasis.EXPLICIT.value
             )
+            graph_classes = set(str(g).upper() for g in (meta.get("graph_classifications") or []))
+
+            # 1.0 Explicit Graph-Structured Details from Qwen3 / Validator
+            tech_det = meta.get("technology_details")
+            if isinstance(tech_det, dict) and tech_det.get("technology_name"):
+                raw_tname = str(tech_det["technology_name"]).strip()
+                canon_tname, detected_cat, _etype = canonicalize_technology_name(raw_tname)
+                final_tname = canon_tname or raw_tname
+                final_cat = str(tech_det.get("technology_category") or detected_cat or "technology").lower()
+                raw_ustatus = str(tech_det.get("usage_status") or "UNKNOWN").upper()
+                _ustatus_map = {
+                    "DECLARED_DEPENDENCY": "declared_dependency",
+                    "DIRECTLY_EVIDENCED_USE": "implemented",
+                    "DOCUMENTED_PLANNED": "documented_planned",
+                    "DEPRECATED_OR_REMOVED": "deprecated",
+                    "MENTIONED_ONLY": "mentioned",
+                    "UNKNOWN": usage_basis,
+                }
+                mapped_ubasis = _ustatus_map.get(raw_ustatus, usage_basis)
+                assoc_comp_entities: list[KnowledgeEntity] = []
+                assoc_comp_name = str(tech_det.get("associated_component") or "").strip()
+                if assoc_comp_name and assoc_comp_name.lower() not in _NON_COMPONENT_CONCEPTUAL_TOKENS:
+                    ac_ent = self._entity_repo.create_or_get_entity(
+                        organisation_id=organisation_id,
+                        project_id=project_id,
+                        entity_type=EntityType.TECHNICAL_COMPONENT.value,
+                        canonical_name=assoc_comp_name[:255],
+                        primary_evidence_id=ev_id,
+                        is_synthetic=k.is_synthetic,
+                    )
+                    assoc_comp_entities.append(ac_ent)
+                _record_technology(
+                    raw_tech=raw_tname,
+                    canon_name=final_tname,
+                    stack_cat=final_cat,
+                    usage_basis=mapped_ubasis,
+                    summary=summary,
+                    k_item=k,
+                    ev_id=ev_id,
+                    conf=conf,
+                    rel_basis=rel_basis,
+                    first_excerpt=first_excerpt,
+                    comp_entities=assoc_comp_entities or None,
+                    version=(str(tech_det.get("version") or "").strip() or None),
+                    role_in_project=(str(tech_det.get("role_in_project") or "").strip() or None),
+                    usage_status=raw_ustatus,
+                )
+
+            arch_det = meta.get("architecture_details")
+            if isinstance(arch_det, dict) and arch_det.get("component_name"):
+                acomp_name = str(arch_det["component_name"]).strip()
+                if acomp_name.lower() not in _NON_COMPONENT_CONCEPTUAL_TOKENS:
+                    ac_ent = self._entity_repo.create_or_get_entity(
+                        organisation_id=organisation_id,
+                        project_id=project_id,
+                        entity_type=EntityType.TECHNICAL_COMPONENT.value,
+                        canonical_name=acomp_name[:255],
+                        description=str(arch_det.get("component_responsibility") or summary),
+                        primary_knowledge_item_id=k.id,
+                        primary_evidence_id=ev_id,
+                        confidence_score=conf,
+                        metadata_json={
+                            "component_type": arch_det.get("component_type"),
+                            "implementation_status": arch_det.get("implementation_status") or impl_basis,
+                            "verification_status": k.review_status,
+                        },
+                        first_observed_at=k.created_at,
+                        last_observed_at=k.updated_at,
+                        is_synthetic=k.is_synthetic,
+                    )
+                    seeded += 1
+                    if ev_id is not None:
+                        comp_entities_by_ev.setdefault(ev_id, []).append(ac_ent)
+                        pending_drafts.append(
+                            DiscoveredRelationshipDraft(
+                                source_entity_id=project_entity.id,
+                                target_entity_id=ac_ent.id,
+                                relationship_type=RelationshipType.INTEGRATES_WITH.value,
+                                relationship_basis=rel_basis,
+                                confidence_score=conf,
+                                discovery_method="knowledge_payload",
+                                evidence_id=ev_id,
+                                evidence_chunk_id=None,
+                                knowledge_item_id=k.id,
+                                supporting_excerpt=first_excerpt,
+                                source_location_json={"component": ac_ent.canonical_name},
+                            )
+                        )
+                        for atech in arch_det.get("associated_technologies") or []:
+                            if isinstance(atech, str) and atech.strip():
+                                c_tn, s_cat, _et = canonicalize_technology_name(atech.strip())
+                                _record_technology(
+                                    raw_tech=atech.strip(),
+                                    canon_name=c_tn or atech.strip(),
+                                    stack_cat=s_cat or "technology",
+                                    usage_basis=usage_basis,
+                                    summary=summary,
+                                    k_item=k,
+                                    ev_id=ev_id,
+                                    conf=conf,
+                                    rel_basis=rel_basis,
+                                    first_excerpt=first_excerpt,
+                                    comp_entities=[ac_ent],
+                                )
+                        src_c = str(arch_det.get("source_component") or "").strip()
+                        dst_c = str(arch_det.get("target_component") or "").strip()
+                        raw_rtype = str(arch_det.get("relationship_type") or "").strip().lower()
+                        if src_c and dst_c and src_c.lower() != dst_c.lower():
+                            _arch_rel_map = {
+                                "calls": RelationshipType.CALLS.value,
+                                "reads_from": RelationshipType.READS_FROM.value,
+                                "writes_to": RelationshipType.WRITES_TO.value,
+                                "depends_on": RelationshipType.DEPENDS_ON.value,
+                                "integrates_with": RelationshipType.INTEGRATES_WITH.value,
+                                "sends_events_to": RelationshipType.INTEGRATES_WITH.value,
+                                "processes": RelationshipType.INTEGRATES_WITH.value,
+                                "authenticates_through": RelationshipType.DEPENDS_ON.value,
+                                "deploys_to": RelationshipType.INTEGRATES_WITH.value,
+                            }
+                            mapped_rtype = _arch_rel_map.get(raw_rtype, RelationshipType.INTEGRATES_WITH.value)
+                            src_ent_c = self._entity_repo.create_or_get_entity(
+                                organisation_id=organisation_id,
+                                project_id=project_id,
+                                entity_type=EntityType.TECHNICAL_COMPONENT.value,
+                                canonical_name=src_c[:255],
+                                primary_evidence_id=ev_id,
+                                is_synthetic=k.is_synthetic,
+                            )
+                            dst_ent_c = self._entity_repo.create_or_get_entity(
+                                organisation_id=organisation_id,
+                                project_id=project_id,
+                                entity_type=EntityType.TECHNICAL_COMPONENT.value,
+                                canonical_name=dst_c[:255],
+                                primary_evidence_id=ev_id,
+                                is_synthetic=k.is_synthetic,
+                            )
+                            pending_drafts.append(
+                                DiscoveredRelationshipDraft(
+                                    source_entity_id=src_ent_c.id,
+                                    target_entity_id=dst_ent_c.id,
+                                    relationship_type=mapped_rtype,
+                                    relationship_basis=rel_basis,
+                                    confidence_score=conf,
+                                    discovery_method="knowledge_payload",
+                                    evidence_id=ev_id,
+                                    evidence_chunk_id=None,
+                                    knowledge_item_id=k.id,
+                                    supporting_excerpt=first_excerpt,
+                                    source_location_json={"architecture_relationship": raw_rtype},
+                                )
+                            )
+
+            feat_det = meta.get("feature_details")
+            if isinstance(feat_det, dict) and feat_det.get("feature_name"):
+                fname = str(feat_det["feature_name"]).strip()
+                f_ent = self._entity_repo.create_or_get_entity(
+                    organisation_id=organisation_id,
+                    project_id=project_id,
+                    entity_type=EntityType.FEATURE.value,
+                    canonical_name=fname[:255],
+                    description=str(feat_det.get("user_visible_behavior") or summary),
+                    primary_knowledge_item_id=k.id,
+                    primary_evidence_id=ev_id,
+                    confidence_score=conf,
+                    metadata_json={
+                        "user_goal": feat_det.get("user_goal"),
+                        "user_actor": feat_det.get("user_actor"),
+                        "user_visible_behavior": feat_det.get("user_visible_behavior"),
+                        "workflow_steps": feat_det.get("workflow_steps") or [],
+                        "feature_status": str(feat_det.get("implementation_status") or "PLANNED").upper(),
+                        "verification_status": k.review_status,
+                    },
+                    first_observed_at=k.created_at,
+                    last_observed_at=k.updated_at,
+                    is_synthetic=k.is_synthetic,
+                )
+                seeded += 1
+                feature_proc_candidates.append(
+                    (f_ent, ev_id, conf, rel_basis, first_excerpt, k.id)
+                )
+                if project_entity is not None and ev_id is not None:
+                    pending_drafts.append(
+                        DiscoveredRelationshipDraft(
+                            source_entity_id=project_entity.id,
+                            target_entity_id=f_ent.id,
+                            relationship_type=RelationshipType.HAS_FEATURE.value,
+                            relationship_basis=rel_basis,
+                            confidence_score=conf,
+                            discovery_method="knowledge_payload",
+                            evidence_id=ev_id,
+                            evidence_chunk_id=None,
+                            knowledge_item_id=k.id,
+                            supporting_excerpt=first_excerpt,
+                            source_location_json={"feature": f_ent.canonical_name},
+                        )
+                    )
+
+            # Skip generic fallback seeding if explicit graph_details already handled the primary graph intent
+            if isinstance(tech_det, dict) and graph_classes == {"TECHNOLOGY_STACK"}:
+                continue
+            if isinstance(feat_det, dict) and graph_classes == {"FEATURES_WORKFLOWS"}:
+                continue
 
             # 1A. Technical & Architecture Knowledge -> unpack technologies & components
             if k.category in {
@@ -432,7 +644,9 @@ class RelationshipCoordinatorService:
                                 seen_canon.add(canon_name)
                                 tech_entries.append((raw_tech, canon_name, stack_cat))
 
-                for canon_name, stack_cat, _etype in extract_known_technologies_from_text(k.title, summary):
+                for canon_name, stack_cat, _etype in extract_known_technologies_from_text(
+                    k.title, summary, first_excerpt
+                ):
                     if canon_name not in seen_canon:
                         seen_canon.add(canon_name)
                         tech_entries.append((canon_name, canon_name, stack_cat))
@@ -452,9 +666,17 @@ class RelationshipCoordinatorService:
                         comp_entities=comp_entities,
                     )
 
-                # If neither explicit components nor tech choice existed, seed concise architecture component
+                # If neither explicit components nor tech choice/tech_det existed, seed concise architecture component
                 is_conceptual = any(tok in k.title.lower() for tok in _NON_COMPONENT_CONCEPTUAL_TOKENS)
-                if not comp_entities and tech_cat != "technology_choice" and not is_conceptual:
+                is_tech_stack_title = "technology stack" in k.title.lower() or "tech stack" in k.title.lower()
+                if (
+                    not comp_entities
+                    and tech_cat != "technology_choice"
+                    and not is_conceptual
+                    and not is_tech_stack_title
+                    and not isinstance(arch_det, dict)
+                    and "TECHNOLOGY_STACK" not in graph_classes
+                ):
                     arch_ent = self._entity_repo.create_or_get_entity(
                         organisation_id=organisation_id,
                         project_id=project_id,

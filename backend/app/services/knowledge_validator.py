@@ -119,6 +119,72 @@ def get_multi_domain_response_json_schema() -> dict[str, Any]:
                             "type": "string",
                             "enum": ["high", "medium", "low"],
                         },
+                        "graph_classifications": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "TECHNOLOGY_STACK",
+                                    "SYSTEM_ARCHITECTURE",
+                                    "FEATURES_WORKFLOWS",
+                                ],
+                            },
+                        },
+                        "technology_details": {
+                            "type": ["object", "null"],
+                            "properties": {
+                                "technology_name": {"type": "string"},
+                                "technology_category": {"type": ["string", "null"]},
+                                "role_in_project": {"type": ["string", "null"]},
+                                "version": {"type": ["string", "null"]},
+                                "usage_status": {
+                                    "type": "string",
+                                    "enum": [
+                                        "DECLARED_DEPENDENCY",
+                                        "DIRECTLY_EVIDENCED_USE",
+                                        "DOCUMENTED_PLANNED",
+                                        "DEPRECATED_OR_REMOVED",
+                                        "MENTIONED_ONLY",
+                                        "UNKNOWN",
+                                    ],
+                                },
+                                "associated_component": {"type": ["string", "null"]},
+                            },
+                        },
+                        "architecture_details": {
+                            "type": ["object", "null"],
+                            "properties": {
+                                "component_name": {"type": "string"},
+                                "component_type": {"type": ["string", "null"]},
+                                "component_responsibility": {"type": ["string", "null"]},
+                                "implementation_status": {"type": ["string", "null"]},
+                                "associated_technologies": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "relationship_type": {"type": ["string", "null"]},
+                                "source_component": {"type": ["string", "null"]},
+                                "target_component": {"type": ["string", "null"]},
+                            },
+                        },
+                        "feature_details": {
+                            "type": ["object", "null"],
+                            "properties": {
+                                "feature_name": {"type": "string"},
+                                "user_goal": {"type": ["string", "null"]},
+                                "user_actor": {"type": ["string", "null"]},
+                                "user_visible_behavior": {"type": ["string", "null"]},
+                                "implementation_status": {"type": ["string", "null"]},
+                                "workflow_steps": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "related_components": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                        },
                     },
                     "required": [
                         "category",
@@ -480,6 +546,189 @@ def _build_confidence_and_uncertainty(
     return confidence_meta, uncertainty_reason, epistemic_status, support_classification
 
 
+_VALID_GRAPH_CLASSIFICATIONS = {
+    "TECHNOLOGY_STACK",
+    "SYSTEM_ARCHITECTURE",
+    "FEATURES_WORKFLOWS",
+}
+_VALID_TECH_USAGE_STATUSES = {
+    "DECLARED_DEPENDENCY",
+    "DIRECTLY_EVIDENCED_USE",
+    "DOCUMENTED_PLANNED",
+    "DEPRECATED_OR_REMOVED",
+    "MENTIONED_ONLY",
+    "UNKNOWN",
+}
+_NON_FEATURE_INTERNAL_TERMS = (
+    "database migration",
+    "db migration",
+    "alembic migration",
+    "postgresql integration",
+    "fastapi routing",
+    "internal queue",
+    "ci/cd",
+    "unit test",
+    "integration test",
+    "refactoring",
+    "auth middleware",
+    "authentication middleware",
+    "infrastructure configuration",
+    "docker compose",
+)
+
+
+def _validate_and_normalize_graph_payload(
+    *,
+    payload: dict[str, Any],
+    title: str,
+    cited_chunks: list[ChunkPromptInput],
+    verified_links: list[VerifiedEvidenceLinkDraft],
+) -> tuple[bool, str | None]:
+    """Validate and normalize graph_classifications and *_details against cited evidence.
+
+    Returns (ok, rejection_reason). Mutates `payload` in place to strip ungrounded fields.
+    """
+    combined_text = "\n".join(
+        [ch.chunk_text for ch in cited_chunks]
+        + [lk.supporting_excerpt for lk in verified_links]
+    ).lower()
+
+    raw_graphs = payload.get("graph_classifications")
+    if isinstance(raw_graphs, list):
+        graphs = [
+            str(g).strip().upper()
+            for g in raw_graphs
+            if str(g).strip().upper() in _VALID_GRAPH_CLASSIFICATIONS
+        ]
+    else:
+        graphs = []
+
+    had_only_tech = graphs == ["TECHNOLOGY_STACK"]
+
+    # 1. Validate technology_details
+    td = payload.get("technology_details")
+    if isinstance(td, dict):
+        tech_name = str(td.get("technology_name") or "").strip()
+        if not tech_name or tech_name.lower() not in combined_text:
+            # Check short token match (e.g. "PostgreSQL 16" -> "postgresql")
+            first_tok = tech_name.split()[0].lower() if tech_name else ""
+            if not first_tok or len(first_tok) < 2 or first_tok not in combined_text:
+                payload.pop("technology_details", None)
+                graphs = [g for g in graphs if g != "TECHNOLOGY_STACK"]
+                if had_only_tech:
+                    return False, "ungrounded_technology_name"
+                td = None
+
+        if isinstance(td, dict):
+            raw_ver = str(td.get("version") or "").strip()
+            clean_ver: str | None = None
+            if raw_ver:
+                ver_core = raw_ver.lstrip("^~>=<vV ").strip().lower()
+                if ver_core and ver_core in combined_text:
+                    clean_ver = raw_ver
+            usage_status = str(td.get("usage_status") or "UNKNOWN").strip().upper()
+            if usage_status not in _VALID_TECH_USAGE_STATUSES:
+                usage_status = "UNKNOWN"
+            assoc_comp = str(td.get("associated_component") or "").strip() or None
+            if assoc_comp and assoc_comp.lower() not in combined_text:
+                assoc_comp = None
+            normalized_td = {
+                "technology_name": tech_name,
+                "technology_category": (str(td.get("technology_category") or "").strip().lower() or None),
+                "role_in_project": (str(td.get("role_in_project") or "").strip() or None),
+                "version": clean_ver,
+                "usage_status": usage_status,
+                "associated_component": assoc_comp,
+            }
+            payload["technology_details"] = normalized_td
+            if "TECHNOLOGY_STACK" not in graphs:
+                graphs.append("TECHNOLOGY_STACK")
+            payload.setdefault("technical_category", "technology_choice")
+            existing_ids = list(payload.get("exact_identifiers") or [])
+            if tech_name not in existing_ids:
+                existing_ids.append(tech_name)
+            payload["exact_identifiers"] = existing_ids
+
+    # 2. Validate architecture_details
+    ad = payload.get("architecture_details")
+    if isinstance(ad, dict):
+        comp_name = str(ad.get("component_name") or "").strip()
+        src_comp = str(ad.get("source_component") or "").strip() or None
+        dst_comp = str(ad.get("target_component") or "").strip() or None
+        rel_type = str(ad.get("relationship_type") or "").strip().lower() or None
+        if src_comp and src_comp.lower() not in combined_text:
+            src_comp = None
+            rel_type = None
+        if dst_comp and dst_comp.lower() not in combined_text:
+            dst_comp = None
+            rel_type = None
+        assoc_techs = [
+            str(t).strip()
+            for t in (ad.get("associated_technologies") or [])
+            if isinstance(t, str) and t.strip() and t.strip().lower() in combined_text
+        ]
+        if comp_name:
+            payload["architecture_details"] = {
+                "component_name": comp_name,
+                "component_type": (str(ad.get("component_type") or "").strip().lower() or None),
+                "component_responsibility": (str(ad.get("component_responsibility") or "").strip() or None),
+                "implementation_status": (str(ad.get("implementation_status") or "unknown").strip().lower()),
+                "associated_technologies": assoc_techs,
+                "relationship_type": rel_type,
+                "source_component": src_comp,
+                "target_component": dst_comp,
+            }
+            existing_comps = list(payload.get("components") or [])
+            if comp_name not in existing_comps:
+                existing_comps.append(comp_name)
+            payload["components"] = existing_comps
+            if "SYSTEM_ARCHITECTURE" not in graphs:
+                graphs.append("SYSTEM_ARCHITECTURE")
+        else:
+            payload.pop("architecture_details", None)
+
+    # 3. Validate feature_details & exclude non-feature internal dev/infra tasks
+    fd = payload.get("feature_details")
+    feat_name = (
+        str(fd.get("feature_name") or "").strip()
+        if isinstance(fd, dict)
+        else ""
+    ) or title
+    low_feat = feat_name.lower()
+    is_internal_non_feature = any(term in low_feat for term in _NON_FEATURE_INTERNAL_TERMS)
+    if is_internal_non_feature:
+        graphs = [g for g in graphs if g != "FEATURES_WORKFLOWS"]
+        payload.pop("feature_details", None)
+    elif isinstance(fd, dict) and feat_name:
+        rel_comps = [
+            str(c).strip()
+            for c in (fd.get("related_components") or [])
+            if isinstance(c, str) and c.strip() and c.strip().lower() in combined_text
+        ]
+        payload["feature_details"] = {
+            "feature_name": feat_name,
+            "user_goal": (str(fd.get("user_goal") or "").strip() or None),
+            "user_actor": (str(fd.get("user_actor") or "").strip() or None),
+            "user_visible_behavior": (str(fd.get("user_visible_behavior") or "").strip() or None),
+            "implementation_status": (str(fd.get("implementation_status") or "unknown").strip().lower()),
+            "workflow_steps": [
+                str(s).strip()
+                for s in (fd.get("workflow_steps") or [])
+                if isinstance(s, str) and s.strip()
+            ],
+            "related_components": rel_comps,
+        }
+        if "FEATURES_WORKFLOWS" not in graphs:
+            graphs.append("FEATURES_WORKFLOWS")
+
+    if graphs:
+        payload["graph_classifications"] = list(dict.fromkeys(graphs))
+    else:
+        payload.pop("graph_classifications", None)
+
+    return True, None
+
+
 class KnowledgeCandidateValidator:
     """Validates raw LLM JSON items against category schemas and canonical chunk texts."""
 
@@ -822,6 +1071,23 @@ class KnowledgeCandidateValidator:
                     payload[k] = v
             if "description" not in payload:
                 payload["description"] = summary
+
+            graph_ok, graph_rej = _validate_and_normalize_graph_payload(
+                payload=payload,
+                title=title,
+                cited_chunks=cited_chunks,
+                verified_links=verified_links,
+            )
+            if not graph_ok:
+                report.rejected_ungrounded_count += 1
+                rej_reason = graph_rej or "ungrounded_graph_details"
+                report.rejection_reasons.append(rej_reason)
+                report.rejected_items.append({
+                    "category": category.value if hasattr(category, "value") else str(category),
+                    "title": title,
+                    "reason": rej_reason,
+                })
+                continue
 
             normalised_status = _extract_normalised_status(category, payload)
             person_label = _extract_person_label(category, payload)
