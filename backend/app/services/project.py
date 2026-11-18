@@ -706,6 +706,7 @@ class ProjectService:
             cache_service.invalidate_prefix(f"dash:overview:proj:{ctx.project.id}")
             cache_service.delete(CacheKeys.rbac_user_project_permissions(ctx.project.id, payload.user_id))
             local_response_cache.invalidate_prefix(f"project_members:{ctx.project.id}:")
+            self._invalidate_relationship_caches(ctx.project.id)
         except IntegrityError as exc:
             self._db.rollback()
             raise ConflictError(
@@ -787,6 +788,7 @@ class ProjectService:
         cache_service.invalidate_prefix(f"dash:overview:proj:{ctx.project.id}")
         cache_service.delete(CacheKeys.rbac_user_project_permissions(ctx.project.id, target_user_id))
         local_response_cache.invalidate_prefix(f"project_members:{ctx.project.id}:")
+        self._invalidate_relationship_caches(ctx.project.id)
         refreshed = self._project_repo.get_active_membership(
             project_id=ctx.project.id,
             user_id=target_user_id,
@@ -840,11 +842,24 @@ class ProjectService:
         cache_service.invalidate_prefix(f"dash:overview:proj:{ctx.project.id}")
         cache_service.delete(CacheKeys.rbac_user_project_permissions(ctx.project.id, target_user_id))
         local_response_cache.invalidate_prefix(f"project_members:{ctx.project.id}:")
+        self._invalidate_relationship_caches(ctx.project.id)
         return RemoveMembershipResponse(
             message="Project member removed and project access revoked immediately.",
             user_id=target_user_id,
             revoked_project_memberships=1,
         )
+
+    def _invalidate_relationship_caches(self, project_id: uuid.UUID) -> None:
+        """Invalidate Relationship Explorer caches when project membership changes."""
+        for prefix in (
+            f"rel_contributors:{project_id}:",
+            f"contrib_graph:{project_id}:",
+            f"work_clusters:{project_id}:",
+            f"rel_entities:{project_id}:",
+            f"rel_candidates:{project_id}:",
+            f"rel_responsibilities:{project_id}:",
+        ):
+            local_response_cache.invalidate_prefix(prefix)
 
     def get_project_transition(self, ctx: ProjectContext) -> ProjectTransitionResponse | None:
         """Retrieve configured transition participants and parameters."""

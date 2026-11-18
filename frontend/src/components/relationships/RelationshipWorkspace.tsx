@@ -1023,6 +1023,31 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     onProcessingComplete: handleProcessingComplete,
   });
 
+  // Auto-sync Relationship Explorer when team members change in LiveAppContext (no F5 required)
+  const membersSignature = useMemo(
+    () =>
+      (liveMembers || [])
+        .map((m) => `${m.id}:${m.user_id || ""}:${m.role_name || ""}`)
+        .sort()
+        .join("|"),
+    [liveMembers]
+  );
+  const prevMembersSigRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (prevMembersSigRef.current === null) {
+      prevMembersSigRef.current = membersSignature;
+      return;
+    }
+    if (prevMembersSigRef.current !== membersSignature) {
+      prevMembersSigRef.current = membersSignature;
+      invalidateGraphCache("rel_");
+      loadPeopleAndEntityGraphs(true);
+      if (activeTab === "identity_review" || activeTab === "responsibilities") {
+        loadTabDetails(activeTab, true);
+      }
+    }
+  }, [membersSignature, activeTab, loadPeopleAndEntityGraphs, loadTabDetails]);
+
   const handleNodeClick = async (_: unknown, node: Node) => {
     const rawData = (node.data as { raw?: any })?.raw;
     const raw = rawData?.metadata?.raw || rawData;
@@ -1610,7 +1635,9 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                         )}
                         <span className="font-semibold text-slate-900 text-sm">{c.display_name}</span>
                         <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[11px]">
-                          {c.contributor_type.replace(/_/g, " ")} · {c.review_status}
+                          {c.match_method === "pending_identity"
+                            ? "project member · pending identity link"
+                            : `${c.contributor_type.replace(/_/g, " ")} · ${c.review_status}`}
                         </span>
                       </div>
                       <p className="text-xs text-slate-500">

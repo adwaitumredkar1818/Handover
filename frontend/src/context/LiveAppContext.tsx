@@ -1284,6 +1284,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const addMember = async (data: { email?: string; user_id?: string; role_name?: string; transition_role?: string }) => {
     if (!activeProject) throw new Error("No active project");
     await api.members.add(activeProject.id, data);
+    invalidateGraphCache("rel_");
     await refreshMembers();
     setIsAddMemberModalOpen(false);
     addToast({
@@ -1296,6 +1297,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const updateMember = async (memberId: string, data: { role_name?: string; transition_role?: string }) => {
     if (!activeProject) throw new Error("No active project");
     await api.members.update(activeProject.id, memberId, data);
+    invalidateGraphCache("rel_");
     await refreshMembers();
     addToast({
       type: "success",
