@@ -7,6 +7,7 @@ import {
   RelationshipWorkspace,
   filterVisibleGraphEdges,
 } from "../components/relationships/RelationshipWorkspace";
+import { LiveProcessingBanner, ProcessingEmptyStateCard } from "../components/knowledge/LiveProcessingBanner";
 import { api } from "../lib/api";
 
 vi.mock("../context/LiveAppContext", () => ({
@@ -160,5 +161,34 @@ describe("Knowledge Intelligence & Relationship Explorer UI", () => {
     await waitFor(() =>
       expect(reviewSpy).toHaveBeenCalledWith("proj-1", "ghid:99", expect.objectContaining({ action: "mark_external" }))
     );
+  });
+
+  it("renders non-intrusive empty states correctly and never renders floating banner", () => {
+    const banner = render(
+      <LiveProcessingBanner
+        status={{
+          is_processing: true,
+          state: "processing",
+          stage_label: "Analysing",
+          total_evidence_count: 5,
+          processed_evidence_count: 2,
+        } as any}
+      />
+    );
+    expect(banner.container).toBeEmptyDOMElement();
+
+    const emptyCard = render(
+      <ProcessingEmptyStateCard
+        status={{
+          is_processing: true,
+          state: "processing",
+          stage_label: "Analyzing evidence",
+          total_evidence_count: 5,
+          processed_evidence_count: 2,
+        } as any}
+      />
+    );
+    expect(screen.getByText(/Reconstructing project knowledge…/i)).toBeInTheDocument();
+    expect(screen.queryByText(/We're processing your evidence/i)).not.toBeInTheDocument();
   });
 });
