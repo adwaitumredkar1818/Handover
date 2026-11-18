@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Link from "next/link";
 import {
   ReactFlow,
@@ -38,6 +38,11 @@ import {
 } from "lucide-react";
 import { api } from "../../lib/api";
 import { useLiveApp } from "../../context/LiveAppContext";
+import { AmeliorateFlowchartCanvas } from "../knowledge/ameliorate/AmeliorateFlowchartCanvas";
+import type { HandoverGraphNode, HandoverGraphEdge } from "../knowledge/ameliorate/ameliorateAdapter";
+import { getCachedGraph, setCachedGraph, invalidateGraphCache } from "@/lib/graphCache";
+import { useProjectProcessingStatus } from "@/hooks/useProjectProcessingStatus";
+import { ProcessingEmptyStateCard } from "@/components/knowledge/LiveProcessingBanner";
 
 export interface KnowledgeEntityNode {
   id: string;
@@ -209,13 +214,166 @@ export function filterVisibleGraphEdges<T extends { source: string; target: stri
   return allEdges.filter((e) => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target));
 }
 
+export function adaptContributorToHandoverGraph(contributorGraph: {
+  nodes: Array<{
+    id: string;
+    node_kind: string;
+    label: string;
+    contributor_key?: string | null;
+    contributor_type: string;
+    review_status: string;
+    verification_status: string;
+    contribution_count: number;
+    metadata: Record<string, unknown>;
+  }>;
+  edges: Array<{
+    id: string;
+    source: string;
+    target: string;
+    relationship_type: string;
+    label: string;
+    evidence_basis: string;
+  }>;
+}): { nodes: HandoverGraphNode[]; edges: HandoverGraphEdge[] } {
+  const visibleNodeIds = new Set<string>();
+  const nodes: HandoverGraphNode[] = (contributorGraph.nodes || []).map((n) => {
+    visibleNodeIds.add(n.id);
+    const isMember = n.contributor_type === "confirmed_member";
+    const isExternal = n.contributor_type === "external_contributor";
+    const isBot = n.contributor_type === "bot";
+    const isCluster = n.node_kind === "work_cluster" || n.contributor_type === "work_cluster";
+
+    let entity_type = "contributor";
+    let category = "unidentified";
+    let typeLabel = "Contributor";
+
+    if (isCluster) {
+      entity_type = "work_cluster";
+      category = "work_cluster";
+      typeLabel = "Work Cluster";
+    } else if (isMember) {
+      entity_type = "confirmed_member";
+      category = "confirmed_member";
+      typeLabel = "Project Member";
+    } else if (isExternal) {
+      entity_type = "external_contributor";
+      category = "external_contributor";
+      typeLabel = "External";
+    } else if (isBot) {
+      entity_type = "bot";
+      category = "bot";
+      typeLabel = "Bot";
+    }
+
+    return {
+      id: n.id,
+      label: n.label,
+      entity_type,
+      category,
+      status: n.review_status === "confirmed" ? "HUMAN_VERIFIED" : n.review_status,
+      verification_status: n.verification_status || n.review_status,
+      evidence_count: n.contribution_count || 0,
+      evidence_ids: (n.metadata?.evidence_ids as string[]) || [],
+      aliases: n.metadata?.github_login ? [`@${n.metadata.github_login}`] : [],
+      metadata: {
+        ...n.metadata,
+        raw: n,
+        node_kind: n.node_kind,
+        contributor_key: n.contributor_key,
+        contributor_type: n.contributor_type,
+        review_status: n.review_status,
+        contribution_count: n.contribution_count,
+        identity_note: n.metadata?.identity_note,
+        customTypeLabel: typeLabel,
+      },
+    };
+  });
+
+  const validEdges = (contributorGraph.edges || []).filter(
+    (e) => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target)
+  );
+
+  const edges: HandoverGraphEdge[] = validEdges.map((e) => ({
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    relationship_type: e.relationship_type || "contributed_to",
+    label: e.label || "contributed to",
+    evidence_basis: e.evidence_basis || "explicit",
+    verification_status: "verified",
+    confidence_score: 1.0,
+    evidence_ids: [],
+  }));
+
+  return { nodes, edges };
+}
+
+export function adaptEntityToHandoverGraph(entityGraph: {
+  nodes: KnowledgeEntityNode[];
+  edges: Array<{
+    id: string;
+    source: string;
+    target: string;
+    relationship_type?: string;
+    label?: string;
+    evidence_basis?: string;
+    verification_status?: string;
+    confidence_score?: number;
+    evidence_ids?: string[];
+  }>;
+}): { nodes: HandoverGraphNode[]; edges: HandoverGraphEdge[] } {
+  const visibleNodeIds = new Set<string>();
+  const nodes: HandoverGraphNode[] = (entityGraph.nodes || []).map((n) => {
+    const nid = String(n.id);
+    visibleNodeIds.add(nid);
+    return {
+      id: nid,
+      label: n.canonical_name || n.label || "Entity",
+      entity_type: n.entity_type || n.type || "technical_component",
+      category: (n as any).category || n.entity_type || "technical_component",
+      status: n.status || "HUMAN_VERIFIED",
+      verification_status: n.verification_status || "verified",
+      evidence_count: (n as any).evidence_count || 1,
+      evidence_ids: (n as any).evidence_ids || [],
+      aliases: (n as any).aliases || [],
+      metadata: {
+        raw: n,
+      },
+    };
+  });
+
+  const validEdges = (entityGraph.edges || []).filter(
+    (e) => visibleNodeIds.has(String(e.source)) && visibleNodeIds.has(String(e.target))
+  );
+
+  const edges: HandoverGraphEdge[] = validEdges.map((e) => ({
+    id: String(e.id),
+    source: String(e.source),
+    target: String(e.target),
+    relationship_type: e.relationship_type || "related_to",
+    label: e.label || e.relationship_type || "related",
+    evidence_basis: e.evidence_basis || "explicit",
+    verification_status: e.verification_status || "verified",
+    confidence_score: e.confidence_score || 1.0,
+    evidence_ids: e.evidence_ids || [],
+  }));
+
+  return { nodes, edges };
+}
+
 export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps) {
   const { members: liveMembers } = useLiveApp();
   const [fetchedMembers, setFetchedMembers] = useState<any[]>([]);
+  const activeProjectIdRef = useRef(projectId);
+
+  useEffect(() => {
+    activeProjectIdRef.current = projectId;
+  }, [projectId]);
 
   useEffect(() => {
     if (!projectId) return;
     api.members.list(projectId).then((m) => {
+      if (activeProjectIdRef.current !== projectId) return;
       if (Array.isArray(m) && m.length > 0) {
         setFetchedMembers(m);
       }
@@ -223,6 +381,11 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   }, [projectId]);
 
   const projectMembers = fetchedMembers.length > 0 ? fetchedMembers : liveMembers;
+
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const [activeTab, setActiveTab] = useState<RelationshipTab>("people");
   const [graphSubmode, setGraphSubmode] = useState<"contributors" | "entities">("contributors");
@@ -291,6 +454,65 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   const [candidates, setCandidates] = useState<IdentityCandidateItem[]>([]);
   const [selectedMatchMemberByKey, setSelectedMatchMemberByKey] = useState<Record<string, string>>({});
 
+  const { nodes: handoverNodes, edges: handoverEdges } = useMemo(() => {
+    if (graphSubmode === "contributors") {
+      let filteredNodes = rawContributorGraph.nodes;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        filteredNodes = filteredNodes.filter(
+          (n) => n.label.toLowerCase().includes(q) || (n.metadata?.github_login && String(n.metadata.github_login).toLowerCase().includes(q))
+        );
+      }
+      return adaptContributorToHandoverGraph({
+        nodes: filteredNodes,
+        edges: rawContributorGraph.edges,
+      });
+    }
+
+    let filtered = rawEntityGraph.nodes;
+    if (selectedTypeFilter !== "all") {
+      filtered = filtered.filter(
+        (n) => (n.entity_type || n.type || "").toLowerCase() === selectedTypeFilter.toLowerCase()
+      );
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      filtered = filtered.filter((n) => (n.canonical_name || n.label || "").toLowerCase().includes(q));
+    }
+    return adaptEntityToHandoverGraph({
+      nodes: filtered,
+      edges: rawEntityGraph.edges,
+    });
+  }, [graphSubmode, rawContributorGraph, rawEntityGraph, searchQuery, selectedTypeFilter]);
+
+  const { depHandoverNodes, depHandoverEdges } = useMemo(() => {
+    if (!depGraph || !depGraph.nodes) return { depHandoverNodes: [], depHandoverEdges: [] };
+    const nodes: HandoverGraphNode[] = depGraph.nodes.map((n: any) => ({
+      id: String(n.id),
+      label: n.name || n.label || String(n.id),
+      entity_type: n.type || "technical_component",
+      category: n.category || "technical_component",
+      status: "HUMAN_VERIFIED",
+      verification_status: "verified",
+      evidence_count: n.evidence_count || 1,
+      evidence_ids: n.evidence_ids || [],
+      aliases: [],
+      metadata: { raw: n },
+    }));
+    const edges: HandoverGraphEdge[] = (depGraph.edges || []).map((e: any) => ({
+      id: String(e.id || `${e.source}->${e.target}`),
+      source: String(e.source),
+      target: String(e.target),
+      relationship_type: e.relationship_type || e.type || "depends_on",
+      label: e.label || e.relationship_type || "depends on",
+      evidence_basis: "explicit",
+      verification_status: "verified",
+      confidence_score: 1.0,
+      evidence_ids: [],
+    }));
+    return { depHandoverNodes: nodes, depHandoverEdges: edges };
+  }, [depGraph]);
+
   // Respect URL query params (?entityId=... or ?tab=...)
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -302,9 +524,13 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     }
     if (entityParam) {
       setGraphSubmode("entities");
+      const targetProjectId = projectId;
       api.relationships
         .getGraph(projectId, 250, { center_node_id: entityParam, depth: 2 })
-        .then((res) => setRawEntityGraph(res as any))
+        .then((res) => {
+          if (activeProjectIdRef.current !== targetProjectId) return;
+          setRawEntityGraph(res as any);
+        })
         .catch(() => {});
     }
   }, [projectId]);
@@ -362,11 +588,46 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     []
   );
 
-  const loadPeopleAndEntityGraphs = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      if (graphSubmode === "contributors") {
+  // Reset state on project switch to prevent any cross-project leakage
+  useEffect(() => {
+    setRawContributorGraph({ nodes: [], edges: [], summary: {} });
+    setRawEntityGraph({ nodes: [], edges: [] });
+    setContributors([]);
+    setClusters([]);
+    setSelectedEntityDetail(null);
+    setSelectedContributorDetail(null);
+  }, [projectId]);
+
+  const loadPeopleAndEntityGraphs = useCallback(async (forceRefresh = false) => {
+    if (!projectId) return;
+    const targetProjectId = projectId;
+
+    if (graphSubmode === "contributors") {
+      const cacheKey = `rel_contribs:${projectId}:${contributorTypeFilter}:${workClusterFilter}:${searchQuery.trim()}:${includeExternal}:${includeBots}:${expandContributorKey || ""}:${expandClusterName || ""}`;
+      if (!forceRefresh) {
+        const cached = getCachedGraph<{
+          graphRes: typeof rawContributorGraph;
+          contribList: ContributorRecord[];
+          clusterList: WorkClusterRecord[];
+        }>(cacheKey);
+        if (cached && cached.graphRes?.nodes && cached.graphRes.nodes.length > 0) {
+          if (activeProjectIdRef.current === targetProjectId) {
+            setRawContributorGraph(cached.graphRes);
+            setContributors(cached.contribList || []);
+            setClusters(cached.clusterList || []);
+            setLoading(false);
+            setError(null);
+          }
+          return;
+        }
+      }
+
+      setRawContributorGraph({ nodes: [], edges: [], summary: {} });
+      setContributors([]);
+      setClusters([]);
+      setLoading(true);
+      setError(null);
+      try {
         const [graphRes, contribList, clusterList] = await Promise.all([
           api.relationships.getContributorsGraph(projectId, {
             contributor_type: contributorTypeFilter !== "all" ? contributorTypeFilter : undefined,
@@ -380,17 +641,49 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
           api.relationships.listContributors(projectId),
           api.relationships.listWorkClusters(projectId),
         ]);
+        if (activeProjectIdRef.current !== targetProjectId) return;
         setRawContributorGraph(graphRes);
         setContributors(contribList);
         setClusters(clusterList);
-      } else {
-        const graphData = await api.relationships.getGraph(projectId);
-        setRawEntityGraph(graphData as any);
+        setCachedGraph(cacheKey, { graphRes, contribList, clusterList });
+      } catch (err: unknown) {
+        if (activeProjectIdRef.current !== targetProjectId) return;
+        setError((err as Error)?.message || "Failed to load Relationship Explorer graph.");
+      } finally {
+        if (activeProjectIdRef.current === targetProjectId) {
+          setLoading(false);
+        }
       }
-    } catch (err: unknown) {
-      setError((err as Error)?.message || "Failed to load Relationship Explorer graph.");
-    } finally {
-      setLoading(false);
+    } else {
+      const cacheKey = `rel_entities:${projectId}`;
+      if (!forceRefresh) {
+        const cached = getCachedGraph<{ nodes: KnowledgeEntityNode[]; edges: any[] }>(cacheKey);
+        if (cached && cached.nodes && cached.nodes.length > 0) {
+          if (activeProjectIdRef.current === targetProjectId) {
+            setRawEntityGraph(cached);
+            setLoading(false);
+            setError(null);
+          }
+          return;
+        }
+      }
+
+      setRawEntityGraph({ nodes: [], edges: [] });
+      setLoading(true);
+      setError(null);
+      try {
+        const graphData = await api.relationships.getGraph(projectId);
+        if (activeProjectIdRef.current !== targetProjectId) return;
+        setRawEntityGraph(graphData as any);
+        setCachedGraph(cacheKey, graphData);
+      } catch (err: unknown) {
+        if (activeProjectIdRef.current !== targetProjectId) return;
+        setError((err as Error)?.message || "Failed to load Relationship Explorer graph.");
+      } finally {
+        if (activeProjectIdRef.current === targetProjectId) {
+          setLoading(false);
+        }
+      }
     }
   }, [
     projectId,
@@ -571,25 +864,58 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     setEdges,
   ]);
 
-  const loadTabDetails = async (tab: RelationshipTab) => {
+  const loadTabDetails = useCallback(async (tab: RelationshipTab, forceRefresh = false) => {
     setActiveTab(tab);
     setError(null);
     try {
-      if (tab === "clusters" && clusters.length === 0) {
-        setClusters(await api.relationships.listWorkClusters(projectId));
-      } else if ((tab === "identity_review" || tab === "responsibilities") && contributors.length === 0) {
-        const [contribs, attrs] = await Promise.all([
-          api.relationships.listContributors(projectId),
-          api.roster.listAttributions(projectId),
-        ]);
-        setContributors(contribs);
-        setAttributions(attrs as unknown as Array<Record<string, unknown>>);
-      } else if (tab === "responsibilities" && attributions.length === 0) {
-        setAttributions((await api.roster.listAttributions(projectId)) as unknown as Array<Record<string, unknown>>);
-      } else if (tab === "traceability" && traceChains.length === 0) {
-        const res = await api.relationships.getTraceability(projectId);
-        setTraceChains(
-          (res.chains || res.items || []).map((tc: any) => ({
+      if (tab === "clusters") {
+        const cacheKey = `rel_clusters:${projectId}`;
+        if (!forceRefresh) {
+          const cached = getCachedGraph<WorkClusterRecord[]>(cacheKey);
+          if (cached && cached.length > 0) {
+            setClusters(cached);
+            return;
+          }
+        }
+        if (clusters.length === 0 || forceRefresh) {
+          const res = await api.relationships.listWorkClusters(projectId);
+          setClusters(res);
+          setCachedGraph(cacheKey, res);
+        }
+      } else if (tab === "identity_review" || tab === "responsibilities") {
+        const contribKey = `rel_contrib_list:${projectId}`;
+        const attrKey = `rel_attributions:${projectId}`;
+        if (!forceRefresh) {
+          const cachedContrib = getCachedGraph<ContributorRecord[]>(contribKey);
+          const cachedAttrs = getCachedGraph<Array<Record<string, unknown>>>(attrKey);
+          if (cachedContrib && cachedAttrs && cachedContrib.length > 0) {
+            setContributors(cachedContrib);
+            setAttributions(cachedAttrs);
+            return;
+          }
+        }
+        if (contributors.length === 0 || attributions.length === 0 || forceRefresh) {
+          const [contribs, attrs] = await Promise.all([
+            api.relationships.listContributors(projectId),
+            api.roster.listAttributions(projectId),
+          ]);
+          setContributors(contribs);
+          setAttributions(attrs as unknown as Array<Record<string, unknown>>);
+          setCachedGraph(contribKey, contribs);
+          setCachedGraph(attrKey, attrs as unknown as Array<Record<string, unknown>>);
+        }
+      } else if (tab === "traceability") {
+        const cacheKey = `rel_traceability:${projectId}`;
+        if (!forceRefresh) {
+          const cached = getCachedGraph<TraceabilityChainItem[]>(cacheKey);
+          if (cached && cached.length > 0) {
+            setTraceChains(cached);
+            return;
+          }
+        }
+        if (traceChains.length === 0 || forceRefresh) {
+          const res = await api.relationships.getTraceability(projectId);
+          const mapped = (res.chains || res.items || []).map((tc: any) => ({
             ...tc,
             decision_name: tc.decision_name || "Untitled Decision",
             work_item_count: tc.work_item_count ?? tc.work_item_ids?.length ?? 0,
@@ -597,49 +923,112 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
             commit_count: tc.commit_count ?? tc.commit_ids?.length ?? 0,
             component_count: tc.component_count ?? tc.component_ids?.length ?? 0,
             missing_links: tc.missing_links || [],
-          }))
-        );
-      } else if (tab === "dependencies" && !depGraph) {
-        const res = await api.relationships.getDependencies(projectId);
-        setDepGraph({
-          nodes: res.nodes || [],
-          edges: res.edges || [],
-          cycles: res.cycles || res.detected_cycles || [],
-          root_blockers: res.root_blockers || [],
-        });
-      } else if (tab === "timeline" && timelineEvents.length === 0) {
-        const res = await api.relationships.getTimeline(projectId);
-        setTimelineEvents(res.items || []);
+          }));
+          setTraceChains(mapped);
+          setCachedGraph(cacheKey, mapped);
+        }
+      } else if (tab === "dependencies") {
+        const cacheKey = `rel_dependencies:${projectId}`;
+        if (!forceRefresh) {
+          const cached = getCachedGraph<DependencyGraphData>(cacheKey);
+          if (cached && cached.nodes && cached.nodes.length > 0) {
+            setDepGraph(cached);
+            return;
+          }
+        }
+        if (!depGraph || forceRefresh) {
+          const res = await api.relationships.getDependencies(projectId);
+          const mapped: DependencyGraphData = {
+            nodes: res.nodes || [],
+            edges: res.edges || [],
+            cycles: res.cycles || res.detected_cycles || [],
+            root_blockers: res.root_blockers || [],
+          };
+          setDepGraph(mapped);
+          setCachedGraph(cacheKey, mapped);
+        }
+      } else if (tab === "timeline") {
+        const cacheKey = `rel_timeline:${projectId}`;
+        if (!forceRefresh) {
+          const cached = getCachedGraph<TimelineEventItem[]>(cacheKey);
+          if (cached && cached.length > 0) {
+            setTimelineEvents(cached);
+            return;
+          }
+        }
+        if (timelineEvents.length === 0 || forceRefresh) {
+          const res = await api.relationships.getTimeline(projectId);
+          const items = res.items || [];
+          setTimelineEvents(items);
+          setCachedGraph(cacheKey, items);
+        }
       }
-      if (tab === "identity_review" && candidates.length === 0) {
-        try {
-          setCandidates((await api.relationships.listIdentityCandidates(projectId)) as unknown as IdentityCandidateItem[]);
-        } catch {
-          // Non-fatal if no entity merge candidates exist
+      if (tab === "identity_review") {
+        const cacheKey = `rel_candidates:${projectId}`;
+        if (!forceRefresh) {
+          const cached = getCachedGraph<IdentityCandidateItem[]>(cacheKey);
+          if (cached) {
+            setCandidates(cached);
+            return;
+          }
+        }
+        if (candidates.length === 0 || forceRefresh) {
+          try {
+            const cList = (await api.relationships.listIdentityCandidates(projectId)) as unknown as IdentityCandidateItem[];
+            setCandidates(cList);
+            setCachedGraph(cacheKey, cList);
+          } catch {
+            // Non-fatal if no entity merge candidates exist
+          }
         }
       }
     } catch (err: unknown) {
       setError((err as Error)?.message || "Failed to load view data.");
     }
-  };
+  }, [
+    projectId,
+    clusters.length,
+    contributors.length,
+    attributions.length,
+    traceChains.length,
+    timelineEvents.length,
+    candidates.length,
+  ]);
+
+  const handleProcessingComplete = useCallback(() => {
+    invalidateGraphCache(`rel_contribs:${projectId}`);
+    invalidateGraphCache(`rel_entities:${projectId}`);
+    loadPeopleAndEntityGraphs(true);
+    if (activeTab !== "people") {
+      loadTabDetails(activeTab, true);
+    }
+  }, [projectId, loadPeopleAndEntityGraphs, activeTab, loadTabDetails]);
+
+  const {
+    status: processingStatus,
+    retry: retryProcessing,
+    retrying: retryingProcessing,
+  } = useProjectProcessingStatus(projectId, {
+    onProcessingComplete: handleProcessingComplete,
+  });
 
   const handleNodeClick = async (_: unknown, node: Node) => {
-    const raw = (node.data as { raw?: any })?.raw;
+    const rawData = (node.data as { raw?: any })?.raw;
+    const raw = rawData?.metadata?.raw || rawData;
     if (!raw) return;
 
     if (graphSubmode === "contributors") {
-      if (raw.node_kind === "contributor" && raw.contributor_key) {
+      const ckey = raw.contributor_key || raw.metadata?.contributor_key;
+      const nkind = raw.node_kind || raw.metadata?.node_kind;
+      if (nkind === "contributor" && ckey) {
         setSelectedEntityDetail(null);
         try {
-          const detail = await api.relationships.getContributorDetail(projectId, raw.contributor_key);
+          const detail = await api.relationships.getContributorDetail(projectId, ckey);
           setSelectedContributorDetail(detail as unknown as ContributorRecord);
-          setExpandContributorKey(raw.contributor_key);
         } catch {
-          const fallback = contributors.find((c) => c.contributor_key === raw.contributor_key) || null;
+          const fallback = contributors.find((c) => c.contributor_key === ckey) || null;
           setSelectedContributorDetail(fallback);
         }
-      } else if (raw.node_kind === "work_cluster") {
-        setExpandClusterName(raw.label);
       }
       return;
     }
@@ -687,8 +1076,12 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
         project_membership_id: action === "match_member" ? selectedMembershipId : undefined,
         notes: `Reviewed in Relationship Explorer (${action})`,
       });
+      invalidateGraphCache("rel_");
       setActionFeedback(`Updated contributor identity (${action.replace(/_/g, " ")}).`);
-      await loadPeopleAndEntityGraphs();
+      // Authoritatively update contributor list & graphs immediately
+      const freshContributors = await api.relationships.listContributors(projectId);
+      setContributors(freshContributors as unknown as ContributorRecord[]);
+      await loadPeopleAndEntityGraphs(true);
       setAttributions((await api.roster.listAttributions(projectId)) as unknown as Array<Record<string, unknown>>);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to submit contributor review.");
@@ -699,6 +1092,14 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     () => contributors.filter((c) => c.contributor_type === "unidentified" && c.review_status === "pending").length,
     [contributors]
   );
+
+  if (!mounted) {
+    return (
+      <div className="flex flex-col h-[calc(100vh-4rem)] bg-slate-50 items-center justify-center p-8">
+        <RefreshCw className="w-5 h-5 animate-spin text-slate-400" />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)] bg-slate-50">
@@ -714,7 +1115,13 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => loadPeopleAndEntityGraphs()}
+              onClick={() => {
+                invalidateGraphCache("rel_");
+                loadPeopleAndEntityGraphs(true);
+                if (activeTab !== "people") {
+                  loadTabDetails(activeTab, true);
+                }
+              }}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
@@ -725,8 +1132,9 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
               onClick={async () => {
                 setLoading(true);
                 try {
+                  invalidateGraphCache("rel_");
                   await api.relationships.rebuildWorkClusters(projectId);
-                  await loadPeopleAndEntityGraphs();
+                  await loadPeopleAndEntityGraphs(true);
                   setActionFeedback("Work clusters rebuilt from persisted evidence.");
                 } catch (e) {
                   setError((e as Error).message);
@@ -804,7 +1212,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
       )}
 
       {/* Tab Content */}
-      <div className="flex-1 relative overflow-hidden">
+      <div className="flex-1 relative overflow-hidden flex flex-col">
         {/* 1. PEOPLE & CONTRIBUTIONS GRAPH */}
         {activeTab === "people" && (
           <div className="flex flex-col h-full">
@@ -928,15 +1336,14 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
               </button>
             </div>
 
-            <div className="flex-1 relative">
-              {nodes.length === 0 && !loading ? (
-                <div className="flex flex-col items-center justify-center h-full text-center p-8 text-slate-500">
-                  <Users className="w-12 h-12 text-slate-300 mb-3" />
-                  <p className="font-medium text-slate-800">No contributor or entity relationships reconstructed yet.</p>
-                  <p className="text-xs text-slate-500 mt-1 max-w-md">
-                    Connect and sync a GitHub repository in Evidence Center, then rebuild work clusters or relationship discovery.
-                  </p>
-                </div>
+            <div className="flex-1 relative flex flex-col">
+              {handoverNodes.length === 0 && !loading ? (
+                <ProcessingEmptyStateCard
+                  status={processingStatus}
+                  onRetry={retryProcessing}
+                  retrying={retryingProcessing}
+                  projectId={projectId}
+                />
               ) : peopleViewKind === "list" ? (
                 <div className="p-6 h-full overflow-y-auto">
                   <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -971,18 +1378,16 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                   </div>
                 </div>
               ) : (
-                <ReactFlow
-                  nodes={nodes}
-                  edges={edges}
-                  onNodesChange={onNodesChange}
-                  onEdgesChange={onEdgesChange}
-                  onNodeClick={handleNodeClick}
-                  fitView
-                >
-                  <Background />
-                  <Controls />
-                  <MiniMap />
-                </ReactFlow>
+                <AmeliorateFlowchartCanvas
+                  rawNodes={handoverNodes}
+                  rawEdges={handoverEdges}
+                  selectedNodeId={
+                    selectedContributorDetail
+                      ? `person:${selectedContributorDetail.contributor_key}`
+                      : (selectedEntityDetail?.entity?.id || null)
+                  }
+                  onSelectNode={(node) => handleNodeClick(null, node)}
+                />
               )}
 
               {/* Contributor Detail Panel */}
@@ -1215,7 +1620,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
 
                     <div className="flex flex-wrap items-center gap-2 text-xs">
                       <select
-                        value={selectedMatchMemberByKey[c.contributor_key] || c.suggested_project_membership_id || ""}
+                        value={selectedMatchMemberByKey[c.contributor_key] || c.matched_project_membership_id || c.suggested_project_membership_id || ""}
                         onChange={(e) =>
                           setSelectedMatchMemberByKey((prev) => ({
                             ...prev,
@@ -1223,33 +1628,48 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                           }))
                         }
                         aria-label={`Select project member for ${c.display_name}`}
-                        className="px-2.5 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700"
+                        className="px-2.5 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700 min-w-[240px]"
                       >
                         <option value="">Select Project Member...</option>
-                        {projectMembers.map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.user_full_name || m.full_name || m.user_email || m.id}
-                          </option>
-                        ))}
+                        {projectMembers.map((m) => {
+                          const fullName = m.user_full_name || m.full_name || "Unknown Member";
+                          const email = m.user_email || m.email || "";
+                          const rawRole = (m.role_name || m.role || "Member");
+                          const role = rawRole.replace(/_/g, " ").replace(/\b\w/g, (l: string) => l.toUpperCase());
+                          const label = email ? `${fullName} (${email}) — ${role}` : `${fullName} — ${role}`;
+                          return (
+                            <option key={m.id} value={m.id}>
+                              {label}
+                            </option>
+                          );
+                        })}
                       </select>
                       <button
                         type="button"
                         onClick={() => handleContributorReviewAction(c.contributor_key, "match_member")}
                         className="px-3 py-1.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700"
                       >
-                        Match Member
+                        {c.matched_project_membership_id ? "Update Match" : "Match Member"}
                       </button>
                       <button
                         type="button"
                         onClick={() => handleContributorReviewAction(c.contributor_key, "mark_external")}
-                        className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1"
+                        className={`px-2.5 py-1.5 rounded-lg border text-xs inline-flex items-center gap-1 ${
+                          c.contributor_type === "external_contributor"
+                            ? "border-amber-400 bg-amber-50 text-amber-800 font-medium"
+                            : "border-slate-200 text-slate-700 hover:bg-slate-50"
+                        }`}
                       >
                         <UserX className="w-3.5 h-3.5" /> External
                       </button>
                       <button
                         type="button"
                         onClick={() => handleContributorReviewAction(c.contributor_key, "mark_bot")}
-                        className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1"
+                        className={`px-2.5 py-1.5 rounded-lg border text-xs inline-flex items-center gap-1 ${
+                          c.contributor_type === "bot"
+                            ? "border-purple-400 bg-purple-50 text-purple-800 font-medium"
+                            : "border-slate-200 text-slate-700 hover:bg-slate-50"
+                        }`}
                       >
                         <Bot className="w-3.5 h-3.5" /> Bot
                       </button>
@@ -1257,6 +1677,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                         type="button"
                         onClick={() => handleContributorReviewAction(c.contributor_key, "revert")}
                         className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1"
+                        title="Revert identity mapping decision"
                       >
                         <RotateCcw className="w-3.5 h-3.5" /> Revert
                       </button>
@@ -1338,16 +1759,35 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
 
         {/* 6. DEPENDENCIES */}
         {activeTab === "dependencies" && (
-          <div className="p-6 h-full overflow-y-auto space-y-4">
-            <h2 className="text-base font-semibold text-slate-900">Dependency & Cycle Analysis</h2>
-            {!depGraph || depGraph.nodes.length === 0 ? (
-              <div className="p-8 text-center bg-white border border-slate-200 rounded-xl text-sm text-slate-500">
-                No dependency edges discovered yet.
+          <div className="p-6 h-full flex flex-col space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-semibold text-slate-900">Dependency & Cycle Analysis</h2>
+                <p className="text-xs text-slate-500">
+                  Architectural dependencies, component linkages, and circular dependency checks.
+                </p>
               </div>
+              {depGraph && depGraph.nodes.length > 0 && (
+                <div className="text-xs px-2.5 py-1 rounded-md bg-white border border-slate-200 text-slate-600 font-medium">
+                  {depGraph.nodes.length} Components · {depGraph.edges.length} Dependencies · {(depGraph.cycles || depGraph.detected_cycles || []).length} Cycles
+                </div>
+              )}
+            </div>
+            {!depGraph || depGraph.nodes.length === 0 ? (
+              <ProcessingEmptyStateCard
+                status={processingStatus}
+                onRetry={retryProcessing}
+                retrying={retryingProcessing}
+                projectId={projectId}
+              />
             ) : (
-              <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3 text-xs">
-                <p>Nodes: {depGraph.nodes.length} · Edges: {depGraph.edges.length}</p>
-                <p>Cycles Detected: {(depGraph.cycles || depGraph.detected_cycles || []).length}</p>
+              <div className="flex-1 w-full min-h-[500px] bg-white border border-slate-200 rounded-xl overflow-hidden relative">
+                <AmeliorateFlowchartCanvas
+                  rawNodes={depHandoverNodes}
+                  rawEdges={depHandoverEdges}
+                  selectedNodeId={null}
+                  onSelectNode={(node) => handleNodeClick(null, node)}
+                />
               </div>
             )}
           </div>
