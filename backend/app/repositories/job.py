@@ -40,6 +40,7 @@ class BackgroundJobRepository:
         max_attempts: int = 3,
         priority: int = 100,
         payload_json: dict[str, Any] | None = None,
+        flush: bool = True,
     ) -> BackgroundJob:
         job = BackgroundJob(
             organisation_id=organisation_id,
@@ -54,7 +55,8 @@ class BackgroundJobRepository:
             payload_json=dict(payload_json or {}),
         )
         self._session.add(job)
-        self._session.flush()
+        if flush:
+            self._session.flush()
         return job
 
     def list_for_evidence(self, evidence_id: uuid.UUID) -> list[BackgroundJob]:
@@ -178,6 +180,39 @@ class BackgroundJobRepository:
         self._session.flush()
         return int(getattr(result, "rowcount", 0) or 0)
 
+    def recover_orphaned_jobs(self, *, now: datetime | None = None) -> int:
+        """Reset jobs left in RUNNING status back to QUEUED on server/worker boot."""
+        ts = now or utc_now()
+        stmt = (
+            update(BackgroundJob)
+            .where(
+                BackgroundJob.status == BackgroundJobStatus.RUNNING.value,
+                BackgroundJob.attempt_count < BackgroundJob.max_attempts,
+            )
+            .values(
+                status=BackgroundJobStatus.QUEUED.value,
+                locked_by=None,
+                lease_expires_at=None,
+                next_retry_at=ts,
+            )
+        )
+        res = self._session.execute(stmt)
+        # Also reset any running sync runs whose jobs were orphaned
+        from app.models.enums import SourceSyncRunStatus
+        from app.models.integration import SourceSyncRun
+
+        self._session.execute(
+            update(SourceSyncRun)
+            .where(
+                SourceSyncRun.status == SourceSyncRunStatus.RUNNING.value,
+            )
+            .values(
+                status=SourceSyncRunStatus.QUEUED.value,
+            )
+        )
+        self._session.flush()
+        return int(getattr(res, "rowcount", 0) or 0)
+
     def has_active_job_for_project(
         self,
         *,
@@ -264,13 +299,13 @@ def job_lease_heartbeat(
     *,
     session_factory: sessionmaker[Session],
     job_id: uuid.UUID,
-    lease_seconds: int = 1800,
-    interval_seconds: float = 120.0,
+    lease_seconds: int = 300,
+    interval_seconds: float = 30.0,
 ) -> Iterator[None]:
     """Periodically extend a running BackgroundJob lease on an isolated session."""
     stop_event = threading.Event()
-    effective_lease = max(300, int(lease_seconds))
-    effective_interval = max(10.0, min(float(interval_seconds), effective_lease / 3.0))
+    effective_lease = max(180, int(lease_seconds))
+    effective_interval = max(5.0, min(float(interval_seconds), effective_lease / 3.0))
 
     def _beat() -> None:
         while not stop_event.wait(effective_interval):
