@@ -769,8 +769,17 @@ export async function layoutWithElk(
       });
     }
 
-    // Balance any excessively wide single layer (> maxCols nodes at identical Y) into compact sub-rows
-    const maxCols = Math.max(4, Math.min(8, Math.ceil(Math.sqrt(nodes.length * aspectRatio))));
+    // Build adjacency for topology-aware sub-row placement and layer alignment
+    const parentsOf = new Map<string, string[]>();
+    const childrenOf = new Map<string, string[]>();
+    for (const e of validEdges) {
+      if (!parentsOf.has(e.target)) parentsOf.set(e.target, []);
+      parentsOf.get(e.target)!.push(e.source);
+      if (!childrenOf.has(e.source)) childrenOf.set(e.source, []);
+      childrenOf.get(e.source)!.push(e.target);
+    }
+
+    // Group ELK output into topological layers by Y
     const byLayerY = new Map<number, Node<AmeliorateNodeData>[]>();
     for (const n of sortedNodesForElk) {
       const y = posMap.get(n.id)?.y ?? n.position.y;
@@ -781,37 +790,106 @@ export async function layoutWithElk(
     }
 
     const sortedYKeys = Array.from(byLayerY.keys()).sort((a, b) => a - b);
-    let yShift = 0;
-    const colStep = DEFAULT_NODE_W + 32; // 236px compact horizontal pitch
-    const rowStep = DEFAULT_NODE_H + 48; // 164px compact vertical pitch
+    const layerIndexOf = new Map<string, number>();
+    sortedYKeys.forEach((yKey, lIdx) => {
+      for (const n of byLayerY.get(yKey)!) {
+        layerIndexOf.set(n.id, lIdx);
+      }
+    });
 
-    for (const yKey of sortedYKeys) {
+    const maxCols = Math.max(4, Math.min(10, Math.ceil(Math.sqrt(nodes.length * aspectRatio))));
+    const colStep = DEFAULT_NODE_W + 28; // 232px compact horizontal pitch
+    const rowStep = DEFAULT_NODE_H + 40; // 152px compact vertical pitch
+    const interLayerGap = 92;
+
+    let currentTopY = 0;
+
+    for (let lIdx = 0; lIdx < sortedYKeys.length; lIdx++) {
+      const yKey = sortedYKeys[lIdx]!;
       const layerNodes = byLayerY.get(yKey)!;
+
+      // Compute target horizontal center from already-placed upstream parents (or 0 for root/top)
+      const parentCenterXs: number[] = [];
+      for (const n of layerNodes) {
+        for (const pId of parentsOf.get(n.id) || []) {
+          if ((layerIndexOf.get(pId) ?? lIdx) < lIdx) {
+            const pPos = posMap.get(pId);
+            const pSz = getNodeSize(pId, dims);
+            if (pPos) parentCenterXs.push(pPos.x + pSz.w / 2);
+          }
+        }
+      }
+      const targetCenterX =
+        parentCenterXs.length > 0
+          ? parentCenterXs.reduce((a, b) => a + b, 0) / parentCenterXs.length
+          : 0;
+
       if (layerNodes.length > maxCols) {
-        layerNodes.sort((a, b) => (posMap.get(a.id)?.x ?? 0) - (posMap.get(b.id)?.x ?? 0));
+        // Place leaf nodes in upper sub-rows and nodes with downstream children in bottom sub-rows
+        // so edges to the next layer do not cross unrelated leaf rows.
+        const hasDownstream = (id: string) =>
+          (childrenOf.get(id) || []).some((cId) => (layerIndexOf.get(cId) ?? lIdx) > lIdx);
+
+        layerNodes.sort((a, b) => {
+          const aDown = hasDownstream(a.id) ? 1 : 0;
+          const bDown = hasDownstream(b.id) ? 1 : 0;
+          if (aDown !== bDown) return aDown - bDown;
+          const aElkX = posMap.get(a.id)?.x ?? 0;
+          const bElkX = posMap.get(b.id)?.x ?? 0;
+          return aElkX - bElkX;
+        });
+
         const subRows = Math.ceil(layerNodes.length / maxCols);
-        const centerRefX =
-          layerNodes.reduce((acc, n) => acc + (posMap.get(n.id)?.x ?? 0), 0) / layerNodes.length;
-        const maxRowW = (maxCols - 1) * colStep;
-        const baseX = Math.round(centerRefX - maxRowW / 2);
+        const maxRowW = (maxCols - 1) * colStep + DEFAULT_NODE_W;
+        const baseX = Math.round(targetCenterX - maxRowW / 2);
 
         layerNodes.forEach((n, idx) => {
           const r = Math.floor(idx / maxCols);
           const c = idx % maxCols;
           const itemsInThisRow = r === subRows - 1 ? layerNodes.length - r * maxCols : maxCols;
-          const rw = (itemsInThisRow - 1) * colStep;
+          const rw = (itemsInThisRow - 1) * colStep + DEFAULT_NODE_W;
           const startX = baseX + (maxRowW - rw) / 2;
           posMap.set(n.id, {
             x: Math.round(startX + c * colStep),
-            y: Math.round(yKey + yShift + r * rowStep),
+            y: Math.round(currentTopY + r * rowStep),
           });
         });
-        yShift += (subRows - 1) * rowStep;
-      } else if (yShift > 0) {
-        for (const n of layerNodes) {
+        currentTopY += (subRows - 1) * rowStep + DEFAULT_NODE_H + interLayerGap;
+      } else {
+        // Preserve ELK's relative horizontal ordering, but align layer center to targetCenterX
+        // and compact any oversized horizontal span within the layer.
+        layerNodes.sort((a, b) => (posMap.get(a.id)?.x ?? 0) - (posMap.get(b.id)?.x ?? 0));
+        const rawCenterXs = layerNodes.map((n) => {
           const p = posMap.get(n.id)!;
-          posMap.set(n.id, { x: p.x, y: p.y + yShift });
+          return p.x + getNodeSize(n.id, dims).w / 2;
+        });
+        const rawAvgX = rawCenterXs.reduce((a, b) => a + b, 0) / layerNodes.length;
+        const lastInLayer = layerNodes[layerNodes.length - 1];
+        const firstInLayer = layerNodes[0];
+        const rawSpan =
+          layerNodes.length > 1 && lastInLayer && firstInLayer
+            ? (posMap.get(lastInLayer.id)!.x - posMap.get(firstInLayer.id)!.x)
+            : 0;
+        const maxAllowedSpan = (layerNodes.length - 1) * (DEFAULT_NODE_W + 72);
+
+        if (rawSpan > maxAllowedSpan && layerNodes.length > 1) {
+          const rw = (layerNodes.length - 1) * colStep + DEFAULT_NODE_W;
+          const startX = targetCenterX - rw / 2;
+          layerNodes.forEach((n, idx) => {
+            posMap.set(n.id, {
+              x: Math.round(startX + idx * colStep),
+              y: Math.round(currentTopY),
+            });
+          });
+        } else {
+          const shiftX = Math.round(targetCenterX - rawAvgX);
+          for (const n of layerNodes) {
+            const p = posMap.get(n.id)!;
+            posMap.set(n.id, { x: p.x + shiftX, y: Math.round(currentTopY) });
+          }
         }
+        const maxLayerH = Math.max(...layerNodes.map((n) => getNodeSize(n.id, dims).h));
+        currentTopY += maxLayerH + interLayerGap;
       }
     }
 
@@ -819,7 +897,7 @@ export async function layoutWithElk(
       posMap,
       nodes.map((n) => n.id),
       dims,
-      28
+      24
     );
 
     // Ameliorate convention: center the laid-out graph around origin (0, 0)

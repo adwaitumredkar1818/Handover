@@ -1134,22 +1134,19 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     setError(null);
     setActionFeedback(null);
     try {
-      const selectedVal = selectedMatchMemberByKey[contributorKey] || "";
-      if (action === "match_member" && !selectedVal) {
-        setError("Select an active project or organisation member before confirming identity match.");
+      const contributorItem = contributors.find((item) => item.contributor_key === contributorKey);
+      const selectedVal =
+        selectedMatchMemberByKey[contributorKey] ||
+        (contributorItem?.matched_project_membership_id ? `pm:${contributorItem.matched_project_membership_id}` : "") ||
+        (contributorItem?.suggested_project_membership_id ? `pm:${contributorItem.suggested_project_membership_id}` : "");
+      const selectedTarget = selectableMembers.find((m) => m.selection_key === selectedVal);
+      if (action === "match_member" && (!selectedTarget || !selectedTarget.selectable_for_match || !selectedTarget.project_membership_id)) {
+        setError("Select an active project member before confirming identity match. Add organisation or invited members via Project Team first.");
         return;
       }
-      const isOrgUser = selectedVal.startsWith("org_user:");
-      const resolvedPmId = selectedVal.startsWith("pm:")
-        ? selectedVal.slice(3)
-        : !isOrgUser && selectedVal
-          ? selectedVal
-          : undefined;
-      const resolvedUserId = isOrgUser ? selectedVal.slice(9) : undefined;
       await api.relationships.reviewContributor(projectId, contributorKey, {
         action,
-        project_membership_id: action === "match_member" ? resolvedPmId : undefined,
-        user_id: action === "match_member" ? resolvedUserId : undefined,
+        project_membership_id: action === "match_member" ? (selectedTarget?.project_membership_id ?? undefined) : undefined,
         notes: `Reviewed in Relationship Explorer (${action})`,
       });
       invalidateGraphCache("rel_");
@@ -1700,12 +1697,17 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 text-xs">
-                      <select
-                        value={
+                      {(() => {
+                        const currentSelectedKey =
                           selectedMatchMemberByKey[c.contributor_key] ||
                           (c.matched_project_membership_id ? `pm:${c.matched_project_membership_id}` : "") ||
-                          (c.suggested_project_membership_id ? `pm:${c.suggested_project_membership_id}` : "")
-                        }
+                          (c.suggested_project_membership_id ? `pm:${c.suggested_project_membership_id}` : "");
+                        const selectedTarget = selectableMembers.find((m) => m.selection_key === currentSelectedKey);
+                        const canMatchTarget = Boolean(selectedTarget && selectedTarget.selectable_for_match && selectedTarget.project_membership_id);
+                        return (
+                          <>
+                      <select
+                        value={currentSelectedKey}
                         onChange={(e) =>
                           setSelectedMatchMemberByKey((prev) => ({
                             ...prev,
@@ -1726,7 +1728,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                               : m.membership_state === "roster_only"
                                 ? " · Roster Only (Requires Active Membership)"
                                 : m.membership_state === "org_member_unassigned"
-                                  ? " · Org Member (Links & Adds to Project)"
+                                  ? " · Org Member (Add to Project Team First)"
                                   : "";
                           const label = m.email
                             ? `${m.display_name} (${m.email}) — ${role}${stateSuffix}`
@@ -1744,11 +1746,15 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                       </select>
                       <button
                         type="button"
+                        disabled={!canMatchTarget}
                         onClick={() => handleContributorReviewAction(c.contributor_key, "match_member")}
-                        className="px-3 py-1.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700"
+                        className="px-3 py-1.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {c.matched_project_membership_id ? "Update Match" : "Match Member"}
                       </button>
+                          </>
+                        );
+                      })()}
                       <button
                         type="button"
                         onClick={() => handleContributorReviewAction(c.contributor_key, "mark_external")}

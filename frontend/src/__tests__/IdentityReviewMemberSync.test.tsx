@@ -155,6 +155,17 @@ describe("Relationship Explorer Identity Review People Selector", () => {
         review_status: "pending_identity",
       },
       {
+        selection_key: "org_user:u-org-only",
+        member_source: "organisation_membership",
+        membership_state: "org_member_unassigned",
+        selectable_for_match: false,
+        user_id: "u-org-only",
+        display_name: "Org Only User",
+        email: "orgonly@company.com",
+        role_name: "org_member",
+        review_status: "org_member_unassigned",
+      },
+      {
         selection_key: "inv:inv-1",
         member_source: "invitation",
         membership_state: "invited",
@@ -189,10 +200,18 @@ describe("Relationship Explorer Identity Review People Selector", () => {
       ).toBeGreaterThan(0);
     });
 
-    // Invited member is visible and disabled with explicit Invited label
+    // Invited member and unassigned org member are visible and disabled
     const invitedOpts = screen.getAllByRole("option", { name: /Invited \(Pending Acceptance\)/i });
     expect(invitedOpts.length).toBeGreaterThan(0);
     expect((invitedOpts[0] as HTMLOptionElement).disabled).toBe(true);
+
+    const orgOnlyOpts = screen.getAllByRole("option", { name: /Org Member \(Add to Project Team First\)/i });
+    expect(orgOnlyOpts.length).toBeGreaterThan(0);
+    expect((orgOnlyOpts[0] as HTMLOptionElement).disabled).toBe(true);
+
+    // Match Member button is disabled before selecting an active project member
+    const initialMatchButtons = screen.getAllByRole("button", { name: /Match Member/i });
+    expect((initialMatchButtons[0] as HTMLButtonElement).disabled).toBe(true);
 
     // Verify unlinked pending state text is displayed for Priya
     expect(screen.getAllByText(/Not linked to a source identity/i).length).toBeGreaterThan(0);

@@ -1064,7 +1064,7 @@ class ContributionAttributionService:
                 "selection_key": f"org_user:{om.user_id}",
                 "member_source": "organisation_membership",
                 "membership_state": "org_member_unassigned",
-                "selectable_for_match": True,
+                "selectable_for_match": False,
                 "project_membership_id": None,
                 "user_id": om.user_id,
                 "invitation_id": None,
@@ -1073,8 +1073,8 @@ class ContributionAttributionService:
                 "email": raw_email if has_project_manage else mask_email(raw_email),
                 "role_name": om.role.name if getattr(om, "role", None) else "org_member",
                 "github_login": gh,
-                "review_status": "linked" if gh else "pending_identity",
-                "note": "Organisation member · Will be added to project on match",
+                "review_status": "org_member_unassigned",
+                "note": "Organisation member · Not yet a project member (add via Project Team first)",
             })
 
         for inv in invitations:
@@ -1182,66 +1182,17 @@ class ContributionAttributionService:
         now = utc_now()
         membership: ProjectMembership | None = None
         if action == "match_member":
-            if project_membership_id is None and user_id is None:
+            if project_membership_id is None:
                 from app.core.exceptions import BadRequestError
 
                 raise BadRequestError(
-                    "Active project_membership_id or organisation user_id is required. Invited or roster-only entries must become active project members first."
+                    "Active project_membership_id is required. Identity matching cannot implicitly grant project membership; add the user via Project Team first."
                 )
-            if project_membership_id is not None:
-                membership = self._session.get(ProjectMembership, project_membership_id)
-                if membership is None or membership.project_id != project_id or membership.status != "active":
-                    from app.core.exceptions import NotFoundError
+            membership = self._session.get(ProjectMembership, project_membership_id)
+            if membership is None or membership.project_id != project_id or membership.status != "active":
+                from app.core.exceptions import NotFoundError
 
-                    raise NotFoundError("Active project membership not found.", code="MEMBERSHIP_NOT_FOUND")
-            elif user_id is not None:
-                existing_pm = self._session.execute(
-                    select(ProjectMembership).where(
-                        ProjectMembership.project_id == project_id,
-                        ProjectMembership.user_id == user_id,
-                    )
-                ).scalar_one_or_none()
-                if existing_pm is not None:
-                    if existing_pm.status != "active":
-                        existing_pm.status = "active"
-                        existing_pm.joined_at = now
-                    membership = existing_pm
-                    project_membership_id = existing_pm.id
-                else:
-                    org_mem = self._session.execute(
-                        select(OrganisationMembership).where(
-                            OrganisationMembership.organisation_id == organisation_id,
-                            OrganisationMembership.user_id == user_id,
-                            OrganisationMembership.status == "active",
-                        )
-                    ).scalar_one_or_none()
-                    if org_mem is None:
-                        from app.core.exceptions import NotFoundError
-
-                        raise NotFoundError("Active organisation membership not found.", code="MEMBERSHIP_NOT_FOUND")
-                    contrib_role = self._session.execute(
-                        select(Role).where(Role.name == "project_contributor")
-                    ).scalar_one_or_none()
-                    if contrib_role is None:
-                        contrib_role = self._session.execute(
-                            select(Role).where(Role.scope == "project")
-                        ).scalars().first()
-                    if contrib_role is None:
-                        from app.core.exceptions import BadRequestError
-
-                        raise BadRequestError("No project role available to assign membership.")
-                    membership = ProjectMembership(
-                        id=uuid.uuid4(),
-                        project_id=project_id,
-                        user_id=user_id,
-                        role_id=contrib_role.id,
-                        assigned_by_id=reviewer_user_id,
-                        status="active",
-                        joined_at=now,
-                    )
-                    self._session.add(membership)
-                    self._session.flush()
-                    project_membership_id = membership.id
+                raise NotFoundError("Active project membership not found.", code="MEMBERSHIP_NOT_FOUND")
             new_type = ContributorType.CONFIRMED_MEMBER.value
             new_status = ContributorReviewStatus.CONFIRMED.value
             new_method = "human_confirmed"

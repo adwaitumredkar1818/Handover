@@ -265,9 +265,122 @@ class TestTeamMemberIdentitySync:
         by_key = {m["selection_key"]: m for m in members}
         assert by_key[f"pm:{pm_id}"]["selectable_for_match"] is True
         assert by_key[f"pm:{pm_id}"]["membership_state"] == "active"
-        assert by_key[f"org_user:{u2_id}"]["selectable_for_match"] is True
+        assert by_key[f"org_user:{u2_id}"]["selectable_for_match"] is False
         assert by_key[f"org_user:{u2_id}"]["membership_state"] == "org_member_unassigned"
         assert by_key[f"inv:{inv_id}"]["selectable_for_match"] is False
         assert by_key[f"inv:{inv_id}"]["membership_state"] == "invited"
         assert by_key[f"roster:{roster_id}"]["selectable_for_match"] is False
         assert by_key[f"roster:{roster_id}"]["membership_state"] == "roster_only"
+
+    def test_review_contributor_identity_rejects_implicit_org_membership_creation(self):
+        from app.core.exceptions import BadRequestError
+        from app.services.contribution_attribution import ContributionAttributionService
+
+        project_id = uuid.uuid4()
+        org_id = uuid.uuid4()
+        reviewer_id = uuid.uuid4()
+        org_only_user_id = uuid.uuid4()
+
+        attrib = SimpleNamespace(
+            project_id=project_id,
+            contributor_identifier="ext-dev",
+            metadata_json={"contributor_key": "gh:ext-dev"},
+            contributor_type="unidentified",
+            review_status="pending",
+            matched_project_membership_id=None,
+            matched_roster_member_id=None,
+            match_method=None,
+            match_confidence=None,
+            review_history=[],
+        )
+
+        class _FakeResult:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return [attrib]
+
+        added_objects = []
+
+        class _FakeSession:
+            def execute(self, _stmt):
+                return _FakeResult()
+
+            def add(self, obj):
+                added_objects.append(obj)
+
+            def get(self, _model, _id):
+                return None
+
+        service = ContributionAttributionService(_FakeSession())  # type: ignore[arg-type]
+        try:
+            service.review_contributor_identity(
+                organisation_id=org_id,
+                project_id=project_id,
+                contributor_key="gh:ext-dev",
+                action="match_member",
+                reviewer_user_id=reviewer_id,
+                project_membership_id=None,
+                user_id=org_only_user_id,
+            )
+            raise AssertionError("Expected BadRequestError when matching without active project_membership_id")
+        except BadRequestError as exc:
+            assert "project_membership_id is required" in str(exc)
+        assert added_objects == []
+
+    def test_review_contributor_identity_rejects_cross_project_membership(self):
+        from app.core.exceptions import NotFoundError
+        from app.services.contribution_attribution import ContributionAttributionService
+
+        project_a = uuid.uuid4()
+        project_b = uuid.uuid4()
+        org_id = uuid.uuid4()
+        reviewer_id = uuid.uuid4()
+        foreign_pm_id = uuid.uuid4()
+
+        attrib = SimpleNamespace(
+            project_id=project_a,
+            contributor_identifier="ext-dev",
+            metadata_json={"contributor_key": "gh:ext-dev"},
+            contributor_type="unidentified",
+            review_status="pending",
+            matched_project_membership_id=None,
+            matched_roster_member_id=None,
+            match_method=None,
+            match_confidence=None,
+            review_history=[],
+        )
+        foreign_pm = SimpleNamespace(
+            id=foreign_pm_id,
+            project_id=project_b,
+            status="active",
+        )
+
+        class _FakeResult:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return [attrib]
+
+        class _FakeSession:
+            def execute(self, _stmt):
+                return _FakeResult()
+
+            def get(self, _model, _id):
+                return foreign_pm
+
+        service = ContributionAttributionService(_FakeSession())  # type: ignore[arg-type]
+        try:
+            service.review_contributor_identity(
+                organisation_id=org_id,
+                project_id=project_a,
+                contributor_key="gh:ext-dev",
+                action="match_member",
+                reviewer_user_id=reviewer_id,
+                project_membership_id=foreign_pm_id,
+            )
+            raise AssertionError("Expected NotFoundError for cross-project membership")
+        except NotFoundError as exc:
+            assert "Active project membership not found" in str(exc)
