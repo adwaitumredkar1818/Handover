@@ -105,6 +105,7 @@ class FastKnowledgeExtractor:
         reconcile_graphs: bool = False,
         existing_fps: set[str] | None = None,
         auto_commit: bool = True,
+        extracted_text_override: str | None = None,
     ) -> list[KnowledgeItem]:
         """Extract all deterministic knowledge items from an evidence item in <100ms."""
         project_id = evidence.project_id
@@ -130,19 +131,21 @@ class FastKnowledgeExtractor:
                 ).scalars().all()
             )
 
-        chunks = list(
-            self._session.execute(
-                select(EvidenceChunk)
-                .where(EvidenceChunk.evidence_id == evidence.id)
-                .order_by(EvidenceChunk.chunk_index.asc())
-            ).scalars().all()
-        )
-
-        extracted_text = ""
-        if getattr(evidence, "content", None) and evidence.content.extracted_text:
-            extracted_text = evidence.content.extracted_text
-        elif chunks:
-            extracted_text = "\n\n".join(c.chunk_text for c in chunks)
+        extracted_text = (extracted_text_override or "").strip()
+        chunks: list[EvidenceChunk] = []
+        if not extracted_text:
+            if getattr(evidence, "content", None) and evidence.content.extracted_text:
+                extracted_text = evidence.content.extracted_text
+            else:
+                chunks = list(
+                    self._session.execute(
+                        select(EvidenceChunk)
+                        .where(EvidenceChunk.evidence_id == evidence.id)
+                        .order_by(EvidenceChunk.chunk_index.asc())
+                    ).scalars().all()
+                )
+                if chunks:
+                    extracted_text = "\n\n".join(c.chunk_text for c in chunks)
 
         created_items: list[KnowledgeItem] = []
 
@@ -169,6 +172,7 @@ class FastKnowledgeExtractor:
                 return None
 
             k_item = KnowledgeItem(
+                id=uuid.uuid4(),
                 organisation_id=organisation_id,
                 project_id=project_id,
                 extraction_run_id=run_id,
@@ -195,9 +199,8 @@ class FastKnowledgeExtractor:
                 is_deleted=False,
             )
             self._session.add(k_item)
-            self._session.flush()
 
-            # Add evidence link
+            # Add evidence link without per-item flush
             best_chunk = chunk or (chunks[0] if chunks else None)
             best_excerpt = supporting_excerpt or summary[:300]
             link = KnowledgeEvidenceLink(

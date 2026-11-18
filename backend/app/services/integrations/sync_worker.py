@@ -466,6 +466,7 @@ class SourceSyncWorkerService:
                         external_user_id=loaded_auth.external_user_id,
                         external_username=loaded_auth.external_username,
                         sync_mode=sync_mode,
+                        sync_run=sync_run,
                     )
 
                 if active_mapping.provider in (IntegrationProvider.SLACK.value, "slack"):

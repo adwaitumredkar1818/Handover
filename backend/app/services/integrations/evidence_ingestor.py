@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import utc_now
@@ -90,11 +91,71 @@ class SourceEvidenceIngestor:
         self._evidence_repo = evidence_repository
         self._job_repo = job_repository or BackgroundJobRepository(session)
         self._existing_items_cache: dict[tuple[uuid.UUID, str, str], EvidenceItem | None] = {}
+        self._prefetched_sources: set[tuple[uuid.UUID, str]] = set()
+        self._existing_fps_cache: dict[uuid.UUID, set[str]] = {}
         self._attribution_svc: Any = None
 
     def clear_cache(self) -> None:
         """Clear cached existing items after rollback or between sync batches."""
         self._existing_items_cache.clear()
+        self._prefetched_sources.clear()
+        self._existing_fps_cache.clear()
+
+    def prefetch_project_state(
+        self,
+        *,
+        project_id: uuid.UUID,
+        source_type: str,
+    ) -> None:
+        """Prefetch existing evidence identities and knowledge fingerprints once per sync/batch."""
+        key = (project_id, source_type)
+        if key not in self._prefetched_sources:
+            existing_rows = (
+                self._session.execute(
+                    select(EvidenceItem).where(
+                        EvidenceItem.project_id == project_id,
+                        EvidenceItem.source_type == source_type,
+                        EvidenceItem.deleted_at.is_(None),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for item in existing_rows:
+                self._existing_items_cache[(project_id, source_type, item.source_external_id)] = item
+            self._prefetched_sources.add(key)
+
+        if project_id not in self._existing_fps_cache:
+            from app.models.knowledge import KnowledgeItem
+
+            fps = (
+                self._session.execute(
+                    select(KnowledgeItem.fingerprint).where(
+                        KnowledgeItem.project_id == project_id,
+                        KnowledgeItem.is_deleted.is_(False),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            self._existing_fps_cache[project_id] = set(fps)
+
+    def _get_project_fps(self, project_id: uuid.UUID) -> set[str]:
+        if project_id not in self._existing_fps_cache:
+            from app.models.knowledge import KnowledgeItem
+
+            fps = (
+                self._session.execute(
+                    select(KnowledgeItem.fingerprint).where(
+                        KnowledgeItem.project_id == project_id,
+                        KnowledgeItem.is_deleted.is_(False),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            self._existing_fps_cache[project_id] = set(fps)
+        return self._existing_fps_cache[project_id]
 
     def _get_attribution_service(self) -> Any:
         if self._attribution_svc is None:
@@ -181,6 +242,9 @@ class SourceEvidenceIngestor:
         cache_key = (project_id, record.source_type, record.source_external_id)
         if cache_key in self._existing_items_cache:
             existing = self._existing_items_cache[cache_key]
+        elif (project_id, record.source_type) in self._prefetched_sources:
+            existing = None
+            self._existing_items_cache[cache_key] = None
         else:
             existing = self._evidence_repo.find_active_by_source_external_id(
                 project_id=project_id,
@@ -208,6 +272,7 @@ class SourceEvidenceIngestor:
             meta.setdefault("knowledge_count", 0)
 
             created_item = self._evidence_repo.create_evidence_item(
+                evidence_id=uuid.uuid4(),
                 organisation_id=organisation_id,
                 project_id=project_id,
                 uploaded_by_user_id=triggered_by_user_id,
@@ -271,7 +336,12 @@ class SourceEvidenceIngestor:
             # Stage 1: Immediate fast deterministic extraction without waiting for Ollama
             try:
                 from app.services.fast_extractor import FastKnowledgeExtractor
-                FastKnowledgeExtractor(self._session).extract_evidence_knowledge(evidence=created_item)
+                FastKnowledgeExtractor(self._session).extract_evidence_knowledge(
+                    evidence=created_item,
+                    existing_fps=self._get_project_fps(project_id),
+                    auto_commit=False,
+                    extracted_text_override=record.extracted_text,
+                )
             except Exception as exc:
                 logger.debug("FastKnowledgeExtractor deterministic extraction notice on create: %s", exc)
 
@@ -356,7 +426,12 @@ class SourceEvidenceIngestor:
         # Stage 1: Immediate fast deterministic extraction on update
         try:
             from app.services.fast_extractor import FastKnowledgeExtractor
-            FastKnowledgeExtractor(self._session).extract_evidence_knowledge(evidence=existing)
+            FastKnowledgeExtractor(self._session).extract_evidence_knowledge(
+                evidence=existing,
+                existing_fps=self._get_project_fps(project_id),
+                auto_commit=False,
+                extracted_text_override=record.extracted_text,
+            )
         except Exception as exc:
             logger.debug("FastKnowledgeExtractor deterministic extraction notice on update: %s", exc)
 

@@ -140,6 +140,7 @@ class GitHubSyncOrchestrator:
         self._repo = integration_repo
         self._ingestor = ingestor
         self._policy_svc = access_policy_service
+        self._active_sync_run: Any = None
 
     def execute_sync(
         self,
@@ -151,17 +152,22 @@ class GitHubSyncOrchestrator:
         external_user_id: str,
         external_username: str | None,
         sync_mode: str,
+        sync_run: Any = None,
     ) -> SyncExecutionReport:
-        with self._client:
-            return self._execute_sync_internal(
-                mapping=mapping,
-                policy=policy,
-                access_token=access_token,
-                actor_user_id=actor_user_id,
-                external_user_id=external_user_id,
-                external_username=external_username,
-                sync_mode=sync_mode,
-            )
+        self._active_sync_run = sync_run
+        try:
+            with self._client:
+                return self._execute_sync_internal(
+                    mapping=mapping,
+                    policy=policy,
+                    access_token=access_token,
+                    actor_user_id=actor_user_id,
+                    external_user_id=external_user_id,
+                    external_username=external_username,
+                    sync_mode=sync_mode,
+                )
+        finally:
+            self._active_sync_run = None
 
     def _execute_sync_internal(
         self,
@@ -194,6 +200,12 @@ class GitHubSyncOrchestrator:
         seen_external_ids: set[str] = set()
         reconciled_categories: set[str] = set()
         had_collection_warning = False
+
+        if hasattr(self._ingestor, "prefetch_project_state"):
+            self._ingestor.prefetch_project_state(
+                project_id=mapping.project_id,
+                source_type=EvidenceSourceType.GITHUB.value,
+            )
 
         # 1. Fail-closed verification that caller's token can read this repository right now
         allowed, repo_candidate = self._client.verify_repository_access(
@@ -826,7 +838,8 @@ class GitHubSyncOrchestrator:
         else:
             report.items_unchanged += 1
 
-        # Commit in small batches so items, deterministic knowledge, and initial graphs appear live immediately
+        # Commit in bounded 25-item batches (plus initial 5-item warmup and high-value docs)
+        # so evidence, deterministic knowledge, and initial graphs appear live without per-commit DB overhead
         is_high_value = (
             record.category
             in (
@@ -835,16 +848,23 @@ class GitHubSyncOrchestrator:
                 "architecture_decision",
             )
             or is_manifest_path(record.title)
-            or (report.items_discovered <= 5)
-            or (report.items_discovered % 3 == 0)
+            or (report.items_discovered == 5)
+            or (report.items_discovered % 25 == 0)
         )
         if is_high_value:
             session = getattr(self._ingestor, "_session", None)
             if session is not None:
                 try:
+                    if self._active_sync_run is not None:
+                        self._active_sync_run.items_discovered = report.items_discovered
+                        self._active_sync_run.items_created = report.items_created
+                        self._active_sync_run.items_updated = report.items_updated
+                        self._active_sync_run.items_unchanged = report.items_unchanged
                     session.commit()
+                    from app.services.pipeline_coordinator import invalidate_project_status_cache
                     from app.main import signal_worker_activity
 
+                    invalidate_project_status_cache(mapping.project_id)
                     signal_worker_activity()
                 except Exception:
                     pass
