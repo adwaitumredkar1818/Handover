@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from app.models.enums import KnowledgeCategory
 from app.models.evidence import EvidenceChunk, EvidenceItem
 
-DEFAULT_PROMPT_VERSION = "p2.6-v1"
+DEFAULT_PROMPT_VERSION = "p2.6-v3-fast"
 
 ALL_EXTRACTION_CATEGORIES: tuple[KnowledgeCategory, ...] = (
     KnowledgeCategory.PROJECT_OVERVIEW_CONTEXT,
@@ -86,126 +86,37 @@ STRICT GROUNDING & SAFETY RULES:
 
 _CATEGORY_INSTRUCTIONS: dict[KnowledgeCategory, tuple[str, str]] = {
     KnowledgeCategory.PROJECT_OVERVIEW_CONTEXT: (
-        "overview_context_v1",
+        "overview_context_v2",
         """Target Category: PROJECT OVERVIEW AND CONTEXT (mission, core objectives, problem statement,
 scope boundary, key stakeholders, target users, success criteria, constraints, and project terminology).
 Extract high-level project framing, purpose, objectives, and scope boundaries explicitly documented in evidence.
 Do NOT invent high-level goals not stated in evidence.
 Allowed overview_category values: purpose_mission, core_objectives, problem_statement,
 scope_boundary, stakeholder_ecosystem, target_audience, success_criteria, constraints, terminology, other.
-
-Expected JSON shape:
-{
-  "items": [
-    {
-      "title": "Concise project overview finding",
-      "description": "Factual description of project purpose, problem statement, scope boundary, or stakeholder context",
-      "overview_category": "purpose_mission|core_objectives|problem_statement|scope_boundary|stakeholder_ecosystem|target_audience|success_criteria|constraints|terminology|other",
-      "problem_statement": "Documented problem statement or null",
-      "objectives": ["Primary goal 1", "Primary goal 2"],
-      "in_scope": ["Documented in-scope item"],
-      "out_of_scope": ["Explicitly excluded item"],
-      "key_stakeholders": ["Stakeholder name/group"],
-      "target_users": ["Target user persona/audience"],
-      "success_criteria": ["Documented success criteria"],
-      "constraints": ["Documented organizational or technical constraint"],
-      "glossary_terms": ["TERM: Definition from evidence"],
-      "status": "current|legacy|superseded|proposed|unknown",
-      "is_interpretation": false,
-      "is_uncertain": false,
-      "uncertainty_reason": null,
-      "confidence_level": "high|medium|low",
-      "evidence_refs": [
-        {
-          "chunk_id": "EXACT-UUID-FROM-HEADER",
-          "supporting_excerpt": "VERBATIM QUOTE FROM CHUNK TEXT",
-          "support_type": "direct"
-        }
-      ]
-    }
-  ]
-}""",
+Extract into items array conforming to the JSON schema.""",
     ),
     KnowledgeCategory.DECISIONS_RATIONALE: (
-        "decisions_v1",
+        "decisions_v2",
         """Target Category: DECISIONS AND RATIONALE (architectural, product, process, infra,
 security, or operational choices).
 Extract decisions made, proposed, rejected, or superseded with rationale and alternatives
 if explicitly stated. Do NOT turn routine bug fixes into decisions unless a choice is stated.
 Allowed decision_category values: architectural, product, process, infrastructure, security,
 operational, unknown.
-
-Expected JSON shape:
-{
-  "items": [
-    {
-      "title": "Short factual decision title",
-      "description": "What was decided or proposed",
-      "decision_category": "architectural|product|process|infrastructure|...",
-      "decision_maker": "Exact name/handle/author if stated, else null",
-      "decision_date": "ISO date or exact date string from source, else null",
-      "rationale": "Explicit reason or justification if stated, else null",
-      "alternatives_considered": ["exact alternative strings if mentioned"],
-      "chosen_approach": "Chosen solution summary or null",
-      "consequences_or_tradeoffs": ["tradeoffs or follow-on impacts if stated"],
-      "affected_components": ["component/module/service names mentioned"],
-      "decision_status": "proposed|accepted|rejected|superseded|unclear",
-      "is_interpretation": false,
-      "is_uncertain": false,
-      "uncertainty_reason": null,
-      "confidence_level": "high|medium|low",
-      "evidence_refs": [
-        {
-          "chunk_id": "EXACT-UUID-FROM-HEADER",
-          "supporting_excerpt": "VERBATIM QUOTE FROM CHUNK TEXT",
-          "support_type": "direct"
-        }
-      ]
-    }
-  ]
-}""",
+Extract into items array conforming to the JSON schema.""",
     ),
     KnowledgeCategory.WORK_ITEMS: (
-        "work_items_v1",
+        "work_items_v2",
         """Target Category: COMPLETED AND UNFINISHED WORK (tasks, features, bug fixes, PRs,
 Jira issues, refactors, deployments, pending/incomplete items).
 Distinguish clearly between completed, in_progress, open, blocked, proposed, cancelled,
 or unknown work_status. Never assume an open/proposed item is completed.
 Allowed work_category values: feature, bug_fix, refactoring, infrastructure,
 documentation, testing, deployment, research, maintenance.
-
-Expected JSON shape:
-{
-  "items": [
-    {
-      "title": "Work item title (preserve issue/PR key if present)",
-      "description": "Scope, deliverable, or current state",
-      "work_category": "feature|bug_fix|refactoring|infrastructure|...",
-      "work_status": "proposed|open|in_progress|completed|blocked|cancelled|unknown",
-      "assignee": "Exact assignee identifier as written, else null",
-      "creator": "Exact creator/author identifier as written, else null",
-      "created_date": "Exact source date string or null",
-      "updated_date": "Exact source date string or null",
-      "completed_date": "Exact completion date string or null",
-      "related_references": ["PR #12", "PROJ-45"],
-      "blocker_description": "Why blocked if work_status is blocked, else null",
-      "is_interpretation": false,
-      "is_uncertain": false,
-      "uncertainty_reason": null,
-      "confidence_level": "high|medium|low",
-      "evidence_refs": [
-        {
-          "chunk_id": "EXACT-UUID-FROM-HEADER",
-          "supporting_excerpt": "VERBATIM QUOTE FROM CHUNK TEXT",
-          "support_type": "direct"
-        }
-      ]
-    }
-  ]
-}""",
+Extract into items array conforming to the JSON schema.""",
     ),
     KnowledgeCategory.RESPONSIBILITIES_OWNERSHIP: (
-        "responsibilities_v1",
+        "responsibilities_v2",
         """Target Category: RESPONSIBILITIES AND OWNERSHIP (who owns, maintains, authored,
 reviews, runs on-call for, or hands over a component, service, credential, or workflow).
 CRITICAL: Do NOT merge or normalize different names/emails/usernames across lines — keep
@@ -215,38 +126,10 @@ CRITICAL: Do NOT merge or normalize different names/emails/usernames across line
 - "inferred_contribution": inferred from commits/PRs/issues (must set is_interpretation=true)
 - "historical": past owner or departing member
 - "unconfirmed": unclear/tentative
-
-Expected JSON shape:
-{
-  "items": [
-    {
-      "person_identity": "Exact identifier as printed in source",
-      "person_identifier_type": "display_name|username|email|account_id|role_label|unknown",
-      "title": "Concise ownership statement",
-      "description": "What component, duty, or handoff responsibility they hold",
-      "component_or_workstream": "Exact module/service/process name",
-      "ownership_role": "e.g. primary maintainer, deployer, reviewer, on-call owner",
-      "ownership_basis": "explicitly_assigned|self_reported|inferred_contribution|...",
-      "start_or_observed_date": "Exact date string or null",
-      "end_date": "Exact end/departure date if stated, else null",
-      "ownership_status": "active|historical|transitioning|unconfirmed",
-      "is_interpretation": false,
-      "is_uncertain": false,
-      "uncertainty_reason": null,
-      "confidence_level": "high|medium|low",
-      "evidence_refs": [
-        {
-          "chunk_id": "EXACT-UUID-FROM-HEADER",
-          "supporting_excerpt": "VERBATIM QUOTE FROM CHUNK TEXT",
-          "support_type": "direct"
-        }
-      ]
-    }
-  ]
-}""",
+Extract into items array conforming to the JSON schema.""",
     ),
     KnowledgeCategory.TECHNICAL_ARCHITECTURE: (
-        "technical_knowledge_v1",
+        "technical_knowledge_v2",
         """Target Category: TECHNICAL AND ARCHITECTURAL KNOWLEDGE (architecture, API behavior,
 DB schema/tables, component interactions, config flags, env vars, integrations, deploy steps,
 operational procedures, conventions, limitations).
@@ -256,108 +139,35 @@ Allowed technical_category values: architecture, api_behaviour, database_design,
 component_interaction, technology_choice, configuration, integration, deployment,
 constraint_or_limitation, convention, operational_procedure, other.
 
-Expected JSON shape:
-{
-  "items": [
-    {
-      "title": "Concise technical fact title",
-      "description": "Accurate technical behavior, config, or procedure statement",
-      "technical_category": "architecture|api_behaviour|database_design|...",
-      "exact_identifiers": ["/api/v1/...", "POSTGRES_HOST", "evidence_chunks"],
-      "components": ["backend-worker", "ChromaDB"],
-      "constraints_or_limitations": ["documented constraints or caveats"],
-      "operational_notes": "Runbook/deployment notes if present, else null",
-      "technical_status": "active|deprecated|planned|uncertain",
-      "is_interpretation": false,
-      "is_uncertain": false,
-      "uncertainty_reason": null,
-      "confidence_level": "high|medium|low",
-      "evidence_refs": [
-        {
-          "chunk_id": "EXACT-UUID-FROM-HEADER",
-          "supporting_excerpt": "VERBATIM QUOTE FROM CHUNK TEXT",
-          "support_type": "direct"
-        }
-      ]
-    }
-  ]
-}""",
+CRITICAL FOR COMPONENT INTERACTIONS: When evidence describes how components, services,
+or data stores interact (e.g., Client/Browser calls API endpoints, Backend queries PostgreSQL,
+Worker dispatches jobs, Service stores files in Object Storage, Service invokes Ollama model,
+Service authenticates with Auth provider, Service fetches from GitHub/Jira API), extract
+explicit directed relationships into "interactions" (source_component, target_component, relationship_type, interaction_mechanism, verbatim_quote). Never invent or force interactions.
+Extract into items array conforming to the JSON schema.""",
     ),
     KnowledgeCategory.BUGS_BLOCKERS_RISKS: (
-        "risks_blockers_v1",
+        "risks_blockers_v2",
         """Target Category: BUGS, BLOCKERS AND RISKS (explicitly reported defects, blockers,
 technical debt, operational hazards, security concerns, external failures, incomplete work).
 CRITICAL: Only assign "critical|high|medium|low" to "severity" if severity/priority (e.g.
 P0/P1, critical, high, blocker, low) is EXPLICITLY supported; else "severity": "unspecified".
 Allowed risk_category values: bug, blocker, technical_risk, operational_risk,
 security_concern, external_dependency, incomplete_work, known_limitation.
-
-Expected JSON shape:
-{
-  "items": [
-    {
-      "title": "Concise bug/blocker/risk title",
-      "description": "What the bug, blocker, or risk is and its impact if documented",
-      "risk_category": "bug|blocker|technical_risk|operational_risk|security_concern|...",
-      "severity": "critical|high|medium|low|unspecified",
-      "risk_status": "open|mitigated|resolved|blocked|unclear",
-      "affected_component": "Affected component/system or null",
-      "reported_date": "Exact date string or null",
-      "responsible_person": "Exact person mentioned or null",
-      "resolution_or_mitigation_info": "Workaround/fix/mitigation if stated, else null",
-      "is_interpretation": false,
-      "is_uncertain": false,
-      "uncertainty_reason": null,
-      "confidence_level": "high|medium|low",
-      "evidence_refs": [
-        {
-          "chunk_id": "EXACT-UUID-FROM-HEADER",
-          "supporting_excerpt": "VERBATIM QUOTE FROM CHUNK TEXT",
-          "support_type": "direct"
-        }
-      ]
-    }
-  ]
-}""",
+Extract into items array conforming to the JSON schema.""",
     ),
     KnowledgeCategory.DEPENDENCIES: (
-        "dependencies_v1",
+        "dependencies_v2",
         """Target Category: EXPLICITLY DOCUMENTED DEPENDENCIES (service-to-service, API/library,
 task ordering/blocking, team/person approvals, external vendor systems, infra prerequisites).
 Extract ONLY concrete, explicitly documented relationships with clear source_item and
 target_item; do NOT invent speculative indirect dependencies.
 Allowed dependency_type values: technical_service, library_or_api, task_sequence,
 person_or_team, external_system, configuration_or_infra.
-
-Expected JSON shape:
-{
-  "items": [
-    {
-      "title": "Source -> Target dependency summary",
-      "description": "Nature of the dependency",
-      "source_item": "Dependent or blocking component/task/system",
-      "target_item": "Required, blocked, or integrated component/task/system",
-      "dependency_type": "technical_service|library_or_api|task_sequence|...",
-      "direction": "depends_on|blocks|required_by|integrates_with|unclear",
-      "context": "Why or under what condition this dependency applies, else null",
-      "dependency_status": "active|resolved|blocked|proposed|unclear",
-      "is_interpretation": false,
-      "is_uncertain": false,
-      "uncertainty_reason": null,
-      "confidence_level": "high|medium|low",
-      "evidence_refs": [
-        {
-          "chunk_id": "EXACT-UUID-FROM-HEADER",
-          "supporting_excerpt": "VERBATIM QUOTE FROM CHUNK TEXT",
-          "support_type": "direct"
-        }
-      ]
-    }
-  ]
-}""",
+Extract into items array conforming to the JSON schema.""",
     ),
     KnowledgeCategory.OPERATIONAL_HISTORICAL: (
-        "operational_historical_v1",
+        "operational_historical_v2",
         """Target Category: OPERATIONAL AND HISTORICAL CONTEXT (deployment runbooks, incident response procedures,
 troubleshooting guides, backup/restore procedures, migration steps, monitoring/alerting, chronological project events,
 timeline milestones, postmortem takeaways, and historical decisions).
@@ -365,39 +175,7 @@ Preserve step-by-step procedures, commands, prerequisites, target environments, 
 Allowed knowledge_type values: deployment_runbook, incident_response, troubleshooting_guide,
 backup_restore, migration_procedure, monitoring_alerting, historical_context, key_event_chronology,
 legacy_decision_history, other.
-
-Expected JSON shape:
-{
-  "items": [
-    {
-      "title": "Concise operational procedure or historical milestone title",
-      "description": "Factual description of the operational procedure, runbook step, or historical event",
-      "knowledge_type": "deployment_runbook|incident_response|troubleshooting_guide|backup_restore|migration_procedure|monitoring_alerting|historical_context|key_event_chronology|legacy_decision_history|other",
-      "procedure_name": "Name of standard procedure or null",
-      "target_environment": "production|staging|dev|all|null",
-      "prerequisites": ["Required tools, credentials, or states"],
-      "execution_steps": ["Step 1...", "Step 2..."],
-      "verification_steps": ["How to verify completion"],
-      "rollback_steps": ["How to revert if failed"],
-      "event_timestamp": "Exact event date/time if historical, else null",
-      "historical_significance": "Why this historical context matters for handover, else null",
-      "lessons_learned": ["Documented postmortem takeaway"],
-      "superseded_reason": "Why superseded or obsolete if applicable, else null",
-      "status": "active|superseded|deprecated|draft|unknown",
-      "is_interpretation": false,
-      "is_uncertain": false,
-      "uncertainty_reason": null,
-      "confidence_level": "high|medium|low",
-      "evidence_refs": [
-        {
-          "chunk_id": "EXACT-UUID-FROM-HEADER",
-          "supporting_excerpt": "VERBATIM QUOTE FROM CHUNK TEXT",
-          "support_type": "direct"
-        }
-      ]
-    }
-  ]
-}""",
+Extract into items array conforming to the JSON schema.""",
     ),
 }
 
@@ -480,34 +258,17 @@ def partition_chunks_into_batches(
 
 
 def format_evidence_chunks_block(chunks: Sequence[ChunkPromptInput]) -> str:
-    """Serialize authorised chunks inside strict untrusted-data XML-style tags."""
+    """Serialize authorised chunks inside compact chunk tags to save context tokens."""
     blocks: list[str] = []
     for ch in chunks:
-        attrs = [
-            f'chunk_id="{ch.chunk_id}"',
-            f'chunk_index="{ch.chunk_index}"',
-            f'source_provider="{ch.source_provider}"',
-            f'source_external_id="{ch.source_external_id}"',
-            f'chunk_type="{ch.chunk_type}"',
-        ]
-        if ch.page_number is not None:
-            attrs.append(f'page_number="{ch.page_number}"')
-        if ch.section_title:
-            safe_sec = ch.section_title.replace('"', "'")
-            attrs.append(f'section_title="{safe_sec}"')
-        if ch.source_author_identity:
-            safe_author = ch.source_author_identity.replace('"', "'")
-            attrs.append(f'author="{safe_author}"')
-        if ch.source_created_at_iso:
-            attrs.append(f'source_timestamp="{ch.source_created_at_iso}"')
-
-        safe_title = ch.title.replace('"', "'")
-        attr_str = " ".join(attrs)
-        sanitized_body = ch.chunk_text.replace("</evidence_chunk>", "</evidence_chunk_escaped>")
+        sanitized_body = (
+            ch.chunk_text.replace("[/CHUNK]", "[/CHUNK_ESCAPED]")
+            .replace("</evidence_chunk>", "</evidence_chunk_escaped>")
+        )
         blocks.append(
-            f'<evidence_chunk {attr_str} title="{safe_title}">\n'
+            f"[CHUNK id={ch.chunk_id}]\n"
             f"{sanitized_body}\n"
-            "</evidence_chunk>"
+            "[/CHUNK]"
         )
     return "\n\n".join(blocks)
 
@@ -564,3 +325,89 @@ def build_json_repair_prompt(
         system_prompt=base.system_prompt,
         user_prompt=repaired_user,
     )
+
+
+_MULTI_DOMAIN_SYSTEM_RULES = """You are The Handover's grounded project knowledge extractor.
+
+Extract useful, atomic project facts from the supplied evidence.
+
+CLASSIFY EACH FACT INTO EXACTLY ONE OF THESE DOMAINS:
+- project_overview_context: Goals, scope, background, high-level project framing
+- decisions_rationale: Architecture/design decisions, choices made and why
+- technical_architecture: Components, APIs, DB schema, data flow, technologies used
+- work_items: Tasks, milestones, completed work, planned features, backlog items
+- responsibilities_ownership: Who owns/maintains what, team roles, author attribution
+- dependencies: External services, libraries, packages, hardware requirements
+- bugs_blockers_risks: Known bugs, security issues, technical debt, operational risks
+- operational_historical: Runbooks, deployment steps, environment setup, postmortems
+
+RULES:
+1. NO EVIDENCE -> NO CLAIM. Never invent facts. Every item MUST have evidence support.
+2. For each distinct factual finding provide:
+   - "category": exactly one of the 8 domain names above
+   - "title": concise descriptive title (<8 words, e.g. "PostgreSQL 16 canonical store")
+   - "structured_summary": concise 1-2 sentence factual statement of the claim
+   - "evidence_refs": array of 1 reference with:
+     * "chunk_id": the UUID string of the chunk containing the evidence
+     * "supporting_excerpt": EXACT verbatim quote from that chunk (min 12 chars)
+     * "support_type": "direct" or "interpretation"
+   - "confidence_level": "high", "medium", or "low"
+   - "is_interpretation": true if inferred, false if explicitly stated
+3. TOKEN EFFICIENCY:
+   - Be concise and factual. Do not repeat document names, file headers, or boilerplate.
+   - Do NOT generate redundant descriptions or extra fields; "structured_summary" is sufficient.
+   - Merge duplicate claims within the same batch into a single finding.
+   - One atomic finding per distinct fact.
+4. Exact verbatim excerpts ONLY. Do not paraphrase or edit quotes.
+5. If the evidence contains NO extractable knowledge, return {"items": []}.
+"""
+
+
+def build_multi_domain_extraction_prompt(
+    *,
+    chunks: Sequence[ChunkPromptInput],
+    prompt_version: str = DEFAULT_PROMPT_VERSION,
+) -> BuiltExtractionPrompt:
+    """Construct a single unified prompt covering all 8 canonical domains for one chunk batch."""
+    evidence_block = format_evidence_chunks_block(chunks)
+    user_prompt = (
+        "Extract all supported knowledge records across the 8 canonical project domains from the following evidence.\n"
+        "Assign each item its appropriate 'category' from the 8 allowed domains.\n"
+        "Remember: copy exact 'chunk_id' and exact verbatim 'supporting_excerpt' substrings (minimum 12 chars).\n\n"
+        f"{evidence_block}"
+    )
+    return BuiltExtractionPrompt(
+        category=KnowledgeCategory.TECHNICAL_ARCHITECTURE,
+        prompt_version=prompt_version,
+        template_id="multi_domain_v3_fast",
+        system_prompt=_MULTI_DOMAIN_SYSTEM_RULES,
+        user_prompt=user_prompt,
+    )
+
+
+def build_multi_domain_json_repair_prompt(
+    *,
+    chunks: Sequence[ChunkPromptInput],
+    prior_error: str,
+    prompt_version: str = DEFAULT_PROMPT_VERSION,
+) -> BuiltExtractionPrompt:
+    """Construct a strict JSON repair prompt for multi-domain extraction."""
+    base = build_multi_domain_extraction_prompt(
+        chunks=chunks,
+        prompt_version=prompt_version,
+    )
+    repaired_user = (
+        f"Your previous multi-domain JSON output failed validation ({prior_error[:180]}). "
+        'Return ONLY valid JSON matching {"items": [...]} where each item has "category", "title", '
+        '"structured_summary", "evidence_refs" (with exact verbatim supporting_excerpt quotes and chunk_id UUIDs), '
+        'and "confidence_level". If no knowledge can be extracted, return {"items": []}.\n\n'
+        f"{format_evidence_chunks_block(chunks)}"
+    )
+    return BuiltExtractionPrompt(
+        category=base.category,
+        prompt_version=prompt_version,
+        template_id=base.template_id,
+        system_prompt=base.system_prompt,
+        user_prompt=repaired_user,
+    )
+
