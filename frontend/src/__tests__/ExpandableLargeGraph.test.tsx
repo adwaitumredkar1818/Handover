@@ -141,14 +141,22 @@ describe("Threshold-based Expandable Large Graphs (LARGE_GRAPH_THRESHOLD = 24)",
   });
 
   it("opens real 90-node handover Technology Stack graph as clean overview with accurate counts, expand/collapse, and search", () => {
-    const raw = JSON.parse(
-      fs.readFileSync(
-        "C:/Users/verni/.gemini/antigravity/brain/b36fe40b-96f3-459f-850c-4ab208e17b33/scratch/handover_tech_graph.json",
-        "utf-8",
-      ),
-    );
-    const nodes: HandoverGraphNode[] = raw.nodes;
-    const edges: HandoverGraphEdge[] = raw.edges;
+    const nodes = makeSyntheticNodes(90);
+    const backendNode = nodes.find((n) => n.category === "backend");
+    if (backendNode) {
+      backendNode.label = "FastAPI";
+    }
+    const edges: HandoverGraphEdge[] = nodes.slice(1).map((n) => ({
+      id: `e-root-${n.id}`,
+      source: "root-proj",
+      target: n.id,
+      relationship_type: "USES",
+      label: "uses",
+      evidence_basis: "Architecture spec",
+      verification_status: "approved",
+      confidence_score: 0.95,
+      evidence_ids: [],
+    }));
     expect(nodes.length).toBe(90);
 
     // 1. Initial collapsed overview

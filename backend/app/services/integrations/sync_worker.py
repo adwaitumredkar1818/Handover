@@ -712,6 +712,36 @@ class SourceSyncWorkerService:
             except Exception as pipe_exc:
                 logger.warning("Failed to trigger auto pipeline after source sync: %s", pipe_exc)
 
+            try:
+                from app.models.evidence import EvidenceItem
+                from app.services.verification_intelligence import ContinuousMonitoringService
+
+                with self._session_factory() as mon_session:
+                    monitor = ContinuousMonitoringService(mon_session)
+                    # 1. Process updated evidence items (modified source records)
+                    for ev_id in getattr(report, "updated_evidence_ids", []):
+                        ev_item = mon_session.get(EvidenceItem, ev_id)
+                        if ev_item and not ev_item.deleted_at:
+                            monitor.process_source_change_event(
+                                project_id=sync_run.project_id,
+                                evidence_item=ev_item,
+                                change_type="modified",
+                                triggered_by_user_id=sync_run.triggered_by_user_id,
+                            )
+                    # 2. Process newly created items that may correlate with existing findings
+                    for ev_id in getattr(report, "created_evidence_ids", []):
+                        ev_item = mon_session.get(EvidenceItem, ev_id)
+                        if ev_item and not ev_item.deleted_at:
+                            monitor.process_source_change_event(
+                                project_id=sync_run.project_id,
+                                evidence_item=ev_item,
+                                change_type="created",
+                                triggered_by_user_id=sync_run.triggered_by_user_id,
+                            )
+                    mon_session.commit()
+            except Exception as mon_exc:
+                logger.warning("Failed to evaluate continuous monitoring change impact after source sync: %s", mon_exc)
+
     def _complete_failure(
         self,
         *,
@@ -868,3 +898,33 @@ class SourceSyncWorkerService:
                     )
             except Exception as pipe_exc:
                 logger.warning("Failed to trigger auto pipeline after source sync: %s", pipe_exc)
+
+            try:
+                from app.models.evidence import EvidenceItem
+                from app.services.verification_intelligence import ContinuousMonitoringService
+
+                with self._session_factory() as mon_session:
+                    monitor = ContinuousMonitoringService(mon_session)
+                    # 1. Process updated evidence items (modified source records)
+                    for ev_id in getattr(report, "updated_evidence_ids", []):
+                        ev_item = mon_session.get(EvidenceItem, ev_id)
+                        if ev_item and not ev_item.deleted_at:
+                            monitor.process_source_change_event(
+                                project_id=sync_run.project_id,
+                                evidence_item=ev_item,
+                                change_type="modified",
+                                triggered_by_user_id=sync_run.triggered_by_user_id,
+                            )
+                    # 2. Process newly created items that may correlate with existing findings
+                    for ev_id in getattr(report, "created_evidence_ids", []):
+                        ev_item = mon_session.get(EvidenceItem, ev_id)
+                        if ev_item and not ev_item.deleted_at:
+                            monitor.process_source_change_event(
+                                project_id=sync_run.project_id,
+                                evidence_item=ev_item,
+                                change_type="created",
+                                triggered_by_user_id=sync_run.triggered_by_user_id,
+                            )
+                    mon_session.commit()
+            except Exception as mon_exc:
+                logger.warning("Failed to evaluate continuous monitoring change impact after source sync: %s", mon_exc)

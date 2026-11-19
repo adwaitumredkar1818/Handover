@@ -33,6 +33,7 @@ import {
 import { getCachedGraph, setCachedGraph, invalidateGraphCache } from "@/lib/graphCache";
 import { useProjectProcessingStatus } from "@/hooks/useProjectProcessingStatus";
 import { ProcessingEmptyStateCard } from "@/components/knowledge/LiveProcessingBanner";
+import { GraphSkeleton, TableSkeleton, CardSkeleton } from "@/components/loading";
 
 type KnowledgeMode =
   | "technology-stack"
@@ -735,7 +736,17 @@ export function KnowledgeIntelligenceWorkspace({
 
 
         {mode !== "domains" ? (
-          rawNodes.length === 0 && !loading ? (
+          loading && rawNodes.length === 0 ? (
+            viewKind === "list" ? (
+              <div className="p-6 h-full overflow-y-auto">
+                <TableSkeleton rows={8} columns={6} showSearch={false} />
+              </div>
+            ) : (
+              <div className="h-full w-full">
+                <GraphSkeleton label="Computing knowledge relationship graph..." />
+              </div>
+            )
+          ) : rawNodes.length === 0 ? (
             <ProcessingEmptyStateCard
               status={processingStatus}
               onRetry={retryProcessing}
@@ -860,7 +871,11 @@ export function KnowledgeIntelligenceWorkspace({
                 {actionMessage}
               </div>
             )}
-            {filteredDomainFindings.length === 0 && !loading ? (
+            {loading && filteredDomainFindings.length === 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <CardSkeleton variant="domain" count={6} />
+              </div>
+            ) : filteredDomainFindings.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 text-center bg-white rounded-xl border border-slate-200">
                 <BookOpen className="w-10 h-10 text-slate-300 mb-2" />
                 <p className="text-base font-medium text-slate-800">

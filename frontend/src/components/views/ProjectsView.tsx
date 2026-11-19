@@ -10,7 +10,9 @@ import {
   Clock,
   Search,
   Loader2,
+  Mail,
 } from "lucide-react";
+import { ProjectInvitationsPanel } from "../project-workspace/ProjectInvitationsPanel";
 import {
   PageHeader,
   Button,
@@ -48,6 +50,7 @@ export function ProjectsView() {
   } = useLiveApp();
 
   const [view, setView] = useState<"grid" | "list">("grid");
+  const [showInvitations, setShowInvitations] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [roleFilter, setRoleFilter] = useState("all");
@@ -110,15 +113,38 @@ export function ProjectsView() {
         title="My Projects"
         subtitle={`Projects you belong to in ${activeOrg?.name || "your organisation"}. Your role is set per project and determines what you can see and do.`}
         actions={
-          <Button
-            variant="primary"
-            icon={Plus}
-            onClick={() => setIsCreateProjectModalOpen(true)}
-          >
-            Create project
-          </Button>
+          <div className="flex items-center gap-2">
+            {activeProject && activeOrg && (
+              <Button
+                variant="secondary"
+                icon={Mail}
+                onClick={() => setShowInvitations(!showInvitations)}
+              >
+                {showInvitations ? "Hide Invitations" : "Project Invitations"}
+              </Button>
+            )}
+            <Button
+              variant="primary"
+              icon={Plus}
+              onClick={() => setIsCreateProjectModalOpen(true)}
+            >
+              Create project
+            </Button>
+          </div>
         }
       />
+
+      {/* Project Invitations Panel */}
+      {showInvitations && activeProject && activeOrg && (
+        <div className="animate-fade">
+          <ProjectInvitationsPanel
+            organisationId={activeOrg.id}
+            projectId={activeProject.id}
+            projectName={activeProject.name}
+            canManage={Boolean(activeProject.my_project_role?.toLowerCase().includes("manager"))}
+          />
+        </div>
+      )}
 
       {/* Filter Bar */}
       <div className="flex flex-col gap-3 md:flex-row md:items-center">
@@ -213,7 +239,7 @@ export function ProjectsView() {
             const projectColor = getProjectColor(p.id);
             const role = normalizeProjectRole(p.my_project_role);
             const isSelected = activeProject?.id === p.id;
-            const coverage = 45; // Estimated coverage metric
+            const coverage = Math.round(Number((p as unknown as { readiness_score?: number }).readiness_score ?? 0));
 
             return (
               <div

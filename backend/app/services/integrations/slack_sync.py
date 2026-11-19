@@ -344,8 +344,12 @@ class SlackSyncOrchestrator:
             action = outcome.action
             if action == "created":
                 report.items_created += 1
+                if outcome.evidence_item and outcome.evidence_item.id:
+                    report.created_evidence_ids.append(outcome.evidence_item.id)
             elif action == "updated":
                 report.items_updated += 1
+                if outcome.evidence_item and outcome.evidence_item.id:
+                    report.updated_evidence_ids.append(outcome.evidence_item.id)
             elif action == "unchanged":
                 report.items_unchanged += 1
             elif action == "inaccessible":

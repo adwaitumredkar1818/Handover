@@ -339,3 +339,29 @@ export interface ConcurrencyConflictState {
   isConflict: boolean;
   message?: string;
 }
+
+export interface ChangeImpactItem {
+  case_id: UUID;
+  finding_title: string;
+  domain: string;
+  current_claim: string;
+  case_status: string;
+  priority: string;
+  evidence_id?: UUID | null;
+  evidence_title: string;
+  evidence_source_type: string;
+  evidence_url?: string | null;
+  change_type: string;
+  reverification_triggered: boolean;
+  reverification_reason?: string | null;
+  impact_summary: string;
+  impact_nature?: "confirmed" | "inferred";
+  timestamp?: string | null;
+}
+
+export interface ChangeImpactFeedResponse {
+  project_id: UUID;
+  total: number;
+  items: ChangeImpactItem[];
+}
+

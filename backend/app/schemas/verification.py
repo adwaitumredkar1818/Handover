@@ -335,3 +335,28 @@ class MonitorSourceChangeResponse(BaseSchema):
     affected_case_ids: list[uuid.UUID] = Field(default_factory=list)
     reverification_triggered: bool = False
     summary: str
+
+
+class ChangeImpactEventItem(BaseSchema):
+    case_id: uuid.UUID
+    finding_title: str
+    domain: str
+    current_claim: str
+    case_status: str
+    priority: str
+    evidence_id: uuid.UUID | None = None
+    evidence_title: str
+    evidence_source_type: str
+    evidence_url: str | None = None
+    change_type: str
+    reverification_triggered: bool = False
+    reverification_reason: str | None = None
+    impact_summary: str
+    impact_nature: str = "confirmed"
+    timestamp: str | None = None
+
+
+class ChangeImpactFeedResponse(BaseSchema):
+    project_id: uuid.UUID
+    total: int = 0
+    items: list[ChangeImpactEventItem] = Field(default_factory=list)

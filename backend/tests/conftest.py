@@ -105,6 +105,9 @@ def create_isolated_auth_context(
     monkeypatch.setattr(app_main, "verify_database_connection", lambda _engine: 1.0)
 
     app = app_main.create_app(settings)
+    app.state.session_factory = session_factory
+    app.state.db_engine = engine
+    app.state.settings = settings
     return IsolatedAppContext(
         app=app,
         engine=engine,

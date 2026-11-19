@@ -23,6 +23,7 @@ import {
 import Link from "next/link";
 import { api } from "../../lib/api";
 import { useLiveApp } from "../../context/LiveAppContext";
+import { ListSkeleton, ButtonLoader } from "../loading";
 
 interface ConflictItem {
   id: string;
@@ -404,14 +405,17 @@ export function ConflictsWorkspace() {
         </div>
 
         <div className="flex items-center gap-2.5">
-          <button
+          <ButtonLoader
             onClick={handleRunDetection}
             disabled={detecting}
-            className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white transition-colors disabled:opacity-50 shadow-xs"
+            isLoading={detecting}
+            loadingText="Scanning for Contradictions..."
+            variant="teal"
+            icon={<Sparkles className="w-3.5 h-3.5" />}
+            className="px-3.5 py-2 text-xs font-semibold rounded-lg shadow-xs"
           >
-            <Sparkles className={`w-3.5 h-3.5 ${detecting ? "animate-spin" : ""}`} />
-            {detecting ? "Running Contradiction Scan..." : "Run Conflict Detection"}
-          </button>
+            Run Conflict Detection
+          </ButtonLoader>
           <Link
             href="/verification"
             className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-colors shadow-xs"
@@ -567,9 +571,8 @@ export function ConflictsWorkspace() {
           {/* Conflict List */}
           <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
             {loading ? (
-              <div className="p-8 text-center text-slate-400">
-                <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-slate-300" />
-                <p className="text-sm">Loading project contradictions...</p>
+              <div className="p-4">
+                <ListSkeleton count={5} />
               </div>
             ) : filteredConflicts.length === 0 ? (
               <div className="p-8 text-center text-slate-400 space-y-3">

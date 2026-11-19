@@ -39,6 +39,7 @@ import {
 import Link from "next/link";
 import { api } from "../../lib/api";
 import { useLiveApp } from "../../context/LiveAppContext";
+import { ListSkeleton, AIAssistantThinking, ButtonLoader } from "../loading";
 import type {
   AssistantConversation,
   AssistantMessage,
@@ -763,7 +764,7 @@ export function AssistantWorkspaceView() {
               {/* Thread list */}
               <div className="space-y-1.5 overflow-y-auto flex-1 pr-1 max-h-[220px]">
                 {loadingConversations ? (
-                  <div className="p-4 text-center text-xs text-slate-400">Loading threads...</div>
+                  <ListSkeleton variant="thread" count={4} />
                 ) : filteredThreads.length === 0 ? (
                   <div className="p-4 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-lg">
                     No conversations found. Click &quot;New&quot; to start.
@@ -858,7 +859,20 @@ export function AssistantWorkspaceView() {
           {/* Conversation Turns Scroll Area */}
           <div className="flex-1 p-4 overflow-y-auto space-y-5 bg-slate-50/50">
             {loadingMessages ? (
-              <div className="p-8 text-center text-xs text-slate-400">Loading conversation history...</div>
+              <div className="space-y-4 py-4 max-w-3xl mx-auto w-full animate-pulse">
+                {/* User bubble skeleton */}
+                <div className="flex justify-end">
+                  <div className="w-2/3 h-14 bg-blue-100/70 rounded-2xl rounded-tr-xs" />
+                </div>
+                {/* Assistant bubble skeleton */}
+                <div className="flex justify-start">
+                  <div className="w-4/5 h-32 bg-white rounded-2xl rounded-tl-xs border border-slate-200 p-4 space-y-2.5">
+                    <div className="h-3.5 bg-slate-200 rounded-sm w-3/4" />
+                    <div className="h-3 bg-slate-100 rounded-sm w-full" />
+                    <div className="h-3 bg-slate-100 rounded-sm w-5/6" />
+                  </div>
+                </div>
+              </div>
             ) : messages.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center p-6 text-center">
                 <div className="size-12 rounded-full bg-teal-100 flex items-center justify-center text-teal-700 mb-3">
@@ -1425,34 +1439,21 @@ export function AssistantWorkspaceView() {
 
             {/* In-flight loading turn with live SSE progress & agent indicator */}
             {asking && (
-              <div className="flex flex-col items-start w-full animate-fade-in space-y-2">
-                <div className="flex items-center gap-1.5 text-[10px] text-slate-500 uppercase font-semibold mb-1 ml-1">
-                  <Bot className="size-3 text-teal-600 animate-spin" />
-                  <span className="text-teal-900 font-bold">
-                    {liveInvestigationStage === "initiating" && "INITIATING INVESTIGATION..."}
-                    {liveInvestigationStage === "planning" && "QUERY PLANNING & SUBQUERY EXPANSION..."}
-                    {liveInvestigationStage === "retrieving" && "HYBRID RETRIEVAL (CHROMADB + POSTGRESQL)..."}
-                    {liveInvestigationStage === "delegating" && "DYNAMIC SPECIALIZED AGENT DELEGATION..."}
-                    {liveInvestigationStage === "synthesizing" && "EVIDENCE SYNTHESIS (OLLAMA QWEN3 8B)..."}
-                    {liveInvestigationStage === "streaming" && "STREAMING REAL-TIME ANSWER..."}
-                    {!liveInvestigationStage && "REASONING & RETRIEVING..."}
-                  </span>
-                </div>
-                <div className="w-full bg-white border border-teal-200 rounded-2xl rounded-tl-xs p-4 text-xs text-slate-600 shadow-xs flex flex-col gap-2.5">
-                  <div className="flex items-center gap-2 text-teal-800 font-medium">
-                    <Sparkles className="size-4 text-teal-600 animate-bounce shrink-0" />
-                    <span>
-                      {liveInvestigationEvents[liveInvestigationEvents.length - 1] ||
-                        "Querying hybrid retrieval (ChromaDB + PostgreSQL) and synthesising with Ollama Qwen3 8B..."}
-                    </span>
-                  </div>
+              <div className="flex flex-col items-start w-full animate-fade-in space-y-3">
+                <AIAssistantThinking
+                  stage={liveInvestigationStage || "retrieving"}
+                  events={liveInvestigationEvents}
+                  className="w-full max-w-xl"
+                />
 
-                  {/* Real-time streaming answer preview if available */}
-                  {liveStreamingAnswer && (
-                    <div className="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 font-mono text-[11px] leading-relaxed max-h-40 overflow-y-auto whitespace-pre-wrap">
+                {/* Real-time streaming answer preview if available */}
+                {liveStreamingAnswer && (
+                  <div className="w-full bg-white border border-teal-200 rounded-2xl rounded-tl-xs p-4 text-xs text-slate-600 shadow-xs flex flex-col gap-2.5">
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 font-mono text-[11px] leading-relaxed max-h-40 overflow-y-auto whitespace-pre-wrap">
                       {liveStreamingAnswer}
                     </div>
-                  )}
+                  </div>
+                )}
 
                   {/* Investigation activity breadcrumb stream */}
                   {liveInvestigationEvents.length > 1 && (
@@ -1469,7 +1470,6 @@ export function AssistantWorkspaceView() {
                     </div>
                   )}
                 </div>
-              </div>
             )}
 
             <div ref={messagesEndRef} />
@@ -1583,14 +1583,17 @@ export function AssistantWorkspaceView() {
                 disabled={asking}
                 className="flex-1 px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 text-slate-900 placeholder-slate-400 transition"
               />
-              <button
+              <ButtonLoader
                 type="submit"
                 disabled={!inputValue.trim() || asking}
-                className="px-4 py-2 bg-teal-700 hover:bg-teal-800 disabled:opacity-40 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5 transition shadow-xs"
+                isLoading={asking}
+                loadingText="Investigating..."
+                variant="teal"
+                icon={<Send className="size-3.5" />}
+                className="px-4 py-2 text-xs font-semibold rounded-lg shadow-xs"
               >
-                {asking ? <RefreshCw className="size-3.5 animate-spin" /> : <Send className="size-3.5" />}
-                <span>Send</span>
-              </button>
+                Send
+              </ButtonLoader>
             </form>
           </div>
         </div>

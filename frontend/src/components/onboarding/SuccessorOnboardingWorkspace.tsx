@@ -141,20 +141,6 @@ export function SuccessorOnboardingWorkspace({
 
   const storageKey = `handover_onboarding_completed_${projectId}`;
 
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const raw = localStorage.getItem(storageKey);
-        if (raw) {
-          const parsed = JSON.parse(raw) as Record<string, boolean>;
-          setCompletedSteps(parsed);
-        }
-      } catch {
-        // ignore storage errors
-      }
-    }
-  }, [storageKey]);
-
   const markStepDone = (id: string) => {
     setCompletedSteps((prev) => {
       const next = { ...prev, [id]: true };
@@ -167,6 +153,8 @@ export function SuccessorOnboardingWorkspace({
       }
       return next;
     });
+    // Canonical backend database persistence
+    void api.onboarding.updateStep(projectId, id, true).catch(() => {});
   };
 
   const loadWorkspaceData = useCallback(async () => {
@@ -187,6 +175,7 @@ export function SuccessorOnboardingWorkspace({
         evidenceRes,
         sourcesRes,
         casesRes,
+        onboardingRes,
       ] = await Promise.all([
         api.projects.get(projectId),
         api.projects.getOverview(projectId).catch(() => null),
@@ -199,6 +188,9 @@ export function SuccessorOnboardingWorkspace({
         api.handover
           .listCases(projectId)
           .catch(() => ({ items: [], total: 0 })),
+        api.onboarding
+          .getProgress(projectId)
+          .catch(() => null),
       ]);
 
       setProject(projRes);
@@ -210,6 +202,28 @@ export function SuccessorOnboardingWorkspace({
       setEvidence(evidenceRes || []);
       setSources(sourcesRes || []);
       setHandoverCases(casesRes.items || []);
+
+      // Merge server-persisted onboarding progress with any local storage cache
+      const mergedCompleted: Record<string, boolean> = {
+        ...(onboardingRes?.completed_steps || {}),
+      };
+      if (typeof window !== "undefined") {
+        try {
+          const raw = localStorage.getItem(storageKey);
+          if (raw) {
+            const localSteps = JSON.parse(raw) as Record<string, boolean>;
+            for (const [stepId, isDone] of Object.entries(localSteps)) {
+              if (isDone && !mergedCompleted[stepId]) {
+                mergedCompleted[stepId] = true;
+                void api.onboarding.updateStep(projectId, stepId, true).catch(() => {});
+              }
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+      setCompletedSteps(mergedCompleted);
     } catch (err: unknown) {
       setErrorMessage(
         err instanceof Error

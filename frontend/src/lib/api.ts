@@ -51,7 +51,21 @@ import type {
   VerificationConflictItem,
   DetectConflictsResponse,
   QueueFilterParams,
+  ChangeImpactFeedResponse,
 } from "../types/verification";
+
+export interface OnboardingStepProgressItem {
+  step_id: string;
+  is_completed: boolean;
+  completed_at?: string | null;
+}
+
+export interface OnboardingProgressResponse {
+  project_id: string;
+  user_id: string;
+  completed_steps: Record<string, boolean>;
+  items: OnboardingStepProgressItem[];
+}
 
 export function getApiBaseUrl(): string {
   const configured = process.env.NEXT_PUBLIC_API_BASE_URL;
@@ -1637,6 +1651,20 @@ export const api = {
 
   },
   knowledgeIntelligence: {
+    async getQuality(projectId: string): Promise<{
+      dimension_scores: Record<string, number>;
+      overall_score: number;
+      gaps: Array<{
+        type: string;
+        severity: string;
+        title: string;
+        description: string;
+        recommendation: string;
+      }>;
+      total_items: number;
+    }> {
+      return request(`/projects/${projectId}/knowledge-intelligence/quality`);
+    },
 
     async getGraph(
 
@@ -2333,6 +2361,15 @@ export const api = {
         method: "POST",
       });
     },
+    async getChangeImpact(
+      projectId: string,
+      limit: number = 50,
+      offset: number = 0
+    ): Promise<ChangeImpactFeedResponse> {
+      return request<ChangeImpactFeedResponse>(
+        `/projects/${projectId}/verification/change-impact?limit=${limit}&offset=${offset}`
+      );
+    },
   },
   conflicts: {
     async getSummary(projectId: string): Promise<ConflictSummaryResponse> {
@@ -2820,6 +2857,41 @@ export const api = {
     },
     async exportJson(projectId: string, caseId: string): Promise<Record<string, unknown>> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/export?format=json`);
+    },
+  },
+  onboarding: {
+    async getProgress(
+      projectId: string,
+      targetUserId?: string
+    ): Promise<OnboardingProgressResponse> {
+      const q = targetUserId ? `?target_user_id=${encodeURIComponent(targetUserId)}` : "";
+      return request<OnboardingProgressResponse>(
+        `/projects/${projectId}/handover/onboarding/progress${q}`
+      );
+    },
+    async updateStep(
+      projectId: string,
+      stepId: string,
+      isCompleted: boolean = true
+    ): Promise<OnboardingStepProgressItem> {
+      return request<OnboardingStepProgressItem>(
+        `/projects/${projectId}/handover/onboarding/progress/${encodeURIComponent(stepId)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ is_completed: isCompleted }),
+        }
+      );
+    },
+    async deleteStep(
+      projectId: string,
+      stepId: string
+    ): Promise<{ status: string; step_id: string }> {
+      return request<{ status: string; step_id: string }>(
+        `/projects/${projectId}/handover/onboarding/progress/${encodeURIComponent(stepId)}`,
+        {
+          method: "DELETE",
+        }
+      );
     },
   },
   assistant: {

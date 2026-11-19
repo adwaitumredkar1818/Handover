@@ -19,6 +19,7 @@ from app.models.verification import VerificationCase
 from app.schemas.verification import (
     ApproveFindingRequest,
     AssignReviewerRequest,
+    ChangeImpactFeedResponse,
     EditFindingRequest,
     MarkUnresolvedRequest,
     MonitorSourceChangeRequest,
@@ -498,3 +499,35 @@ def monitor_source_change(
         reverification_triggered=impact.reverification_triggered,
         summary=impact.summary,
     )
+
+
+@router.get(
+    "/projects/{project_id}/verification/change-impact",
+    response_model=ChangeImpactFeedResponse,
+    summary="List recent source change impact and re-verification events",
+)
+def get_change_impact_feed(
+    project_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.read"))
+    ],
+    session: Annotated[Session, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ChangeImpactFeedResponse:
+    from app.services.verification_intelligence import ContinuousMonitoringService
+
+    monitor = ContinuousMonitoringService(session)
+    items, total = monitor.get_change_impact_events(
+        project_id=project_ctx.project.id,
+        viewer_user_id=project_ctx.principal.user.id,
+        has_manage=project_ctx.has_permission("project.manage"),
+        limit=limit,
+        offset=offset,
+    )
+    return ChangeImpactFeedResponse(
+        project_id=project_ctx.project.id,
+        total=total,
+        items=items,
+    )
+

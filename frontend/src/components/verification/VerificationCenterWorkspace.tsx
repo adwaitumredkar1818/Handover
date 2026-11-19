@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { ShieldCheck } from "lucide-react";
+import { Activity, CheckSquare, Scale, ShieldCheck } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import {
   verificationApi,
@@ -13,6 +13,8 @@ import {
 import { VerificationOverviewBar } from "./VerificationOverviewBar";
 import { FindingsQueuePanel } from "./FindingsQueuePanel";
 import { FindingWorkspacePanel } from "./FindingWorkspacePanel";
+import { ChangeImpactFeed } from "./ChangeImpactFeed";
+import { KnowledgeQualityPanel } from "./KnowledgeQualityPanel";
 
 export function VerificationCenterWorkspace() {
   const { activeProject, members } = useLiveApp();
@@ -46,6 +48,7 @@ export function VerificationCenterWorkspace() {
   const [actionBusy, setActionBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<"queue" | "change_impact" | "quality">("queue");
 
   // Debounce search input to avoid a request on every keystroke
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -212,7 +215,63 @@ export function VerificationCenterWorkspace() {
         errorMsg={errorMsg}
       />
 
+      {/* Sub-navigation workspace tabs */}
+      <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-2">
+        <button
+          onClick={() => setActiveWorkspaceTab("queue")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition ${
+            activeWorkspaceTab === "queue"
+              ? "bg-indigo-600 text-white shadow-xs"
+              : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+          }`}
+        >
+          <CheckSquare className="w-3.5 h-3.5" />
+          Findings Review Queue
+        </button>
+        <button
+          onClick={() => setActiveWorkspaceTab("change_impact")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition ${
+            activeWorkspaceTab === "change_impact"
+              ? "bg-indigo-600 text-white shadow-xs"
+              : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+          }`}
+        >
+          <Activity className="w-3.5 h-3.5" />
+          Change Impact Feed
+        </button>
+        <button
+          onClick={() => setActiveWorkspaceTab("quality")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition ${
+            activeWorkspaceTab === "quality"
+              ? "bg-indigo-600 text-white shadow-xs"
+              : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+          }`}
+        >
+          <Scale className="w-3.5 h-3.5" />
+          Knowledge Quality
+        </button>
+      </div>
+
+      {activeWorkspaceTab === "change_impact" && (
+        <div className="flex-1 min-h-0">
+          <ChangeImpactFeed
+            projectId={projectId}
+            onSelectFinding={(caseId) => {
+              setSelectedCaseId(caseId);
+              setActiveWorkspaceTab("queue");
+            }}
+          />
+        </div>
+      )}
+
+      {activeWorkspaceTab === "quality" && (
+        <div className="flex-1 min-h-0">
+          <KnowledgeQualityPanel projectId={projectId} />
+        </div>
+      )}
+
       {/* B: Two-Panel Master–Detail (independent adaptive scrolling on md+, single-column flow on mobile) */}
+      {activeWorkspaceTab === "queue" && (
       <div className="flex flex-col gap-4 md:flex-1 md:min-h-0 md:grid md:grid-cols-[minmax(240px,280px)_minmax(0,1fr)] lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)] md:items-start">
         {/* Left — Findings Queue */}
         <FindingsQueuePanel
@@ -314,6 +373,7 @@ export function VerificationCenterWorkspace() {
           }}
         />
       </div>
+      )}
     </div>
   );
 }

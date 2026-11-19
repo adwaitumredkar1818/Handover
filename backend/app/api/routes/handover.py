@@ -16,10 +16,12 @@ Provides:
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
 from fastapi.responses import PlainTextResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -29,6 +31,7 @@ from app.api.deps import (
 )
 from app.core.exceptions import ForbiddenError
 from app.models.enums import RoleName, SignoffType, VerificationTargetType
+from app.models.handover import ProjectOnboardingProgress
 from app.repositories.handover import (
     HandoverCaseRepository,
     HandoverPackageVersionRepository,
@@ -69,6 +72,8 @@ from app.schemas.handover import (
     HandoverStatusHistoryResponse,
     HandoverVersionSectionsResponse,
     NarrativeDraftRequest,
+    OnboardingProgressResponse,
+    OnboardingStepProgressItem,
     OwnershipTransferRequest,
     OwnershipTransferRollbackRequest,
     PackageAssemblyRequest,
@@ -84,6 +89,7 @@ from app.schemas.handover import (
     SectionEditRequest,
     SignoffPhaseReopenRequest,
     SignoffRequest,
+    UpdateOnboardingStepRequest,
 )
 from app.services.handover_assembly import PackageAssemblyService
 from app.services.handover_case import HandoverCaseService
@@ -1428,3 +1434,154 @@ def export_handover_package(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(val_err),
         ) from val_err
+
+
+# ---------------------------------------------------------------------------
+# Project Successor Onboarding Progress Endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/onboarding/progress",
+    response_model=OnboardingProgressResponse,
+    summary="Get user's onboarding progress for a project",
+)
+def get_onboarding_progress(
+    project_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.read"))
+    ],
+    session: Annotated[Session, Depends(get_db_session)],
+    target_user_id: uuid.UUID | None = Query(
+        None, description="Optional user ID (requires project.manage if not self)"
+    ),
+) -> OnboardingProgressResponse:
+    effective_user_id = project_ctx.principal.user.id
+    if target_user_id and target_user_id != effective_user_id:
+        if not project_ctx.has_permission("project.manage"):
+            raise ForbiddenError(
+                "Only project managers can view another member's onboarding progress."
+            )
+        effective_user_id = target_user_id
+
+    records = (
+        session.execute(
+            select(ProjectOnboardingProgress).where(
+                ProjectOnboardingProgress.project_id == project_ctx.project.id,
+                ProjectOnboardingProgress.user_id == effective_user_id,
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    completed_map = {r.step_id: r.is_completed for r in records}
+    items = [
+        OnboardingStepProgressItem(
+            step_id=r.step_id,
+            is_completed=r.is_completed,
+            completed_at=r.completed_at,
+        )
+        for r in records
+    ]
+
+    return OnboardingProgressResponse(
+        project_id=project_ctx.project.id,
+        user_id=effective_user_id,
+        completed_steps=completed_map,
+        items=items,
+    )
+
+
+@router.put(
+    "/onboarding/progress/{step_id}",
+    response_model=OnboardingStepProgressItem,
+    summary="Update or set completion state for an onboarding step",
+)
+def update_onboarding_step(
+    project_id: uuid.UUID,
+    step_id: str,
+    payload: UpdateOnboardingStepRequest,
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.read"))
+    ],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> OnboardingStepProgressItem:
+    clean_step = step_id.strip()
+    if not clean_step or len(clean_step) > 64:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Step ID must be non-empty and at most 64 characters.",
+        )
+
+    user_id = project_ctx.principal.user.id
+    record = (
+        session.execute(
+            select(ProjectOnboardingProgress).where(
+                ProjectOnboardingProgress.project_id == project_ctx.project.id,
+                ProjectOnboardingProgress.user_id == user_id,
+                ProjectOnboardingProgress.step_id == clean_step,
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+    now = datetime.now(timezone.utc)
+    if record is None:
+        record = ProjectOnboardingProgress(
+            organisation_id=project_ctx.project.organisation_id,
+            project_id=project_ctx.project.id,
+            user_id=user_id,
+            step_id=clean_step,
+            is_completed=payload.is_completed,
+            completed_at=now if payload.is_completed else None,
+        )
+        session.add(record)
+    else:
+        record.is_completed = payload.is_completed
+        record.completed_at = now if payload.is_completed else None
+        record.updated_at = now
+
+    session.commit()
+    session.refresh(record)
+
+    return OnboardingStepProgressItem(
+        step_id=record.step_id,
+        is_completed=record.is_completed,
+        completed_at=record.completed_at,
+    )
+
+
+@router.delete(
+    "/onboarding/progress/{step_id}",
+    summary="Delete completion record for an onboarding step",
+)
+def delete_onboarding_step(
+    project_id: uuid.UUID,
+    step_id: str,
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.read"))
+    ],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> dict[str, str]:
+    clean_step = step_id.strip()
+    user_id = project_ctx.principal.user.id
+    record = (
+        session.execute(
+            select(ProjectOnboardingProgress).where(
+                ProjectOnboardingProgress.project_id == project_ctx.project.id,
+                ProjectOnboardingProgress.user_id == user_id,
+                ProjectOnboardingProgress.step_id == clean_step,
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+    if record:
+        session.delete(record)
+        session.commit()
+
+    return {"status": "deleted", "step_id": clean_step}
+

@@ -459,8 +459,12 @@ class JiraSyncOrchestrator:
         )
         if outcome.action == "created":
             report.items_created += 1
+            if outcome.evidence_item and outcome.evidence_item.id:
+                report.created_evidence_ids.append(outcome.evidence_item.id)
         elif outcome.action == "updated":
             report.items_updated += 1
+            if outcome.evidence_item and outcome.evidence_item.id:
+                report.updated_evidence_ids.append(outcome.evidence_item.id)
         else:
             report.items_unchanged += 1
 

@@ -360,6 +360,11 @@ class VerificationIssueRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def create(self, issue: VerificationIssue) -> VerificationIssue:
+        self.session.add(issue)
+        self.session.flush()
+        return issue
+
     def list_by_case(
         self, case_id: uuid.UUID, *, open_only: bool = False
     ) -> list[VerificationIssue]:
@@ -376,6 +381,11 @@ class VerificationConflictRepository:
 
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def create(self, conflict: VerificationConflict) -> VerificationConflict:
+        self.session.add(conflict)
+        self.session.flush()
+        return conflict
 
     def list_by_case(
         self, case_id: uuid.UUID, *, unresolved_only: bool = False

@@ -26,6 +26,9 @@ import {
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { useProjectProcessingStatus } from "../../hooks/useProjectProcessingStatus";
+import { TableSkeleton, ListSkeleton, CardSkeleton } from "../loading";
+import { MetricBand, Table, Th, Td } from "../ui";
+import { SourceIcon } from "../brand/brand";
 
 interface RowBadgeSpec {
   label: string;
@@ -178,6 +181,7 @@ export function EvidenceCenterView() {
   } = useLiveApp();
 
   const { status: projectStatus } = useProjectProcessingStatus(activeProject?.id || "");
+  const [layoutMode, setLayoutMode] = useState<"threepanel" | "table">("threepanel");
   const [activeTab, setActiveTab] = useState<"chunks" | "knowledge" | "metadata">("chunks");
   const [copiedHash, setCopiedHash] = useState(false);
   const [copiedChunkId, setCopiedChunkId] = useState<string | null>(null);
@@ -315,70 +319,243 @@ export function EvidenceCenterView() {
     );
   }
 
+  const totalEvidenceCount = projectStatus?.total_evidence_count || evidenceMetrics?.total_items || evidenceList.length;
+  const processedEvidenceCount = projectStatus?.processed_evidence_count || (evidenceMetrics?.by_indexing_status?.["indexed"] ?? evidenceList.length);
+  const processedPct = totalEvidenceCount > 0 ? Math.round((processedEvidenceCount / totalEvidenceCount) * 100) : 100;
+  const activeSourcesCount = sourceMappings.length + (evidenceMetrics?.by_provider?.["upload"] || evidenceMetrics?.by_provider?.["local_upload"] ? 1 : 0);
+  const knowledgeCount = projectStatus?.knowledge_item_count || 0;
+
   return (
     <div className="h-[calc(100vh-5.5rem)] flex flex-col gap-3">
       {/* Evidence Hub Top Summary Bar */}
-      <div className="bg-white rounded-xl border border-[#DCE3EB] px-4 py-2.5 shadow-2xs flex items-center justify-between shrink-0">
+      <div className="bg-white rounded-xl border border-[#DCE3EB] px-4 py-2.5 shadow-2xs flex flex-wrap items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-2">
           <Database className="w-4 h-4 text-[#249E91]" />
           <span className="font-bold text-xs text-[#25334B]">
-            Evidence Workspace · 3-Panel Knowledge Center
+            Evidence Workspace · Knowledge Center
           </span>
           <span className="text-[11px] text-[#69778D]">({activeProject.name})</span>
         </div>
 
-        <div className="flex items-center gap-4 text-xs font-medium text-[#69778D]">
-          <div className="flex items-center gap-2">
-            <span className="font-semibold text-xs text-[#25334B]">
-              {projectStatus && projectStatus.total_evidence_count > 0 ? (
-                <>
-                  <span className="text-[#249E91] font-bold">{projectStatus.processed_evidence_count}</span>
-                  {" of "}
-                  <span>{projectStatus.total_evidence_count}</span>
-                  {" evidence items processed"}
-                </>
-              ) : (
-                <>
-                  Total Evidence:{" "}
-                  <strong className="text-[#25334B]">{evidenceMetrics?.total_items ?? evidenceList.length}</strong>
-                </>
-              )}
-            </span>
-            {projectStatus?.is_processing && (
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-300 flex items-center gap-1 animate-pulse">
-                <RefreshCw className="w-2.5 h-2.5 animate-spin" />
-                <span>{projectStatus.stage_label || "Processing live"}</span>
+        <div className="flex items-center gap-3 text-xs font-medium text-[#69778D]">
+          {/* Two-Stage Pipeline Indicators */}
+          {projectStatus && projectStatus.total_evidence_count > 0 && (
+            <div className="hidden xl:flex items-center gap-1.5 text-[11px]">
+              <span className="px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-200 font-medium" title="Stage 1: Directly parsed without LLM">
+                Stage 1: {projectStatus.deterministic_ready ?? 0} ready
               </span>
-            )}
-            {/* Two-Stage Pipeline Indicators */}
-            {projectStatus && projectStatus.total_evidence_count > 0 && (
-              <div className="hidden xl:flex items-center gap-1.5 text-[11px]">
-                <span className="px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-200 font-medium" title="Stage 1: Directly parsed without LLM">
-                  Stage 1: {projectStatus.deterministic_ready ?? 0} ready
-                </span>
-                <span className="px-2 py-0.5 rounded-md bg-purple-50 text-purple-800 border border-purple-200 font-medium" title="Stage 2: Background semantic extraction by Qwen3">
-                  Stage 2: {projectStatus.semantic_ready ?? 0} ready{projectStatus.semantic_queued ? ` (${projectStatus.semantic_queued} queued)` : ""}
-                </span>
-                <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 font-medium" title="Knowledge items published to interactive graphs">
-                  Graphs: {projectStatus.knowledge_item_count} items
-                </span>
-              </div>
-            )}
-          </div>
-          <span className="hidden sm:inline">|</span>
-          <span className="hidden sm:inline">
-            Active Mappings:{" "}
-            <strong className="text-[#25334B]">{sourceMappings.length}</strong>
-          </span>
-          <div className="flex items-center gap-1.5 text-[11px] text-[#249E91] font-semibold bg-[#F0FAF8] px-2 py-0.5 rounded-full border border-[#249E91]/30">
+              <span className="px-2 py-0.5 rounded-md bg-purple-50 text-purple-800 border border-purple-200 font-medium" title="Stage 2: Background semantic extraction by Qwen3">
+                Stage 2: {projectStatus.semantic_ready ?? 0} ready{projectStatus.semantic_queued ? ` (${projectStatus.semantic_queued} queued)` : ""}
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 font-medium" title="Knowledge items published to interactive graphs">
+                Graphs: {projectStatus.knowledge_item_count} items
+              </span>
+            </div>
+          )}
+
+          <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-[#249E91] font-semibold bg-[#F0FAF8] px-2 py-0.5 rounded-full border border-[#249E91]/30">
             <Lock className="w-3 h-3" />
-            <span>AES-256 Envelope Encrypted</span>
+            <span>AES-256 Protected</span>
+          </div>
+
+          {/* Layout Mode Switcher */}
+          <div className="flex items-center gap-1 bg-[#F4F6F9] p-0.5 rounded-lg border border-[#DCE3EB]">
+            <button
+              type="button"
+              onClick={() => setLayoutMode("threepanel")}
+              className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                layoutMode === "threepanel"
+                  ? "bg-white text-[#25334B] shadow-2xs font-bold"
+                  : "text-[#69778D] hover:text-[#25334B]"
+              }`}
+              title="3-Panel Hub Layout"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>3-Panel</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setLayoutMode("table")}
+              className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                layoutMode === "table"
+                  ? "bg-white text-[#25334B] shadow-2xs font-bold"
+                  : "text-[#69778D] hover:text-[#25334B]"
+              }`}
+              title="Dense Table View"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>Table</span>
+            </button>
           </div>
         </div>
       </div>
 
-      {/* 3-Panel Main Area */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 min-h-0 overflow-hidden">
+      {/* Metric Band Summary Tiles */}
+      <MetricBand
+        className="shrink-0"
+        items={[
+          {
+            label: "Total Evidence",
+            value: totalEvidenceCount.toLocaleString(),
+            hint: `Across ${activeSourcesCount || 1} active source streams`,
+            tone: "blue",
+          },
+          {
+            label: "Processed & Indexed",
+            value: processedEvidenceCount.toLocaleString(),
+            hint: `${processedPct}% pipeline complete`,
+            tone: "green",
+          },
+          {
+            label: "Active Sources",
+            value: activeSourcesCount.toString(),
+            hint: "GitHub, Jira, Slack & Docs",
+            tone: "indigo",
+          },
+          {
+            label: "Extracted Findings",
+            value: knowledgeCount.toLocaleString(),
+            hint: "Decisions, risks, tasks",
+            tone: "amber",
+          },
+        ]}
+      />
+
+      {layoutMode === "table" ? (
+        /* TABLE VIEW MODE */
+        <div className="flex-1 bg-white rounded-xl border border-[#DCE3EB] shadow-2xs overflow-hidden flex flex-col min-h-0">
+          {/* Table Header Filter Controls */}
+          <div className="p-3 border-b border-[#DCE3EB] bg-[#F8FAFC] flex flex-wrap items-center justify-between gap-3 shrink-0">
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-[#69778D]" />
+                <input
+                  type="text"
+                  placeholder="Filter evidence items..."
+                  value={evidenceFilter.q}
+                  onChange={(e) => setEvidenceFilter({ ...evidenceFilter, q: e.target.value })}
+                  className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-[#DCE3EB] bg-white text-[#25334B] w-64 focus:outline-none focus:ring-1 focus:ring-[#4774A9]"
+                />
+              </div>
+              <div className="flex items-center gap-1">
+                {(["all", "github", "jira", "upload"] as const).map((prov) => (
+                  <button
+                    key={prov}
+                    type="button"
+                    onClick={() => setEvidenceFilter({ ...evidenceFilter, provider: prov })}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                      evidenceFilter.provider === prov
+                        ? "bg-[#4774A9] text-white"
+                        : "bg-white border border-[#DCE3EB] text-[#69778D] hover:bg-slate-50"
+                    }`}
+                  >
+                    {prov === "all" ? "All Sources" : prov === "upload" ? "Docs" : prov.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="text-xs text-[#69778D]">
+              Showing <strong>{filteredEvidenceList.length}</strong> items
+            </div>
+          </div>
+
+          {/* Dense Table */}
+          <div className="flex-1 overflow-auto">
+            {filteredEvidenceList.length === 0 ? (
+              <div className="p-12 text-center text-xs text-[#69778D]">
+                <FileText className="w-8 h-8 text-[#69778D]/40 mx-auto mb-2" />
+                <div className="font-semibold text-[#25334B]">No matching evidence records</div>
+                <p className="mt-1">Try clearing active search filters or synchronising a connected source.</p>
+              </div>
+            ) : (
+              <Table>
+                <thead>
+                  <tr>
+                    <Th>Evidence Item</Th>
+                    <Th>Source</Th>
+                    <Th>Category</Th>
+                    <Th>Pipeline Lifecycle</Th>
+                    <Th>Author / Identity</Th>
+                    <Th>Ingested At</Th>
+                    <Th className="text-right">Action</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredEvidenceList.map((item) => {
+                    const rowBadges = getRowStateBadges(item.lifecycle_stage, item.semantic_status, item.processing_status);
+                    return (
+                      <tr
+                        key={item.id}
+                        onClick={() => {
+                          setSelectedEvidenceId(item.id);
+                          setLayoutMode("threepanel");
+                        }}
+                        className="hover:bg-slate-50/70 cursor-pointer transition-colors"
+                      >
+                        <Td>
+                          <div className="font-semibold text-xs text-[#25334B] max-w-sm truncate">
+                            {item.title}
+                          </div>
+                          {item.original_filename && (
+                            <div className="text-[10px] text-[#4774A9] font-mono truncate">
+                              {item.original_filename}
+                            </div>
+                          )}
+                        </Td>
+                        <Td>
+                          <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded border ${getProviderBadge(item.provider, item.source_type).bg}`}>
+                            {getProviderBadge(item.provider, item.source_type).label}
+                          </span>
+                        </Td>
+                        <Td>
+                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded border ${getCategoryBadge(item.category, item.source_type).bg}`}>
+                            {getCategoryBadge(item.category, item.source_type).label}
+                          </span>
+                        </Td>
+                        <Td>
+                          <div className="flex items-center gap-1 flex-wrap">
+                            {rowBadges.map((b, i) => (
+                              <span key={i} className={`text-[9px] uppercase px-1.5 py-0.5 rounded border ${b.bg}`}>
+                                {b.label}
+                              </span>
+                            ))}
+                          </div>
+                        </Td>
+                        <Td>
+                          <span className="text-xs text-[#69778D]">
+                            {item.author_name || item.source_author_identity || "—"}
+                          </span>
+                        </Td>
+                        <Td>
+                          <span className="text-[11px] text-[#69778D] font-mono">
+                            {new Date(item.created_at).toLocaleDateString()}
+                          </span>
+                        </Td>
+                        <Td className="text-right">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedEvidenceId(item.id);
+                              setLayoutMode("threepanel");
+                            }}
+                            className="px-2.5 py-1 rounded bg-[#E8EEF5] hover:bg-[#DCE3EB] text-[#4774A9] text-xs font-semibold inline-flex items-center gap-1 transition-colors"
+                          >
+                            <span>Inspect</span>
+                            <ChevronRight className="w-3 h-3" />
+                          </button>
+                        </Td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </Table>
+            )}
+          </div>
+        </div>
+      ) : (
+        /* 3-Panel Main Area */
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 min-h-0 overflow-hidden">
         {/* PANEL A: Connected Sources & Ingestion (Cols 1-3) */}
         <div className="lg:col-span-3 bg-white rounded-xl border border-[#DCE3EB] flex flex-col shadow-2xs overflow-hidden">
           {/* Panel Header */}
@@ -433,7 +610,11 @@ export function EvidenceCenterView() {
                 External Repositories &amp; Tools ({sourceMappings.length})
               </div>
 
-              {sourceMappings.length === 0 ? (
+              {isLoadingSources && sourceMappings.length === 0 ? (
+                <div className="p-1">
+                  <ListSkeleton variant="source" count={2} />
+                </div>
+              ) : sourceMappings.length === 0 ? (
                 <div className="p-4 rounded-lg border border-dashed border-[#DCE3EB] text-center text-xs text-[#69778D]">
                   <PlugZap className="w-6 h-6 text-[#69778D] mx-auto mb-1 opacity-50" />
                   <div className="text-[11px] font-medium text-[#25334B]">No External Sources Mapped</div>
@@ -562,9 +743,8 @@ export function EvidenceCenterView() {
           {/* Evidence List */}
           <div className="flex-1 overflow-y-auto divide-y divide-[#DCE3EB]">
             {isLoadingEvidence && evidenceList.length === 0 ? (
-              <div className="p-8 text-center text-xs text-[#69778D]">
-                <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-[#4774A9]" />
-                <span>Loading evidence items...</span>
+              <div className="p-3">
+                <TableSkeleton rows={5} columns={2} showSearch={false} />
               </div>
             ) : filteredEvidenceList.length === 0 ? (
               <div className="p-8 text-center text-xs text-[#69778D] flex flex-col items-center justify-center h-48">
@@ -717,7 +897,11 @@ export function EvidenceCenterView() {
           </div>
 
           {/* Panel Body */}
-          {!selectedEvidence ? (
+          {isLoadingEvidenceDetail ? (
+            <div className="p-4 space-y-4">
+              <CardSkeleton variant="default" count={2} />
+            </div>
+          ) : !selectedEvidence ? (
             <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-xs text-[#69778D]">
               <FileText className="w-10 h-10 text-[#69778D] opacity-40 mb-2 stroke-[1.5]" />
               <div className="font-semibold text-[#25334B]">No Evidence Item Selected</div>
@@ -1232,6 +1416,7 @@ export function EvidenceCenterView() {
           )}
         </div>
       </div>
+      )}
     </div>
   );
 }

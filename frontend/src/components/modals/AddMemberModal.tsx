@@ -4,6 +4,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { X, Users, Mail, ArrowRight, AlertCircle, CheckCircle2, Info } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { api } from "../../lib/api";
+import { ButtonLoader } from "../loading";
 import type { OrganisationMember } from "../../lib/types";
 
 export function AddMemberModal() {
@@ -55,7 +56,12 @@ export function AddMemberModal() {
       setRoleName("project_contributor");
       setTransitionRole("");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to add member to project workspace");
+      const raw = err instanceof Error ? err.message : "Failed to add member to project workspace";
+      if (raw.toLowerCase().includes("user_id") && raw.toLowerCase().includes("required")) {
+        setError("Please enter a valid colleague email address or select an existing member.");
+      } else {
+        setError(raw);
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -165,14 +171,16 @@ export function AddMemberModal() {
             >
               Cancel
             </button>
-            <button
+            <ButtonLoader
               type="submit"
-              disabled={isSubmitting}
-              className="px-4 py-2 rounded-lg bg-[#4774A9] hover:bg-[#365F92] text-white text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+              isLoading={isSubmitting}
+              loadingText="Adding to Project..."
+              variant="primary"
+              icon={<ArrowRight className="w-3.5 h-3.5" />}
+              className="px-4 py-2 rounded-lg text-xs font-semibold"
             >
-              <span>{isSubmitting ? "Adding..." : "Add to Project"}</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
+              Add to Project
+            </ButtonLoader>
           </div>
         </form>
       </div>

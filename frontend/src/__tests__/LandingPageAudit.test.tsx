@@ -21,6 +21,7 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({
     push: mockPush,
   }),
+  usePathname: () => "/",
 }));
 
 // Mock LiveAppContext
