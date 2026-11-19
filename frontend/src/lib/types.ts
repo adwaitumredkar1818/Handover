@@ -290,6 +290,7 @@ export interface EvidenceMetrics {
   total_items: number;
   by_type: Record<string, number>;
   by_indexing_status: Record<string, number>;
+  by_provider?: Record<string, number>;
 }
 
 

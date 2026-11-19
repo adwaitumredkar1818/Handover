@@ -848,6 +848,9 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
   const [attributions, setAttributions] = useState<any[]>([])
   const [isLoadingAttributions, setIsLoadingAttributions] = useState(false)
   const [reconcilingId, setReconcilingId] = useState<string | null>(null)
+  const githubMap = useMemo(() => sourceMappings.find((m) => m.provider === 'github'), [sourceMappings])
+  const jiraMap = useMemo(() => sourceMappings.find((m) => m.provider === 'jira'), [sourceMappings])
+  const slackMap = useMemo(() => sourceMappings.find((m) => m.provider === 'slack'), [sourceMappings])
 
   const handleReprocess = async (evId: string) => {
     if (!p) return
