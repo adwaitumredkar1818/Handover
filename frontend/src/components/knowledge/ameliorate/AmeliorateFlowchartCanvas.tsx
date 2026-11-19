@@ -235,7 +235,7 @@ export function AmeliorateFlowchartCanvas({
 
       if (isFinalForFit && !hasFittedRef.current && updatedNodes.length > 0 && flowInstanceRef.current) {
         hasFittedRef.current = true;
-        // Wait for React + React Flow to commit and measure the newly laid-out nodes
+        // Wait for React + React Flow ResizeObserver to measure the newly laid-out nodes
         // before calling fitView so the camera centers on the final graph bounds.
         setTimeout(() => {
           if (cancelled) return;
@@ -244,7 +244,7 @@ export function AmeliorateFlowchartCanvas({
               flowInstanceRef.current?.fitView({ ...FIT_VIEW_OPTIONS, duration: 180 });
             }
           });
-        }, 50);
+        }, 80);
       }
     };
 
@@ -292,7 +292,10 @@ export function AmeliorateFlowchartCanvas({
     ) => {
       flowInstanceRef.current = instance;
       if (!hasFittedRef.current && nodes.length > 0) {
-        hasFittedRef.current = true;
+        // For > 6 nodes, ELK Layered runs asynchronously after mount and will perform the final fitView.
+        if (nodes.length <= 6) {
+          hasFittedRef.current = true;
+        }
         requestAnimationFrame(() => {
           instance.fitView({ ...FIT_VIEW_OPTIONS, duration: 0 });
         });

@@ -2,7 +2,7 @@
 
 An intelligent, evidence-grounded platform that prevents critical organisational knowledge from being lost when employees leave or transition responsibilities. It connects authorised organisational sources and documents, reconstructs fragmented knowledge into structured records with full provenance, surfaces conflicts and gaps, supports human verification, and produces auditable handover packages.
 
-> **Repository Status:** Phase 2.6 (AI Knowledge Reconstruction & Structured Intelligence Extraction Complete) — Docker infrastructure (**PostgreSQL** and **ChromaDB**), native Windows **Ollama** readiness, the Next.js TypeScript runtime (`frontend/`), the FastAPI backend foundation (`backend/app/`, `infrastructure/database/migrations/`), platform authentication & RBAC (`0002_auth_identity_rbac`), multi-tenant organisations & project workspaces (`0003_org_project_workspaces`), encrypted PDF/DOCX document ingestion & GLM OCR (`0004_evidence_ingestion`), delegated per-user GitHub & Jira OAuth 2.0 connectors & sync execution (`0005_source_integrations`), chunking, PG `TSVECTOR`/`GIN` full-text search, `nomic-embed-text` (768-dim) embeddings, ChromaDB HTTP v2 secondary vector indexing, `IndexingWorkerService`, and permission-filtered hybrid search/reindex APIs (`0006_evidence_chunks_and_fts`), and replaceable `StructuredLLMClient` (`OllamaLLMClient` / `qwen3:8b` with `OLLAMA_LLM_THINK=false`), 6-category `NO EVIDENCE -> NO CLAIM` knowledge extraction, conservative corroboration deduplication, staleness invalidation, `ReconstructionWorkerService` (`CompositeWorkerService`), and ACL-enforced `/knowledge/*` endpoints (`0007_knowledge_reconstruction`) are implemented and verified. Knowledge relationships, verification review workflows, handover generation, and assistant synthesis belong to subsequent phases.
+> **Repository Status:** Full-Stack Platform Active — Docker/managed **PostgreSQL** and **ChromaDB**, native Windows **Ollama** (`qwen3:8b`, `nomic-embed-text`, `glm-ocr:latest`), the Next.js TypeScript runtime (`frontend/`), and the FastAPI backend (`backend/app/`, `infrastructure/database/migrations/`) are implemented across all 7 core modules: **Project Workspace** (including member name editing with cross-page propagation & same-page project switching), **Evidence Center**, **Knowledge Intelligence** (8 domains + Ameliorate ELK graphs with full manual group expansion, 0ms node detail drawers, and instant optimistic Verify/Flag/Reject), **Relationship Explorer** (People/Contributors, Entities, Work Clusters, Responsibilities, Identity Review with invitation-only attribution, Traceability, Dependencies, and Timeline), **Verification Center & Conflict Management**, **Handover Workspace & Generated Handovers**, and **Project Knowledge Assistant** (hybrid RAG with strict source ACLs), plus bounded-concurrency background preloading and L1 response caching.
 
 ---
 
@@ -46,6 +46,16 @@ The platform structures reconstructed project knowledge across eight core domain
 | **Verification Center** | Human review queue for conflicts, missing information, uncertainty flags, and evidence verification |
 | **Handover Workspace** | Structured handover package compilation, readiness checklists, ownership transfer, and human sign-off |
 | **Project Knowledge Assistant** | Permission-filtered hybrid RAG assistant with source citations and explicit uncertainty reporting |
+
+---
+
+## Recent Features & Performance Updates
+
+- **Member Name Editing & Cross-Page Sync**: Edit active member display names from both Project Team (`PATCH /api/v1/projects/{project_id}/members/{user_id}/name`) and Workspace Team (`PATCH /api/v1/organisations/{organisation_id}/members/{user_id}/name`) with RBAC/self-edit enforcement, `AuditLog` tracking, and immediate propagation across Team, Overview, Graphs, and TopNav.
+- **Instant Optimistic Reviews**: Zero-latency optimistic updates with rollback and background sync for **Knowledge Intelligence** (`Verify` / `Flag` / `Reject` backed by `POST /api/v1/projects/{project_id}/verification/target-case`) and **Relationship Explorer Identity Review** (`Match Member`, `External`, `Bot`, `Revert`).
+- **Interactive Graph Enhancements**: Post-ELK `fitView` centering on load/mode switch (`AmeliorateFlowchartCanvas`), full manual group expansion revealing 100% of canonical nodes, and 0ms node detail drawers hydrated from local graph state.
+- **Project, Workspace & GitHub Connection Stability**: Eliminated URL-sync race conditions on project/workspace switches so selecting a project stays on the active page; kept non-disconnected source connections visible (`status != "disconnected"`) and reactivatable across accounts.
+- **Background Preloading & DB Latency Optimizations**: Bounded-concurrency (`2`) workspace prefetcher (`frontend/src/lib/projectPrefetch.ts`) warming all projects, Knowledge Intelligence domains/graphs, and Relationship Explorer subpages (`Traceability`, `Dependencies`, `Timeline`, `Work Clusters`, `Identity Review`) in the background, paired with expanded SQLAlchemy pooling (`pool_size=16`, `max_overflow=20`, 120s idle-ping skip) and L1 response caching.
 
 ---
 

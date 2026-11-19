@@ -86,6 +86,9 @@ def _invalidate_project_graph_caches(project_id: uuid.UUID) -> None:
     local_response_cache.invalidate_prefix(f"rel_selectable_members:{project_id}:")
     local_response_cache.invalidate_prefix(f"project_members:{project_id}:")
     local_response_cache.invalidate_prefix(f"work_clusters:{project_id}:")
+    local_response_cache.invalidate_prefix(f"rel_traceability:{project_id}:")
+    local_response_cache.invalidate_prefix(f"rel_deps:{project_id}:")
+    local_response_cache.invalidate_prefix(f"rel_timeline:{project_id}:")
 
 
 # ==============================================================================
@@ -258,8 +261,20 @@ def list_traceability_chains(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> TraceabilityListResponse:
     """Return 5-stage decision-to-implementation traceability chains."""
-    repo = TraceabilityRepository(db_session)
     has_manage = project_ctx.has_permission("project.manage")
+    bind_id = id(db_session.get_bind())
+    cache_key = (
+        f"rel_traceability:{project_ctx.project.id}:{bind_id}:"
+        f"{project_ctx.principal.user_id}:{int(has_manage)}:{completeness_status or ''}:{limit}:{offset}"
+    )
+    cached = local_response_cache.get(cache_key)
+    if isinstance(cached, dict):
+        try:
+            return TraceabilityListResponse.model_validate(cached)
+        except Exception:
+            local_response_cache.delete(cache_key)
+
+    repo = TraceabilityRepository(db_session)
     items, total = repo.list_accessible_chains(
         project_id=project_ctx.project.id,
         viewer_user_id=project_ctx.principal.user_id,
@@ -307,7 +322,7 @@ def list_traceability_chains(
         resp.decision_name = dec.canonical_name if dec else None
         res_items.append(resp)
 
-    return TraceabilityListResponse(
+    resp_obj = TraceabilityListResponse(
         items=res_items,
         total=total,
         complete_count=complete_c,
@@ -315,6 +330,8 @@ def list_traceability_chains(
         untraced_count=untraced_c,
         conflicting_count=conf_c,
     )
+    local_response_cache.set(cache_key, resp_obj.model_dump(mode="json"), ttl_seconds=120)
+    return resp_obj
 
 
 @router.get(
@@ -395,14 +412,29 @@ def get_dependencies_graph(
     max_depth: Annotated[int, Query(ge=1, le=20)] = 10,
 ) -> DependencyGraphResponse:
     """Traverse directed dependency hierarchy, detect cycles, and identify root blockers."""
+    has_manage = project_ctx.has_permission("project.manage")
+    bind_id = id(db_session.get_bind())
+    cache_key = (
+        f"rel_deps:{project_ctx.project.id}:{bind_id}:"
+        f"{project_ctx.principal.user_id}:{int(has_manage)}:{root_entity_id or ''}:{max_depth}"
+    )
+    cached = local_response_cache.get(cache_key)
+    if isinstance(cached, dict):
+        try:
+            return DependencyGraphResponse.model_validate(cached)
+        except Exception:
+            local_response_cache.delete(cache_key)
+
     service = DependencyIntelligenceService(db_session)
-    return service.analyze_dependencies(
+    result = service.analyze_dependencies(
         project_id=project_ctx.project.id,
         viewer_user_id=project_ctx.principal.user_id,
-        has_project_manage=project_ctx.has_permission("project.manage"),
+        has_project_manage=has_manage,
         root_entity_id=root_entity_id,
         max_depth=max_depth,
     )
+    local_response_cache.set(cache_key, result.model_dump(mode="json"), ttl_seconds=120)
+    return result
 
 
 # ==============================================================================
@@ -425,8 +457,20 @@ def get_timeline_stream(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> TimelineGraphStreamResponse:
     """Return chronological event stream with verifiable timestamp precision."""
-    repo = TimelineRepository(db_session)
     has_manage = project_ctx.has_permission("project.manage")
+    bind_id = id(db_session.get_bind())
+    cache_key = (
+        f"rel_timeline:{project_ctx.project.id}:{bind_id}:"
+        f"{project_ctx.principal.user_id}:{int(has_manage)}:{entity_id or ''}:{event_type or ''}:{limit}:{offset}"
+    )
+    cached = local_response_cache.get(cache_key)
+    if isinstance(cached, dict):
+        try:
+            return TimelineGraphStreamResponse.model_validate(cached)
+        except Exception:
+            local_response_cache.delete(cache_key)
+
+    repo = TimelineRepository(db_session)
     events, total = repo.list_accessible_events(
         project_id=project_ctx.project.id,
         viewer_user_id=project_ctx.principal.user_id,
@@ -458,12 +502,14 @@ def get_timeline_stream(
             e_resp.entity_type = ent.entity_type
         items.append(e_resp)
 
-    return TimelineGraphStreamResponse(
+    resp_obj = TimelineGraphStreamResponse(
         items=items,
         total=total,
         limit=limit,
         offset=offset,
     )
+    local_response_cache.set(cache_key, resp_obj.model_dump(mode="json"), ttl_seconds=120)
+    return resp_obj
 
 
 # ==============================================================================
@@ -763,12 +809,14 @@ def list_contributors(
         except Exception:
             local_response_cache.delete(cache_key)
 
-    wg_service = WorkGroupingService(db_session)
-    accessible_ids = wg_service._accessible_evidence_ids(
-        project_id=project_ctx.project.id,
-        viewer_user_id=project_ctx.principal.user_id,
-        has_project_manage=has_manage,
-    )
+    accessible_ids: set[uuid.UUID] | None = None
+    if not has_manage:
+        wg_service = WorkGroupingService(db_session)
+        accessible_ids = wg_service._accessible_evidence_ids(
+            project_id=project_ctx.project.id,
+            viewer_user_id=project_ctx.principal.user_id,
+            has_project_manage=has_manage,
+        )
     attr_service = ContributionAttributionService(db_session)
     rows = attr_service.list_contributor_identities(
         project_id=project_ctx.project.id,
@@ -779,7 +827,7 @@ def list_contributors(
     )
     result = [ContributorIdentitySummaryResponse.model_validate(r) for r in rows]
     local_response_cache.set(
-        cache_key, [r.model_dump(mode="json") for r in result], ttl_seconds=60
+        cache_key, [r.model_dump(mode="json") for r in result], ttl_seconds=300
     )
     return result
 

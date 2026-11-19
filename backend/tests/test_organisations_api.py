@@ -398,3 +398,27 @@ def test_member_role_governance_escalation_last_owner_and_cascading_removal(
         )
         assert unknown_role.status_code == 404
         assert unknown_role.json()["error"]["code"] == "ROLE_NOT_FOUND"
+
+        # Organisation member name update: owner can rename member, member can rename self, member cannot rename owner
+        org_rename = client.patch(
+            f"/api/v1/organisations/{org_id}/members/{member2.user_id}/name",
+            headers=owner.headers,
+            json={"full_name": "Member Viewer Renamed"},
+        )
+        assert org_rename.status_code == 200
+        assert org_rename.json()["full_name"] == "Member Viewer Renamed"
+
+        org_self_rename = client.patch(
+            f"/api/v1/organisations/{org_id}/members/{member2.user_id}/name",
+            headers=member2.headers,
+            json={"full_name": "Member Self Renamed"},
+        )
+        assert org_self_rename.status_code == 200
+        assert org_self_rename.json()["full_name"] == "Member Self Renamed"
+
+        org_forbidden_rename = client.patch(
+            f"/api/v1/organisations/{org_id}/members/{owner.user_id}/name",
+            headers=member2.headers,
+            json={"full_name": "Should Fail"},
+        )
+        assert org_forbidden_rename.status_code == 403

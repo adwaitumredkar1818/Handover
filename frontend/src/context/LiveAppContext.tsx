@@ -11,7 +11,12 @@ import React, {
 } from "react";
 import { usePathname } from "next/navigation";
 import { api, setStoredToken, setStoredUser, getStoredUser, ApiError, clearApiCache } from "../lib/api";
-import { invalidateGraphCache, setGraphCacheUser } from "../lib/graphCache";
+import { getCachedGraph, invalidateGraphCache, setCachedGraph, setGraphCacheUser } from "../lib/graphCache";
+import {
+  prefetchAllWorkspaceProjects,
+  prefetchOrganisationAssets,
+  prefetchProjectAssets,
+} from "../lib/projectPrefetch";
 import { createClient as createSupabaseClient } from "../lib/supabase/client";
 import { registerPerson } from "../lib/figmaStore";
 import type {
@@ -80,6 +85,7 @@ interface LiveAppContextType {
   isLoadingMembers: boolean;
   addMember: (data: { email?: string; user_id?: string; role_name?: string; transition_role?: string }) => Promise<void>;
   updateMember: (memberId: string, data: { role_name?: string; transition_role?: string }) => Promise<void>;
+  syncMemberNameUpdate: (userId: string, fullName: string) => void;
   refreshMembers: () => Promise<void>;
 
   // Sources
@@ -263,6 +269,16 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     activeProjectIdRef.current = activeProject?.id || null;
   }, [activeProject?.id]);
+
+  const activeOrgIdRef = useRef<string | null>(activeOrg?.id || null);
+  useEffect(() => {
+    activeOrgIdRef.current = activeOrg?.id || null;
+  }, [activeOrg?.id]);
+
+  const pathnameRef = useRef<string | null>(pathname);
+  useEffect(() => {
+    pathnameRef.current = pathname;
+  }, [pathname]);
 
   useEffect(() => {
     setGraphCacheUser(user?.id || null);
@@ -575,11 +591,12 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
   }, [user, setActiveOrg]);
 
+  const userId = user?.id || null;
   useEffect(() => {
     let active = true;
     void Promise.resolve().then(async () => {
       if (!active) return;
-      if (user) {
+      if (userId) {
         await refreshOrganisations();
       } else {
         setOrganisations([]);
@@ -591,24 +608,43 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     return () => {
       active = false;
     };
-  }, [user, refreshOrganisations, setActiveOrg, setActiveProject]);
+  }, [userId, refreshOrganisations, setActiveOrg, setActiveProject]);
 
   // Load projects for active organization
+  const activeOrgId = activeOrg?.id || null;
   const refreshProjects = useCallback(async () => {
-    if (!user || !activeOrg) {
+    if (!userId || !activeOrgId) {
       setProjects([]);
       setActiveProject(null);
       return;
     }
+    const targetOrgId = activeOrgId;
     setIsLoadingProjects(true);
     try {
-      const projs = await api.projects.list(activeOrg.id);
+      const projs = await api.projects.list(targetOrgId);
+      // Discard stale response if user switched organisations while request was in flight
+      if (activeOrgIdRef.current !== targetOrgId) return;
       setProjects(projs);
       if (projs.length > 0) {
         const storedProjId = typeof window !== "undefined" ? localStorage.getItem("handover_active_project_id") : null;
-        const preferredProj =
-          (storedProjId ? projs.find((p) => p.id === storedProjId) : null) ?? projs[0] ?? null;
-        setActiveProject((current) => (current ? (projs.find((p) => p.id === current.id) ?? preferredProj) : preferredProj));
+        const urlMatch = pathnameRef.current?.match(/^\/projects\/([a-zA-Z0-9_-]+)/);
+        const urlProjId = urlMatch && urlMatch[1] && urlMatch[1] !== "new" ? urlMatch[1] : null;
+        const urlProj = urlProjId ? projs.find((p) => p.id === urlProjId || p.slug === urlProjId) : null;
+        const storedProj = storedProjId ? projs.find((p) => p.id === storedProjId) : null;
+        const preferredProj = urlProj ?? storedProj ?? projs[0] ?? null;
+
+        setActiveProject((current) => {
+          if (urlProj) return urlProj;
+          if (current) {
+            const matchedCurrent = projs.find((p) => p.id === current.id);
+            if (matchedCurrent) return matchedCurrent;
+            // Never overwrite an active project from another org with projs[0]
+            if (current.organisation_id && current.organisation_id !== targetOrgId) {
+              return current;
+            }
+          }
+          return preferredProj;
+        });
       } else {
         setActiveProject(null);
       }
@@ -623,35 +659,69 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoadingProjects(false);
     }
-  }, [user, activeOrg, addToast, setActiveProject]);
+  }, [userId, activeOrgId, addToast, setActiveProject]);
 
   useEffect(() => {
-    if (!user || !activeOrg) return;
+    if (!userId || !activeOrgId) return;
     let active = true;
     void Promise.resolve().then(async () => {
       if (active) {
         await refreshProjects();
+        if (active) {
+          void prefetchOrganisationAssets(activeOrgId, userId);
+        }
       }
     });
     return () => {
       active = false;
     };
-  }, [activeOrg, refreshProjects]);
+  }, [userId, activeOrgId, refreshProjects]);
 
-  // Synchronize active project from URL pathname whenever navigating to /projects/:id
+  // Background-warm all projects in the workspace whenever user is on any page/dashboard
+  const projectIdsKey = projects.map((p) => p.id).join(",");
   useEffect(() => {
-    if (!pathname) return;
-    const match = pathname.match(/^\/projects\/([a-zA-Z0-9_-]+)/);
-    if (!match || !match[1] || match[1] === "new") return;
-    const urlProjectId = match[1];
+    if (!userId || projects.length === 0) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      if (!active) return;
+      void prefetchAllWorkspaceProjects(
+        projects.map((p) => p.id),
+        activeProjectIdRef.current,
+        userId
+      );
+    }, 600);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [userId, projectIdsKey]);
 
-    if (activeProject?.id === urlProjectId) return;
+  // Synchronize active project from URL pathname ONLY when navigating to a new /projects/:id URL
+  const lastSyncedUrlProjectIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pathname) {
+      lastSyncedUrlProjectIdRef.current = null;
+      return;
+    }
+    const match = pathname.match(/^\/projects\/([a-zA-Z0-9_-]+)/);
+    if (!match || !match[1] || match[1] === "new") {
+      lastSyncedUrlProjectIdRef.current = null;
+      return;
+    }
+    const urlProjectId = match[1];
+    if (lastSyncedUrlProjectIdRef.current === urlProjectId) return;
+
+    if (activeProjectIdRef.current === urlProjectId) {
+      lastSyncedUrlProjectIdRef.current = urlProjectId;
+      return;
+    }
 
     const matchedProject = projects.find(
       (p) => p.id === urlProjectId || p.slug === urlProjectId
     );
 
     if (matchedProject) {
+      lastSyncedUrlProjectIdRef.current = urlProjectId;
       setActiveProject(matchedProject);
     } else {
       let cancelled = false;
@@ -659,8 +729,9 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         .get(urlProjectId)
         .then((proj) => {
           if (!cancelled && proj) {
+            lastSyncedUrlProjectIdRef.current = urlProjectId;
             setActiveProject(proj);
-            if (proj.organisation_id && activeOrg?.id !== proj.organisation_id) {
+            if (proj.organisation_id && activeOrgIdRef.current !== proj.organisation_id) {
               const org = organisations.find((o) => o.id === proj.organisation_id);
               if (org) setActiveOrg(org);
             }
@@ -673,7 +744,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         cancelled = true;
       };
     }
-  }, [pathname, projects, activeProject?.id, organisations, activeOrg?.id, setActiveProject, setActiveOrg]);
+  }, [pathname, projects, organisations, setActiveProject, setActiveOrg]);
 
   // Load project overview
   const refreshOverview = useCallback(async () => {
@@ -682,9 +753,16 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       return;
     }
     const currentProjectId = activeProject.id;
-    setIsLoadingOverview(true);
+    const cachedOverview = getCachedGraph<ProjectOverview>(`proj_overview:${currentProjectId}`, undefined, user.id);
+    if (cachedOverview) {
+      setOverview(cachedOverview);
+      setIsLoadingOverview(false);
+    } else {
+      setIsLoadingOverview(true);
+    }
     try {
       const ov = await api.projects.getOverview(currentProjectId);
+      setCachedGraph(`proj_overview:${currentProjectId}`, ov, user.id);
       setActiveProjectInternal((curr) => {
         if (curr?.id === currentProjectId) {
           setOverview(ov);
@@ -766,19 +844,24 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
 
   // Load project sources & org connections
   const refreshSources = useCallback(async () => {
-    if (!user || !activeProject || !activeOrg) {
+    if (!user || !activeOrg) {
       setSourceMappings([]);
       setOrgConnections([]);
       return;
     }
+    const targetOrgId = activeOrg.id;
+    const targetProjectId = activeProject?.id || null;
     setIsLoadingSources(true);
     try {
       clearApiCache(`/projects/${activeProject.id}/sources`);
       clearApiCache(`/organisations/${activeOrg.id}/sources`);
       const [mappingsRes, connsRes] = await Promise.allSettled([
-        api.sources.listProjectMappings(activeProject.id),
-        api.sources.listOrgConnections(activeOrg.id),
+        targetProjectId
+          ? api.sources.listProjectMappings(targetProjectId)
+          : Promise.resolve([]),
+        api.sources.listOrgConnections(targetOrgId),
       ]);
+      if (activeOrgIdRef.current !== targetOrgId) return;
       if (mappingsRes.status === "fulfilled") {
         setSourceMappings(mappingsRes.value);
       }
@@ -792,6 +875,11 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       setIsLoadingSources(false);
     }
   }, [user, activeProject, activeOrg]);
+
+  useEffect(() => {
+    if (!userId || !activeOrgId) return;
+    void refreshSources();
+  }, [userId, activeOrgId, refreshSources]);
 
   // Load evidence list and metrics
   const isFetchingEvidenceRef = useRef(false);
@@ -1171,27 +1259,26 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     lastLoadedProjectIdRef.current = activeProjectId;
 
     let active = true;
+    let prefetchTimer: ReturnType<typeof setTimeout> | null = null;
     void Promise.resolve().then(() => {
       if (!active) return;
-      const isOverviewRoute =
-        !pathname ||
-        pathname === "/overview" ||
-        pathname === "/dashboard" ||
-        Boolean(pathname.match(/^\/projects\/[^/]+$/));
-      const isSourcesRoute = Boolean(
-        pathname?.includes("/evidence") || pathname?.includes("/sources")
-      );
-      if (isOverviewRoute) void refreshOverview();
+      // Load workspace context first, then warm all graph/subpage caches with bounded concurrency
+      void refreshOverview();
       void refreshMembers();
-      if (isSourcesRoute) {
-        void refreshSources();
-        void refreshEvidence();
-      }
+      void refreshSources();
+      void refreshEvidence();
       void refreshFindings();
       void refreshVerification();
+      void refreshHandovers();
+      prefetchTimer = setTimeout(() => {
+        if (active) {
+          void prefetchProjectAssets(activeProjectId, currentUserId);
+        }
+      }, 250);
     });
     return () => {
       active = false;
+      if (prefetchTimer) clearTimeout(prefetchTimer);
     };
   }, [
     currentUserId,
@@ -1357,6 +1444,26 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       message: "Participant role updated successfully",
     });
   };
+
+  const syncMemberNameUpdate = useCallback((userId: string, fullName: string) => {
+    setMembers((prev) =>
+      prev.map((m) =>
+        m.user_id === userId
+          ? { ...m, full_name: fullName, user_full_name: fullName }
+          : m
+      )
+    );
+    if (user?.id === userId) {
+      const updatedUser = { ...user, full_name: fullName };
+      setUser(updatedUser);
+      setStoredUser(updatedUser);
+    }
+    invalidateGraphCache("rel_");
+    invalidateGraphCache("ki_");
+    void refreshMembers();
+    void refreshOverview();
+    void refreshProjects();
+  }, [user, refreshMembers, refreshOverview, refreshProjects]);
 
   // Source actions
   const connectSource = async (provider: "github" | "jira" | "slack", token: string, accountId: string) => {
@@ -1574,6 +1681,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     isLoadingMembers,
     addMember,
     updateMember,
+    syncMemberNameUpdate,
     refreshMembers,
     sourceMappings,
     orgConnections,

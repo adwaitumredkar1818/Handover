@@ -7,6 +7,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db_session, require_project_permission
@@ -14,6 +15,7 @@ from app.core.cache.local_cache import local_response_cache
 from app.core.exceptions import NotFoundError
 from app.models.evidence import EvidenceItem
 from app.models.knowledge import KnowledgeItem
+from app.models.verification import VerificationCase
 from app.schemas.verification import (
     ApproveFindingRequest,
     AssignReviewerRequest,
@@ -39,12 +41,17 @@ router = APIRouter(tags=["Verification Center"])
 
 def _invalidate_project_caches(project_id: uuid.UUID) -> None:
     """Clear short-lived L1 response caches on verification mutations."""
+    local_response_cache.invalidate_prefix(f"ki_findings:{project_id}:")
     local_response_cache.invalidate_prefix(f"ki_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"ki_domains:{project_id}:")
     local_response_cache.invalidate_prefix(f"ki_summary:{project_id}:")
     local_response_cache.invalidate_prefix(f"rel_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"contrib_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"verification_summary:{project_id}:")
+
+
+def _invalidate_ki_caches(project_id: uuid.UUID) -> None:
+    _invalidate_project_caches(project_id)
 
 
 class DirectReviewFindingRequest(BaseModel):
@@ -59,6 +66,42 @@ class CaseEvidenceResponse(BaseModel):
     supporting_evidence: list[dict[str, Any]] = Field(default_factory=list)
     conflicts: list[dict[str, Any]] = Field(default_factory=list)
 
+
+@router.post("/projects/{project_id}/verification/target-case")
+def ensure_target_verification_case(
+    project_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.knowledge.review"))
+    ],
+    session: Annotated[Session, Depends(get_db_session)],
+    target_type: str = Query(...),
+    target_id: uuid.UUID = Query(...),
+) -> dict[str, object]:
+    """Fast indexed lookup (or lazy sync) of a VerificationCase by target_type + target_id."""
+    vc = session.execute(
+        select(VerificationCase).where(
+            VerificationCase.project_id == project_ctx.project.id,
+            VerificationCase.target_type == target_type,
+            VerificationCase.target_id == target_id,
+        )
+    ).scalar_one_or_none()
+    if vc is None:
+        VerificationEngine(session).sync_project_findings(project_ctx.project.id)
+        session.commit()
+        vc = session.execute(
+            select(VerificationCase).where(
+                VerificationCase.project_id == project_ctx.project.id,
+                VerificationCase.target_type == target_type,
+                VerificationCase.target_id == target_id,
+            )
+        ).scalar_one_or_none()
+    if vc is None:
+        raise NotFoundError("Verification case not found for target.", code="VERIFICATION_CASE_NOT_FOUND")
+    return {
+        "id": str(vc.id),
+        "version": vc.version,
+        "case_status": str(getattr(vc.case_status, "value", vc.case_status)),
+    }
 @router.get(
     "/projects/{project_id}/verification/summary",
     response_model=VerificationSummaryResponse,

@@ -34,6 +34,7 @@ from app.schemas.organisation import (
     OrganisationMemberResponse,
     OrganisationResponse,
     RemoveMembershipResponse,
+    UpdateOrganisationMemberNameRequest,
     UpdateOrganisationMemberRoleRequest,
     UpdateOrganisationRequest,
 )
@@ -183,6 +184,29 @@ def update_organisation_member_role(
 ) -> OrganisationMemberResponse:
     """Update an active member's organisation-scoped role with escalation and owner guards."""
     return org_service.update_member_role(
+        ctx=org_ctx,
+        target_user_id=user_id,
+        payload=payload,
+    )
+
+
+@router.patch(
+    "/organisations/{organisation_id}/members/{user_id}/name",
+    response_model=OrganisationMemberResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update an organisation member's display name (manager or self)",
+)
+def update_organisation_member_name(
+    user_id: uuid.UUID,
+    payload: UpdateOrganisationMemberNameRequest,
+    org_ctx: Annotated[
+        OrganisationContext,
+        Depends(require_organisation_permission("organisation.read")),
+    ],
+    org_service: Annotated[OrganisationService, Depends(get_organisation_service)],
+) -> OrganisationMemberResponse:
+    """Update an active member's display name (User.full_name)."""
+    return org_service.update_member_name(
         ctx=org_ctx,
         target_user_id=user_id,
         payload=payload,

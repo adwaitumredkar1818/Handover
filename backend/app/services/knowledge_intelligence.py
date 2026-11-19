@@ -276,7 +276,25 @@ class KnowledgeIntelligenceService:
         offset: int = 0,
     ) -> KnowledgeItemListResponse:
         """List findings filtered by source ACLs and canonical domain or legacy category."""
-        return self._reconstruction_service.list_knowledge_items(
+        has_manage = project_ctx.has_permission("project.manage")
+        is_simple_query = not any(
+            [support_classification, normalised_status, person, source_provider, evidence_id, date_from, date_to, stale_only]
+        )
+        cache_key: str | None = None
+        if is_simple_query:
+            cache_key = (
+                f"ki_findings:{project_ctx.project.id}:{project_ctx.user_id}:{int(has_manage)}:"
+                f"{domain or ''}:{category or ''}:{epistemic_status or ''}:{review_status or ''}:"
+                f"{int(include_stale)}:{int(include_synthetic)}:{limit}:{offset}"
+            )
+            cached = local_response_cache.get(cache_key)
+            if cached is not None:
+                try:
+                    return KnowledgeItemListResponse.model_validate(cached)
+                except Exception:
+                    local_response_cache.delete(cache_key)
+
+        result = self._reconstruction_service.list_knowledge_items(
             project_ctx=project_ctx,
             category=domain or category,
             epistemic_status=epistemic_status,
@@ -294,6 +312,9 @@ class KnowledgeIntelligenceService:
             limit=limit,
             offset=offset,
         )
+        if cache_key is not None:
+            local_response_cache.set(cache_key, result.model_dump(mode="json"), ttl_seconds=300)
+        return result
 
     def get_finding_detail(
         self,

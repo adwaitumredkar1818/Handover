@@ -281,7 +281,7 @@ def create_organisation_source(
         SourceConnection.organisation_id == organisation_id,
         SourceConnection.provider == provider_lower,
         SourceConnection.external_workspace_id == account_identifier,
-        SourceConnection.status == "active",
+        SourceConnection.status != "disconnected",
     )
     existing_conn = session.execute(stmt).scalars().first()
 
@@ -290,6 +290,9 @@ def create_organisation_source(
 
     if existing_conn:
         conn = existing_conn
+        conn.status = "active"
+        conn.last_error_code = None
+        conn.last_error_summary = None
         conn.display_name = display_name
         conn.metadata_json = conn_metadata
         # Update or create user authorization
@@ -386,7 +389,7 @@ def list_organisation_sources(
 
     stmt = select(SourceConnection).where(
         SourceConnection.organisation_id == organisation_id,
-        SourceConnection.status == "active",
+        SourceConnection.status != "disconnected",
     )
     connections = session.execute(stmt).scalars().all()
     items = [

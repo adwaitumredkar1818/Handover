@@ -9,8 +9,8 @@ from collections import defaultdict
 from datetime import UTC
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, joinedload, load_only, selectinload
 
 from app.core.security import utc_now
 from app.models.audit import AuditLog
@@ -684,7 +684,7 @@ class ContributionAttributionService:
         self,
         *,
         project_id: uuid.UUID,
-        accessible_evidence_ids: set[uuid.UUID],
+        accessible_evidence_ids: set[uuid.UUID] | None,
         has_project_manage: bool,
         contributor_type_filter: str | None = None,
         review_status_filter: str | None = None,
@@ -694,8 +694,10 @@ class ContributionAttributionService:
             self._session.execute(
                 select(ContributionAttribution)
                 .options(
-                    selectinload(ContributionAttribution.evidence_item).defer(
-                        EvidenceItem.metadata_json
+                    joinedload(ContributionAttribution.evidence_item).load_only(
+                        EvidenceItem.id,
+                        EvidenceItem.category,
+                        EvidenceItem.title,
                     )
                 )
                 .where(ContributionAttribution.project_id == project_id)
@@ -706,25 +708,35 @@ class ContributionAttributionService:
         memberships = list(
             self._session.execute(
                 select(ProjectMembership)
-                .options(selectinload(ProjectMembership.user), selectinload(ProjectMembership.role))
+                .options(joinedload(ProjectMembership.user), joinedload(ProjectMembership.role))
                 .where(ProjectMembership.project_id == project_id, ProjectMembership.status == "active")
             )
             .scalars()
             .all()
         )
         pm_by_id = {pm.id: pm for pm in memberships}
-        roster_rows = list(
-            self._session.execute(
-                select(TeamRosterMember).where(TeamRosterMember.project_id == project_id)
+        needed_roster_ids = {
+            rid for r in rows if (rid := getattr(r, "matched_roster_member_id", None)) is not None
+        }
+        roster_rows = (
+            list(
+                self._session.execute(
+                    select(TeamRosterMember).where(
+                        TeamRosterMember.project_id == project_id,
+                        TeamRosterMember.id.in_(needed_roster_ids),
+                    )
+                )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
+            if needed_roster_ids
+            else []
         )
         roster_by_id = {r.id: r for r in roster_rows}
 
         grouped: dict[str, dict[str, Any]] = {}
         for row in rows:
-            if row.evidence_item_id not in accessible_evidence_ids:
+            if accessible_evidence_ids is not None and row.evidence_item_id not in accessible_evidence_ids:
                 continue
             meta = row.metadata_json or {}
             ckey = str(meta.get("contributor_key") or f"id:{row.contributor_identifier.lower()}")
@@ -734,7 +746,9 @@ class ContributionAttributionService:
                 matched_pm = pm_by_id.get(row.matched_project_membership_id) if row.matched_project_membership_id else None
                 matched_roster_id = getattr(row, "matched_roster_member_id", None)
                 matched_roster = roster_by_id.get(matched_roster_id) if matched_roster_id else None
-                has_match = matched_pm is not None or matched_roster is not None
+                matched_inv_id = meta.get("matched_invitation_id")
+                matched_inv_name = meta.get("matched_invitation_name")
+                has_match = matched_pm is not None or matched_roster is not None or bool(matched_inv_id)
                 effective_pm_id = str(matched_pm.id) if matched_pm is not None else None
                 effective_ctype = (
                     row.contributor_type
@@ -748,15 +762,16 @@ class ContributionAttributionService:
                 )
                 suggested_pm_id = meta.get("suggested_project_membership_id")
                 suggested_pm = pm_by_id.get(uuid.UUID(suggested_pm_id)) if suggested_pm_id else None
+                roster_name = getattr(matched_roster, "full_name", None) or getattr(matched_roster, "display_name", None) if matched_roster else None
                 entry = {
                     "contributor_key": ckey,
                     "display_name": (
                         matched_pm.user.full_name
                         if matched_pm and matched_pm.user
                         else (
-                            matched_roster.display_name
-                            if matched_roster
-                            else (meta.get("git_author_name") or row.contributor_identifier)
+                            roster_name
+                            or matched_inv_name
+                            or (meta.get("git_author_name") or row.contributor_identifier)
                         )
                     ),
                     "github_login": meta.get("github_author_login"),
@@ -772,7 +787,11 @@ class ContributionAttributionService:
                     "matched_member_name": (
                         matched_pm.user.full_name
                         if matched_pm and matched_pm.user
-                        else (f"{matched_roster.display_name} (Invited)" if matched_roster else None)
+                        else (
+                            roster_name
+                            if roster_name
+                            else (f"{matched_inv_name} (Invited)" if matched_inv_name else None)
+                        )
                     ),
                     "suggested_project_membership_id": str(suggested_pm.id) if suggested_pm else None,
                     "suggested_member_name": suggested_pm.user.full_name if suggested_pm and suggested_pm.user else None,
@@ -876,7 +895,7 @@ class ContributionAttributionService:
             "evidence_ids": [],
         })
         for row in rows:
-            if row.evidence_item_id not in accessible_evidence_ids:
+            if accessible_evidence_ids is not None and row.evidence_item_id not in accessible_evidence_ids:
                 continue
             meta = row.metadata_json or {}
             # Only count directed work if the row is from a bot / AI tool
@@ -987,7 +1006,7 @@ class ContributionAttributionService:
         memberships = list(
             self._session.execute(
                 select(ProjectMembership)
-                .options(selectinload(ProjectMembership.user), selectinload(ProjectMembership.role))
+                .options(joinedload(ProjectMembership.user), joinedload(ProjectMembership.role))
                 .where(ProjectMembership.project_id == project_id, ProjectMembership.status == "active")
             )
             .scalars()
@@ -996,7 +1015,7 @@ class ContributionAttributionService:
         org_memberships = list(
             self._session.execute(
                 select(OrganisationMembership)
-                .options(selectinload(OrganisationMembership.user), selectinload(OrganisationMembership.role))
+                .options(joinedload(OrganisationMembership.user), joinedload(OrganisationMembership.role))
                 .where(
                     OrganisationMembership.organisation_id == project.organisation_id,
                     OrganisationMembership.status == "active",
@@ -1008,7 +1027,7 @@ class ContributionAttributionService:
         invitations = list(
             self._session.execute(
                 select(OrganisationInvitation)
-                .options(selectinload(OrganisationInvitation.role))
+                .options(joinedload(OrganisationInvitation.role))
                 .where(
                     OrganisationInvitation.organisation_id == project.organisation_id,
                     OrganisationInvitation.status == "pending",
@@ -1164,13 +1183,7 @@ class ContributionAttributionService:
         """Apply human identity review decision across matching ContributionAttribution records."""
         rows = list(
             self._session.execute(
-                select(ContributionAttribution)
-                .options(
-                    selectinload(ContributionAttribution.evidence_item).defer(
-                        EvidenceItem.metadata_json
-                    )
-                )
-                .where(ContributionAttribution.project_id == project_id)
+                select(ContributionAttribution).where(ContributionAttribution.project_id == project_id)
             )
             .scalars()
             .all()
@@ -1201,6 +1214,7 @@ class ContributionAttributionService:
 
         now = utc_now()
         membership: ProjectMembership | None = None
+        matched_inv_payload: dict[str, str] | None = None
         if action == "match_member":
             if project_membership_id is not None:
                 membership = self._session.get(ProjectMembership, project_membership_id)
@@ -1211,7 +1225,7 @@ class ContributionAttributionService:
             elif invitation_id is not None:
                 inv = self._session.execute(
                     select(OrganisationInvitation)
-                    .options(selectinload(OrganisationInvitation.role))
+                    .options(joinedload(OrganisationInvitation.role))
                     .where(
                         OrganisationInvitation.id == invitation_id,
                         OrganisationInvitation.organisation_id == organisation_id,
@@ -1223,34 +1237,16 @@ class ContributionAttributionService:
                     from app.core.exceptions import NotFoundError
 
                     raise NotFoundError("Pending invitation not found.", code="INVITATION_NOT_FOUND")
-                # Record identity attribution via a project TeamRosterMember without accepting the invitation
+                # Record identity attribution in metadata_json without accepting the invitation
                 # or creating a ProjectMembership (preserves project access boundary).
-                inv_email = (inv.email or "").strip().lower()
-                existing_roster = (
-                    self._session.execute(
-                        select(TeamRosterMember).where(
-                            TeamRosterMember.project_id == project_id,
-                            func.lower(TeamRosterMember.email) == inv_email,
-                        )
-                    ).scalar_one_or_none()
-                    if inv_email
-                    else None
-                )
-                if existing_roster is None:
-                    local_name = inv.email.split("@", 1)[0] if inv.email and "@" in inv.email else (inv.email or "Invited Member")
-                    existing_roster = TeamRosterMember(
-                        id=uuid.uuid4(),
-                        project_id=project_id,
-                        display_name=local_name,
-                        email=inv.email,
-                        role_title=inv.role.name if getattr(inv, "role", None) else "invited_member",
-                        notes="Linked from pending organisation invitation via Identity Review",
-                        created_by_id=reviewer_user_id,
-                    )
-                    self._session.add(existing_roster)
-                    self._session.flush()
-                roster_member_id = existing_roster.id
+                local_name = inv.email.split("@", 1)[0] if inv.email and "@" in inv.email else (inv.email or "Invited Member")
+                matched_inv_payload = {
+                    "matched_invitation_id": str(inv.id),
+                    "matched_invitation_name": local_name,
+                    "matched_invitation_email": inv.email or "",
+                }
                 project_membership_id = None
+                roster_member_id = None
             else:
                 from app.core.exceptions import BadRequestError
 
@@ -1305,6 +1301,12 @@ class ContributionAttributionService:
         for row in matching:
             meta = dict(row.metadata_json or {})
             meta["contributor_key"] = contributor_key
+            if matched_inv_payload is not None:
+                meta.update(matched_inv_payload)
+            else:
+                meta.pop("matched_invitation_id", None)
+                meta.pop("matched_invitation_name", None)
+                meta.pop("matched_invitation_email", None)
             history = list(meta.get("review_history") or [])
             history.append(
                 {

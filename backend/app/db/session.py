@@ -61,8 +61,8 @@ def create_db_engine(settings: Settings) -> Engine:
     engine = create_engine(
         raw_url,
         pool_pre_ping=False,
-        pool_size=5,
-        max_overflow=5,
+        pool_size=16,
+        max_overflow=20,
         pool_timeout=30,
         pool_recycle=1800,
         connect_args=connect_args,
@@ -72,8 +72,8 @@ def create_db_engine(settings: Settings) -> Engine:
     def _ping_connection_if_idle(dbapi_connection, connection_record, connection_proxy):
         now = time.monotonic()
         last_used = connection_record.info.get("last_used")
-        # If connection was used within the last 30 seconds, skip the remote ping
-        if last_used is not None and (now - last_used) < 30.0:
+        # If connection was used within the last 120 seconds, skip the remote ping
+        if last_used is not None and (now - last_used) < 120.0:
             return
         cursor = dbapi_connection.cursor()
         try:

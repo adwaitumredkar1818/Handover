@@ -189,7 +189,7 @@ export function buildExpandableProjection({
     });
 
     const isExpanded = effectiveExpanded.has(groupId);
-    const desiredLimit = revealedCountsByGroup.get(groupId) ?? DEFAULT_GROUP_REVEAL_LIMIT;
+    const desiredLimit = revealedCountsByGroup.get(groupId) ?? sortedChildren.length;
     const revealedChildren = isExpanded ? sortedChildren.slice(0, desiredLimit) : [];
 
     groups.push({

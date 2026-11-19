@@ -399,43 +399,112 @@ export function KnowledgeIntelligenceWorkspace({
       });
       return;
     }
+    const nodeDetailCacheKey = `ki_node_detail:${projectId}:${mode}:${raw.id}`;
+    const cachedDetail = getCachedGraph<{
+      node: KIGraphNode;
+      evidence_refs: Array<{
+        evidence_id: string;
+        title: string;
+        source_type: string;
+        source_url?: string | null;
+        supporting_excerpt?: string | null;
+      }>;
+      adjacent_edges: Array<Record<string, unknown>>;
+      related_nodes: Array<Record<string, unknown>>;
+    }>(nodeDetailCacheKey);
+    if (cachedDetail) {
+      setSelectedNodeDetail(cachedDetail);
+      return;
+    }
+
+    // Open drawer immediately at 0ms using in-memory node + graph adjacency, then enrich evidence_refs
+    const localAdjEdges = rawEdges
+      .filter((e) => e.source === raw.id || e.target === raw.id)
+      .map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        relationship_type: e.relationship_type,
+        label: e.label,
+      }));
+    const neighborIds = new Set(
+      localAdjEdges.map((e) => (e.source === raw.id ? e.target : e.source))
+    );
+    const localRelated = rawNodes
+      .filter((n) => neighborIds.has(n.id))
+      .map((n) => ({
+        id: n.id,
+        label: n.label,
+        entity_type: n.entity_type,
+      }));
+
+    setSelectedNodeDetail({
+      node: raw,
+      evidence_refs: [],
+      adjacent_edges: localAdjEdges,
+      related_nodes: localRelated,
+    });
+
     try {
       const detail = await api.knowledgeIntelligence.getGraphNodeDetail(projectId, mode, raw.id);
-      setSelectedNodeDetail({
+      const enriched = {
         node: detail.node as unknown as KIGraphNode,
         evidence_refs: detail.evidence_refs || [],
-        adjacent_edges: detail.adjacent_edges || [],
-        related_nodes: detail.related_nodes || [],
-      });
+        adjacent_edges: detail.adjacent_edges || localAdjEdges,
+        related_nodes: detail.related_nodes || localRelated,
+      };
+      setCachedGraph(nodeDetailCacheKey, enriched);
+      setSelectedNodeDetail((prev) => (prev?.node.id === raw.id ? enriched : prev));
     } catch {
-      setSelectedNodeDetail({
-        node: raw,
-        evidence_refs: [],
-        adjacent_edges: [],
-        related_nodes: [],
-      });
+      // Keep the already-open immediate detail view
     }
   };
 
   const handleVerifyFinding = async (findingId: string, decision: "approve" | "flag" | "reject") => {
     setActionMessage(null);
+    const nextReviewStatus =
+      decision === "approve" ? "approved" : decision === "flag" ? "unresolved" : "rejected";
+    const snapshot =
+      domainFindings.length > 0
+        ? domainFindings
+        : (liveFindings as unknown as Record<string, unknown>[]);
+
+    // Optimistically update UI immediately (0ms perceived latency)
+    setDomainFindings(
+      snapshot.map((item) =>
+        String(item.id) === findingId
+          ? {
+              ...item,
+              review_status: nextReviewStatus,
+              ...(decision === "approve" ? { epistemic_status: "human_verified" } : {}),
+            }
+          : item
+      )
+    );
+    setActionMessage("Verification decision recorded.");
+
     try {
-      const kCase = await api.verification.assessTarget(projectId, "knowledge_item", findingId);
+      const kCase = await api.verification.ensureTargetCase(projectId, "knowledge_item", findingId);
       const caseId = kCase?.id ? String(kCase.id) : null;
       if (!caseId) {
+        setDomainFindings(snapshot);
         setActionMessage("Could not retrieve verification case for this finding.");
         return;
       }
+      const expectedVersion = typeof kCase.version === "number" ? kCase.version : 1;
       if (decision === "approve") {
-        await api.verification.approveCase(projectId, caseId, "Verified in Knowledge Intelligence");
+        await api.verification.approveCase(projectId, caseId, expectedVersion, "Verified in Knowledge Intelligence");
       } else if (decision === "flag") {
-        await api.verification.markUnresolved(projectId, caseId, "Flagged in Knowledge Intelligence");
+        await api.verification.markUnresolved(projectId, caseId, "Flagged in Knowledge Intelligence", expectedVersion);
       } else {
-        await api.verification.rejectCase(projectId, caseId, "Rejected in Knowledge Intelligence");
+        await api.verification.rejectCase(projectId, caseId, expectedVersion, "Rejected in Knowledge Intelligence");
       }
-      setActionMessage("Verification decision recorded.");
-      await Promise.all([loadDomains(), refreshFindings(), refreshVerification()]);
+      invalidateGraphCache(`ki_domains:${projectId}`);
+      invalidateGraphCache(`ki_graph:${projectId}`);
+      // Sync background context caches without blocking UI responsiveness
+      void Promise.all([loadDomains(), refreshFindings(), refreshVerification()]);
     } catch (err) {
+      setDomainFindings(snapshot);
       setActionMessage(err instanceof Error ? err.message : "Failed to submit verification.");
     }
   };

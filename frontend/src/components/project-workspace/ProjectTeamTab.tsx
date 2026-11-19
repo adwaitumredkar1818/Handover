@@ -9,6 +9,7 @@ import {
   Lock,
   Check,
   Trash2,
+  Pencil,
   Loader2,
   AlertCircle,
 } from "lucide-react";
@@ -22,6 +23,7 @@ import {
   Td,
   PersonCell,
   Select,
+  Input,
   Modal,
   Field,
   Textarea,
@@ -67,7 +69,7 @@ export interface ProjectTeamTabProps {
 }
 
 export function ProjectTeamTab({ project, canManage }: ProjectTeamTabProps) {
-  const { user: currentUser, activeOrg } = useLiveApp();
+  const { user: currentUser, activeOrg, syncMemberNameUpdate, addToast } = useLiveApp();
 
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [orgMembers, setOrgMembers] = useState<OrganisationMember[]>([]);
@@ -81,11 +83,59 @@ export function ProjectTeamTab({ project, canManage }: ProjectTeamTabProps) {
   const [responsibility, setResponsibility] = useState("");
   const [isAddingMember, setIsAddingMember] = useState(false);
 
+  // Edit Member Name Modal State
+  const [memberToEditName, setMemberToEditName] = useState<ProjectMember | null>(null);
+  const [editedName, setEditedName] = useState("");
+  const [isUpdatingName, setIsUpdatingName] = useState(false);
+
   // Remove Member Confirm Dialog State
   const [memberToRemove, setMemberToRemove] = useState<ProjectMember | null>(
     null
   );
   const [isRemovingMember, setIsRemovingMember] = useState(false);
+
+  const handleOpenEditName = (member: ProjectMember) => {
+    setMemberToEditName(member);
+    setEditedName(member.full_name || member.user_full_name || "");
+    setErrorMessage(null);
+  };
+
+  const handleSaveName = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!memberToEditName) return;
+    const trimmed = editedName.trim();
+    if (!trimmed) return;
+    setIsUpdatingName(true);
+    setErrorMessage(null);
+    try {
+      const updated = await api.members.updateName(
+        project.id,
+        memberToEditName.user_id,
+        trimmed
+      );
+      const nextName = updated.full_name || updated.user_full_name || trimmed;
+      setMembers((prev) =>
+        prev.map((m) =>
+          m.user_id === memberToEditName.user_id
+            ? { ...m, full_name: nextName, user_full_name: nextName }
+            : m
+        )
+      );
+      syncMemberNameUpdate(memberToEditName.user_id, nextName);
+      addToast({
+        type: "success",
+        title: "Name Updated",
+        message: `Updated member name to "${nextName}".`,
+      });
+      setMemberToEditName(null);
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : "Failed to update member name."
+      );
+    } finally {
+      setIsUpdatingName(false);
+    }
+  };
 
   // Load project members and parent organisation members
   const refreshMembers = async () => {
@@ -257,7 +307,7 @@ export function ProjectTeamTab({ project, canManage }: ProjectTeamTabProps) {
                   <Th>Project Role</Th>
                   <Th>Responsibilities</Th>
                   <Th className="text-center">Assigned Tasks</Th>
-                  {canManage && <Th className="w-12 text-right" />}
+                  <Th className="w-20 text-right" />
                 </tr>
               </thead>
               <tbody>
@@ -328,9 +378,19 @@ export function ProjectTeamTab({ project, canManage }: ProjectTeamTabProps) {
                           0
                         </span>
                       </Td>
-                      {canManage && (
-                        <Td className="text-right">
-                          {!isSelf && (
+                      <Td className="text-right">
+                        <div className="inline-flex items-center justify-end gap-1">
+                          {(canManage || isSelf) && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditName(m)}
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-navy hover:bg-slate-100 transition-colors cursor-pointer"
+                              title="Edit name"
+                            >
+                              <Pencil className="size-4" />
+                            </button>
+                          )}
+                          {canManage && !isSelf && (
                             <button
                               type="button"
                               onClick={() => setMemberToRemove(m)}
@@ -340,8 +400,8 @@ export function ProjectTeamTab({ project, canManage }: ProjectTeamTabProps) {
                               <Trash2 className="size-4" />
                             </button>
                           )}
-                        </Td>
-                      )}
+                        </div>
+                      </Td>
                     </tr>
                   );
                 })}
@@ -499,6 +559,43 @@ export function ProjectTeamTab({ project, canManage }: ProjectTeamTabProps) {
               onChange={(e) => setResponsibility(e.target.value)}
               placeholder="e.g. Lead for authentication microservices and Stripe webhooks."
               rows={2}
+            />
+          </Field>
+        </form>
+      </Modal>
+
+      {/* Edit Member Name Modal */}
+      <Modal
+        open={Boolean(memberToEditName)}
+        onClose={() => setMemberToEditName(null)}
+        title="Edit Member Name"
+        subtitle={memberToEditName?.email || memberToEditName?.user_email || ""}
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => setMemberToEditName(null)}
+              disabled={isUpdatingName}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => void handleSaveName()}
+              disabled={!editedName.trim() || isUpdatingName}
+            >
+              {isUpdatingName ? "Saving..." : "Save Name"}
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleSaveName} className="space-y-4">
+          <Field label="Full Name" required>
+            <Input
+              value={editedName}
+              onChange={(e) => setEditedName(e.target.value)}
+              placeholder="Enter member full name"
+              autoFocus
             />
           </Field>
         </form>
