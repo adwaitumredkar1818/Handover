@@ -4,6 +4,7 @@ import React, { useState, useMemo, useContext, useEffect, Suspense, type ReactNo
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useLiveApp } from '../../context/LiveAppContext'
 import { api } from '../../lib/api'
+import { TableSkeleton, SectionLoader } from '../loading'
 import {
   ScrollText as ScrollTextIcon,
   Bell,
@@ -346,7 +347,14 @@ export function SettingsTeam() {
                 </tr>
               </thead>
               <tbody>
-                {shown.map((p) => (
+                {loadingTeam && rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="p-4" role="status" aria-live="polite">
+                      <TableSkeleton rows={5} columns={5} />
+                    </td>
+                  </tr>
+                ) : (
+                  shown.map((p) => (
                   <tr key={p.id} className="hover:bg-slate-50/50">
                     <Td>
                       <div className="min-w-0">
@@ -420,7 +428,8 @@ export function SettingsTeam() {
                       )}
                     </Td>
                   </tr>
-                ))}
+                ))
+              )}
               </tbody>
             </Table>
           </Card>

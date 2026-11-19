@@ -186,7 +186,7 @@ export function ManagerDashboard() {
               </p>
               <p className="mt-0.5 text-[20px] font-semibold tracking-[-0.02em] text-navy tabular-nums font-mono">
                 {indexedChunks.toLocaleString()}{" "}
-                <span className="text-[12px] font-medium text-muted font-sans">chunks in ChromaDB</span>
+                <span className="text-[12px] font-medium text-muted font-sans">searchable chunks</span>
               </p>
             </div>
           </div>

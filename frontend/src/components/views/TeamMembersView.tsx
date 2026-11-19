@@ -13,9 +13,11 @@ import {
   Info,
   Building2,
   FolderGit2,
+  Loader2,
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { AdminPage } from "../figma-pages/AdminPage";
+import { TableSkeleton } from "../loading";
 
 export function TeamMembersView() {
   const {
@@ -30,14 +32,18 @@ export function TeamMembersView() {
   const [activeTab, setActiveTab] = useState<"project" | "org">(
     activeProject ? "project" : "org"
   );
+  const [updatingMemberId, setUpdatingMemberId] = useState<Record<string, boolean>>({});
 
   const handleRoleChange = async (memberId: string, transitionRole: string) => {
+    setUpdatingMemberId((prev) => ({ ...prev, [memberId]: true }));
     try {
       await updateMember(memberId, {
         transition_role: transitionRole || undefined,
       });
     } catch (err) {
       console.error(err);
+    } finally {
+      setUpdatingMemberId((prev) => ({ ...prev, [memberId]: false }));
     }
   };
 
@@ -136,7 +142,11 @@ export function TeamMembersView() {
           <span>Transition Responsibility</span>
         </div>
 
-        {members.length === 0 ? (
+        {isLoadingMembers ? (
+          <div className="p-4">
+            <TableSkeleton rows={4} columns={2} showSearch={false} />
+          </div>
+        ) : members.length === 0 ? (
           <div className="p-8 text-center">
             <Users className="w-10 h-10 text-[#69778D] mx-auto mb-2 opacity-50" />
             <div className="text-xs font-semibold text-[#25334B]">No Members Configured</div>
@@ -169,11 +179,15 @@ export function TeamMembersView() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  {updatingMemberId[member.id] && (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#4774A9]" />
+                  )}
                   <select
                     value={member.transition_role || ""}
+                    disabled={updatingMemberId[member.id]}
                     onChange={(e) => handleRoleChange(member.id, e.target.value)}
-                    className="px-3 py-1.5 rounded-lg border border-[#DCE3EB] text-xs font-semibold text-[#25334B] bg-white focus:outline-none focus:ring-1 focus:ring-[#4774A9]"
+                    className="px-3 py-1.5 rounded-lg border border-[#DCE3EB] text-xs font-semibold text-[#25334B] bg-white focus:outline-none focus:ring-1 focus:ring-[#4774A9] disabled:opacity-60"
                   >
                     <option value="">No Transition Role</option>
                     <option value="departing_owner">Departing Knowledge Owner</option>

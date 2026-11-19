@@ -42,6 +42,7 @@ import {
   Textarea,
   cn,
 } from '../figma-ui/index'
+import { CardSkeleton } from '../loading'
 import { api } from '../../lib/api'
 import type {
   HandoverDeliveryRecord,
@@ -370,15 +371,9 @@ export function SignoffApprovalPanel({
 
   if (isLoading && !workspace) {
     return (
-      <Card className="p-10">
-        <div className="flex flex-col items-center justify-center gap-3 text-center">
-          <Loader2 className="size-7 animate-spin text-brand" />
-          <p className="text-sm font-semibold text-navy">Loading signoff & publication workspace…</p>
-          <p className="text-xs text-muted">
-            Retrieving authoritative lifecycle state, 3-phase signoff progress, 4-gate approval eligibility, SHA-256 package hash, and recipient deliveries.
-          </p>
-        </div>
-      </Card>
+      <div className="p-4 space-y-4" role="status" aria-live="polite">
+        <CardSkeleton count={3} />
+      </div>
     )
   }
 

@@ -640,7 +640,7 @@ export function HandoverTable({ items, empty }: { items: Handover[]; empty?: Rea
           <thead><tr>{['Handover', 'Project', 'Outgoing → Incoming', 'Created', 'Progress', 'Review stage', 'Status'].map((h) => <th key={h} className="whitespace-nowrap border-b border-line bg-slate-50/70 px-4 py-2.5 text-xs font-medium text-muted first:pl-5 last:pr-5">{h}</th>)}</tr></thead>
           <tbody>
             {items.map((h) => {
-              const p = projects.find((x) => x.id === h.projectId) || (activeProject?.id === h.projectId ? activeProject : null) || s.allProjects.find((x) => x.id === h.projectId)
+              const p = projects.find((x) => x.id === h.projectId) || (activeProject?.id === h.projectId ? activeProject : null) || s.projects.find((x) => x.id === h.projectId)
               const pName = p?.name || activeProject?.name || 'Project'
               const outName = members.find((m) => m.user_id === h.outgoingId || m.id === h.outgoingId)?.full_name || (user?.id === h.outgoingId ? (user.full_name || user.email) : null) || personById(h.outgoingId)?.name || 'Member'
               const incName = h.incomingId ? (members.find((m) => m.user_id === h.incomingId || m.id === h.incomingId)?.full_name || (user?.id === h.incomingId ? (user.full_name || user.email) : null) || personById(h.incomingId)?.name || 'Member') : 'Unassigned'
@@ -661,7 +661,7 @@ export function HandoverTable({ items, empty }: { items: Handover[]; empty?: Rea
       </div>
       <ul className="divide-y divide-line md:hidden">
         {items.map((h) => {
-          const p = projects.find((x) => x.id === h.projectId) || (activeProject?.id === h.projectId ? activeProject : null) || s.allProjects.find((x) => x.id === h.projectId)
+          const p = projects.find((x) => x.id === h.projectId) || (activeProject?.id === h.projectId ? activeProject : null) || s.projects.find((x) => x.id === h.projectId)
           const pName = p?.name || activeProject?.name || 'Project'
           const outName = members.find((m) => m.user_id === h.outgoingId || m.id === h.outgoingId)?.full_name || (user?.id === h.outgoingId ? (user.full_name || user.email) : null) || personById(h.outgoingId)?.name || 'Member'
           const incName = h.incomingId ? (members.find((m) => m.user_id === h.incomingId || m.id === h.incomingId)?.full_name || (user?.id === h.incomingId ? (user.full_name || user.email) : null) || personById(h.incomingId)?.name || 'Member') : 'Unassigned'

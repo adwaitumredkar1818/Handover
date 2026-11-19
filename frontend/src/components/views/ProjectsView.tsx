@@ -30,6 +30,7 @@ import {
   EmptyState,
 } from "../ui";
 import { SourceIcon } from "../brand/brand";
+import { CardSkeleton, TableSkeleton } from "../loading";
 import {
   getProjectCode,
   getProjectColor,
@@ -197,10 +198,13 @@ export function ProjectsView() {
 
       {/* Content Area */}
       {isLoadingProjects ? (
-        <div className="flex items-center justify-center p-16 text-xs text-muted gap-2">
-          <Loader2 className="size-4 animate-spin text-brand" />
-          <span>Loading project workspaces...</span>
-        </div>
+        view === "grid" ? (
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            <CardSkeleton variant="project" count={6} />
+          </div>
+        ) : (
+          <TableSkeleton rows={6} columns={5} showSearch={false} />
+        )
       ) : projects.length === 0 ? (
         <Card>
           <EmptyState

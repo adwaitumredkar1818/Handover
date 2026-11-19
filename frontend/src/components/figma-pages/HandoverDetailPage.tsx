@@ -101,7 +101,7 @@ export function Report({ id }: { id: string }) {
   return (
     <HandoverLayout id={id} tab="report">
       {(h, _role, sectionsCtx) => {
-        const p = projects.find((x) => x.id === h.projectId) || (activeProject?.id === h.projectId ? activeProject : null) || s.allProjects.find((x) => x.id === h.projectId)
+        const p = projects.find((x) => x.id === h.projectId) || (activeProject?.id === h.projectId ? activeProject : null) || s.projects.find((x) => x.id === h.projectId)
         const pId = p?.id || h.projectId
         const pName = p?.name || activeProject?.name || 'Project'
         const outName = getMemberDisplayName(h.outgoingId, members, user)

@@ -35,9 +35,10 @@ import {
   Table,
   Copy,
   CheckCheck,
+  Loader2,
 } from "lucide-react";
 import Link from "next/link";
-import { api } from "../../lib/api";
+import { api, getApiBaseUrl } from "../../lib/api";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { ListSkeleton, AIAssistantThinking, ButtonLoader } from "../loading";
 import type {
@@ -104,6 +105,38 @@ export function AssistantWorkspaceView() {
   const [liveInvestigationStage, setLiveInvestigationStage] = useState<string | null>(null);
   const [liveInvestigationEvents, setLiveInvestigationEvents] = useState<string[]>([]);
   const [liveStreamingAnswer, setLiveStreamingAnswer] = useState<string>("");
+  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
+
+  // Elapsed timer active while asking
+  useEffect(() => {
+    let timer: NodeJS.Timeout | null = null;
+    if (asking) {
+      setElapsedSeconds(0);
+      timer = setInterval(() => {
+        setElapsedSeconds((prev) => prev + 1);
+      }, 1000);
+    } else {
+      setElapsedSeconds(0);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [asking]);
+
+  // Progressive stage progression during long synchronous or SSE fallback waits
+  useEffect(() => {
+    if (asking && !liveStreamingAnswer) {
+      if (elapsedSeconds >= 2 && elapsedSeconds < 6) {
+        setLiveInvestigationStage("planning");
+      } else if (elapsedSeconds >= 6 && elapsedSeconds < 12) {
+        setLiveInvestigationStage("retrieving");
+      } else if (elapsedSeconds >= 12 && elapsedSeconds < 20) {
+        setLiveInvestigationStage("delegating");
+      } else if (elapsedSeconds >= 20) {
+        setLiveInvestigationStage("synthesizing");
+      }
+    }
+  }, [asking, elapsedSeconds, liveStreamingAnswer]);
 
   // Form input
   const [inputValue, setInputValue] = useState<string>("");
@@ -307,8 +340,8 @@ export function AssistantWorkspaceView() {
 
       // 2. If investigation ID returned, listen to live SSE event stream
       if (invId) {
-        const token = localStorage.getItem("access_token");
-        const sseUrl = `${process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"}/api/v1/projects/${activeProject.id}/assistant/investigations/${invId}/events`;
+        const token = typeof window !== "undefined" ? localStorage.getItem("handover_access_token") : null;
+        const sseUrl = `${getApiBaseUrl()}/api/v1/projects/${activeProject.id}/assistant/investigations/${invId}/events`;
         
         let lastEventId = 0;
         let eventStreamClosed = false;
@@ -321,13 +354,13 @@ export function AssistantWorkspaceView() {
               setLiveInvestigationEvents((p) => [...p, "Formulating plan & expanding subqueries..."]);
             } else if (ev === "retrieval_started" || ev === "retrieval_progress") {
               setLiveInvestigationStage("retrieving");
-              setLiveInvestigationEvents((p) => [...p, "Querying ChromaDB vector index & PostgreSQL full-text search..."]);
+              setLiveInvestigationEvents((p) => [...p, "Searching semantic vector index & project documents..."]);
             } else if (ev === "agent_selected" || ev === "agent_started") {
               setLiveInvestigationStage("delegating");
               setLiveInvestigationEvents((p) => [...p, "Delegating subtask to specialized dynamic agent worker..."]);
             } else if (ev === "synthesis_started") {
               setLiveInvestigationStage("synthesizing");
-              setLiveInvestigationEvents((p) => [...p, "Synthesizing evidence with Ollama Qwen3 8B..."]);
+              setLiveInvestigationEvents((p) => [...p, "Synthesizing findings with project evidence..."]);
             } else if (ev === "token_delta") {
               setLiveInvestigationStage("streaming");
             } else if (ev === "investigation_completed") {
@@ -487,7 +520,7 @@ export function AssistantWorkspaceView() {
           id: `temp-err-${Date.now()}`,
           conversation_id: targetConvId!,
           sender_type: "assistant",
-          content: `⚠️ Error during knowledge retrieval: ${errorMsg}. Please verify connection to the Ollama runtime and PostgreSQL full-text search.`,
+          content: `⚠️ Error during knowledge retrieval: ${errorMsg}. Please verify that the AI assistant service and knowledge store are running.`,
           answer_status: "declined",
           citations: [],
           created_at: new Date().toISOString(),
@@ -851,7 +884,7 @@ export function AssistantWorkspaceView() {
             <div className="flex items-center gap-2">
               <span className="inline-flex items-center gap-1 text-[10px] font-mono bg-teal-800/80 text-teal-100 px-2 py-0.5 rounded-full border border-teal-600/50">
                 <Sparkles className="size-2.5 text-emerald-300" />
-                Hybrid RAG: Qwen3 8B
+                Evidence Grounded
               </span>
             </div>
           </div>
@@ -1380,8 +1413,8 @@ export function AssistantWorkspaceView() {
 
                       {/* Feedback Buttons */}
                       <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
-                        <div className="text-[10px]">
-                          Model: <span className="font-mono text-slate-600">{msg.model_name || "qwen3:8b"}</span>
+                        <div className="text-[10px] text-slate-500 font-medium">
+                          AI Assistant
                         </div>
                         <div className="flex items-center gap-2">
                           <span className="text-[10px] text-slate-400">Helpful?</span>
@@ -1443,6 +1476,7 @@ export function AssistantWorkspaceView() {
                 <AIAssistantThinking
                   stage={liveInvestigationStage || "retrieving"}
                   events={liveInvestigationEvents}
+                  elapsedSeconds={elapsedSeconds}
                   className="w-full max-w-xl"
                 />
 
@@ -1674,7 +1708,34 @@ export function AssistantWorkspaceView() {
 
           {/* Evidence Cards List */}
           <div className="flex-1 p-3.5 overflow-y-auto space-y-3">
-            {filteredCitations.length === 0 ? (
+            {asking && filteredCitations.length === 0 ? (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 p-2.5 rounded-xl bg-teal-50/70 border border-teal-200 text-teal-800 text-xs">
+                  <Loader2 className="size-3.5 animate-spin text-teal-600 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-semibold text-[11px] truncate">Retrieving Supporting Evidence...</p>
+                    <p className="text-[10px] text-teal-600 truncate">Scanning vector index & project documents</p>
+                  </div>
+                </div>
+                {[1, 2, 3].map((n) => (
+                  <div
+                    key={n}
+                    className="p-3.5 rounded-xl border border-slate-200 bg-white shadow-2xs space-y-2.5 animate-pulse"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="h-4 w-12 bg-slate-200 rounded" />
+                      <div className="h-4 w-20 bg-slate-200 rounded" />
+                    </div>
+                    <div className="h-3.5 bg-slate-200 rounded w-4/5" />
+                    <div className="space-y-1.5 pt-1">
+                      <div className="h-2.5 bg-slate-100 rounded w-full" />
+                      <div className="h-2.5 bg-slate-100 rounded w-11/12" />
+                      <div className="h-2.5 bg-slate-100 rounded w-3/4" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : filteredCitations.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center p-6 text-center text-slate-400">
                 <Database className="size-8 text-slate-300 mb-2" />
                 <div className="text-xs font-semibold text-slate-600">No Retrieved Evidence</div>

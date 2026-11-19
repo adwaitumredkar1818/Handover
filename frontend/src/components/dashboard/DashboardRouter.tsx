@@ -388,7 +388,7 @@ export function DashboardRouter() {
 
       {/* 3. Render Resolved Dashboard View */}
       <div className="animate-fade">
-        {isLoadingOverview && activeProject && !overview ? (
+        {isLoadingOverview && activeProject && (!overview || overview.project_id !== activeProject.id) ? (
           <div className="pt-2">
             <PageSkeleton layout="dashboard" />
           </div>

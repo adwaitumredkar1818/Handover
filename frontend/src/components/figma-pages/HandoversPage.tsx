@@ -185,8 +185,8 @@ export function useHandover(id: string) {
     (h && projects.find((p) => p.id === h.projectId)) ||
     (activeProject?.id === h?.projectId ? activeProject : null) ||
     activeProject ||
-    (h && s.allProjects.find((p) => p.id === h.projectId)) ||
-    s.allProjects[0]
+    (h && s.projects.find((p) => p.id === h.projectId)) ||
+    null
 
   useEffect(() => {
     if (project && s.currentProject?.id !== project.id && s.switchProject) {
@@ -374,7 +374,7 @@ export function AllHandovers({ defaultProjectId }: { defaultProjectId?: string }
 function HandoverCard({ h, footer }: { h: Handover; footer?: ReactNode }) {
   const s = useStore()
   const { projects, activeProject, members, user } = useLiveApp()
-  const p = projects.find((x) => x.id === h.projectId) || (activeProject?.id === h.projectId ? activeProject : s.allProjects.find((x) => x.id === h.projectId))
+  const p = projects.find((x) => x.id === h.projectId) || (activeProject?.id === h.projectId ? activeProject : s.projects.find((x) => x.id === h.projectId))
   const outName = getMemberDisplayName(h.outgoingId, members, user)
   const incName = getMemberDisplayName(h.incomingId, members, user)
   return (
@@ -2178,9 +2178,25 @@ function HandoversPageInner({ view = 'list', projectId }: HandoversPageProps) {
     case 'project':
       return <AllHandovers defaultProjectId={pId} />
     case 'workspace': {
-      const targetId = handoverCases.find((h) => !pId || h.project_id === pId)?.id ?? handoverCases[0]?.id ?? ''
-      if (targetId) {
-        return <HandoverWorkspace id={targetId} />
+      if (!pId) {
+        return (
+          <Card className="p-8 text-center my-6">
+            <EmptyState
+              icon={Workflow}
+              title="No project workspace selected"
+              body="Select or create a project workspace in this organisation to view or create handover packages."
+              action={
+                <Button icon={Plus} onClick={() => window.location.assign('/projects/new')}>
+                  Create project
+                </Button>
+              }
+            />
+          </Card>
+        )
+      }
+      const targetCase = handoverCases.find((h) => h.project_id === pId)
+      if (targetCase?.id) {
+        return <HandoverWorkspace id={targetCase.id} />
       }
       return <AllHandovers defaultProjectId={pId} />
     }

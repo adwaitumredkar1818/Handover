@@ -32,6 +32,7 @@ import {
   X,
   Lock,
   Search,
+  Loader2,
 } from 'lucide-react'
 import {
   useFigmaStore,
@@ -92,7 +93,7 @@ import {
 
 export function ProjectsList() {
   const router = useRouter()
-  const { setIsCreateProjectModalOpen } = useLiveApp()
+  const { setIsCreateProjectModalOpen, isCreatingProject, isLoadingProjects } = useLiveApp()
   const s = useFigmaStore()
   const [view, setView] = useState<'grid' | 'list'>('grid')
   const [q, setQ] = useState('')
@@ -142,7 +143,7 @@ export function ProjectsList() {
           />
         </div>
       </div>
-      {!s.projects.length ? (
+      {!s.projects.length && !isCreatingProject ? (
         <Card>
           <EmptyState
             icon={FolderPlus}
@@ -151,7 +152,7 @@ export function ProjectsList() {
             action={<Button icon={Plus} onClick={() => router.push('/projects/new')}>Create project</Button>}
           />
         </Card>
-      ) : !list.length ? (
+      ) : !list.length && !isCreatingProject ? (
         <Card>
           <EmptyState
             icon={Search}
@@ -173,6 +174,21 @@ export function ProjectsList() {
         </Card>
       ) : view === 'grid' ? (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {isCreatingProject && (
+            <Card className="flex h-full flex-col p-5 border-dashed border-brand/40 bg-brand/5 animate-pulse">
+              <div className="flex items-start justify-between">
+                <span className="flex size-10 items-center justify-center rounded-xl text-xs font-bold text-white bg-brand/70 shadow-2xs">
+                  <Loader2 className="size-5 animate-spin text-white" />
+                </span>
+                <Badge tone="blue" dot>Creating</Badge>
+              </div>
+              <h3 className="mt-4 text-[15px] font-semibold text-navy">Creating project workspace...</h3>
+              <p className="mt-1 flex-1 text-[13px] text-muted">Provisioning isolated repository & knowledge indexes</p>
+              <div className="mt-4">
+                <Progress value={50} size="sm" />
+              </div>
+            </Card>
+          )}
           {list.map((p) => (
             <Link key={p.id} href={`/projects/${p.id}`} className="group">
               <Card className="tile-target flex h-full flex-col p-5 transition duration-200">
@@ -226,6 +242,17 @@ export function ProjectsList() {
               </tr>
             </thead>
             <tbody>
+              {isCreatingProject && (
+                <tr className="animate-pulse bg-brand/5 border-b border-line">
+                  <Td colSpan={7}>
+                    <div className="flex items-center gap-3 py-2">
+                      <Loader2 className="size-4 animate-spin text-brand" />
+                      <span className="font-medium text-navy text-[13px]">Creating project workspace...</span>
+                      <span className="text-xs text-muted">Provisioning isolated repository & knowledge indexes</span>
+                    </div>
+                  </Td>
+                </tr>
+              )}
               {list.map((p) => (
                 <tr key={p.id} onClick={() => router.push(`/projects/${p.id}`)} className="cursor-pointer hover:bg-slate-50/70">
                   <Td>
@@ -1149,8 +1176,22 @@ export interface ProjectsPageProps {
 function ProjectsPageInner({ view = 'list', id }: ProjectsPageProps) {
   const params = useParams()
   const s = useFigmaStore()
+  const { activeProject, activeOrg } = useLiveApp()
   const rawId = id || (Array.isArray(params?.id) ? params.id[0] : (params?.id as string | undefined))
-  const pid = (rawId || s.currentProject?.id || '') as string
+  const storePid = s.currentProject?.workspaceId === activeOrg?.id ? s.currentProject?.id : undefined
+  const pid = (rawId || activeProject?.id || storePid || '') as string
+
+  if (!pid && view !== 'list' && view !== 'new') {
+    return (
+      <Card className="p-8 text-center my-6">
+        <EmptyState
+          icon={FolderPlus}
+          title="No project selected"
+          body="Select or create a project workspace in this organisation to view its details."
+        />
+      </Card>
+    )
+  }
 
   return (
     <>

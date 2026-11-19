@@ -62,7 +62,9 @@ interface LiveAppContextType {
   organisations: Organisation[];
   activeOrg: Organisation | null;
   setActiveOrg: (org: Organisation) => void;
-  createOrganisation: (name: string, slug?: string) => Promise<Organisation>;
+  createOrganisation: (name: string, slug?: string, description?: string) => Promise<Organisation>;
+  isCreatingOrg: boolean;
+  isLoadingOrganisations: boolean;
 
   // Projects
   projects: Project[];
@@ -72,6 +74,7 @@ interface LiveAppContextType {
     data: { name: string; slug?: string; description?: string; target_handover_date?: string },
     options?: { orgId?: string; newOrgName?: string }
   ) => Promise<Project>;
+  isCreatingProject: boolean;
   isLoadingProjects: boolean;
   refreshProjects: () => Promise<void>;
 
@@ -216,6 +219,9 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
   const [isLoadingProjects, setIsLoadingProjects] = useState(false);
+  const [isCreatingOrg, setIsCreatingOrg] = useState(false);
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [isLoadingOrganisations, setIsLoadingOrganisations] = useState(false);
 
   // Overview state
   const [overview, setOverview] = useState<ProjectOverview | null>(null);
@@ -284,24 +290,6 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     setGraphCacheUser(user?.id || null);
   }, [user?.id]);
 
-  // Organisation selector wrapper that persists user workspace preference
-  const setActiveOrg = useCallback(
-    (action: Organisation | null | ((prev: Organisation | null) => Organisation | null)) => {
-      setActiveOrgInternal((prev) => {
-        const next = typeof action === "function" ? action(prev) : action;
-        if (next && typeof window !== "undefined") {
-          localStorage.setItem("handover_active_org_id", next.id);
-          localStorage.setItem("handover_cached_active_org", JSON.stringify(next));
-        } else if (!next && typeof window !== "undefined") {
-          localStorage.removeItem("handover_active_org_id");
-          localStorage.removeItem("handover_cached_active_org");
-        }
-        return next;
-      });
-    },
-    []
-  );
-
   // Project selector wrapper that resets stale project-specific caches
   const setActiveProject = useCallback(
     (action: Project | null | ((prev: Project | null) => Project | null)) => {
@@ -329,6 +317,28 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       });
     },
     []
+  );
+
+  // Organisation selector wrapper that persists user workspace preference
+  const setActiveOrg = useCallback(
+    (action: Organisation | null | ((prev: Organisation | null) => Organisation | null)) => {
+      setActiveOrgInternal((prev) => {
+        const next = typeof action === "function" ? action(prev) : action;
+        if (next && typeof window !== "undefined") {
+          localStorage.setItem("handover_active_org_id", next.id);
+          localStorage.setItem("handover_cached_active_org", JSON.stringify(next));
+        } else if (!next && typeof window !== "undefined") {
+          localStorage.removeItem("handover_active_org_id");
+          localStorage.removeItem("handover_cached_active_org");
+        }
+        if (prev?.id !== next?.id) {
+          // Immediately reset active project and project states on organisation switch
+          setActiveProject(null);
+        }
+        return next;
+      });
+    },
+    [setActiveProject]
   );
 
   // Modals & UI
@@ -571,6 +581,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   // Once authenticated, load organisations
   const refreshOrganisations = useCallback(async () => {
     if (!user) return;
+    setIsLoadingOrganisations(true);
     try {
       const orgs = await api.organisations.list();
       setOrganisations(orgs);
@@ -588,6 +599,8 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 401) return;
       console.error("Error loading organisations:", err);
+    } finally {
+      setIsLoadingOrganisations(false);
     }
   }, [user, setActiveOrg]);
 
@@ -638,15 +651,15 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
           if (current) {
             const matchedCurrent = projs.find((p) => p.id === current.id);
             if (matchedCurrent) return matchedCurrent;
-            // Never overwrite an active project from another org with projs[0]
-            if (current.organisation_id && current.organisation_id !== targetOrgId) {
-              return current;
-            }
           }
           return preferredProj;
         });
       } else {
         setActiveProject(null);
+        if (typeof window !== "undefined") {
+          localStorage.removeItem("handover_active_project_id");
+          localStorage.removeItem("handover_cached_active_project");
+        }
       }
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 401) return;
@@ -1024,7 +1037,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       addToast({
         type: "success",
         title: "AI Knowledge Reconstruction Started",
-        message: "Ollama Qwen3 8B is reconstructing project knowledge from all gathered sources without timeout.",
+        message: "AI knowledge reconstruction is analyzing project knowledge from all gathered sources.",
       });
       await refreshFindings();
       await refreshOverview();
@@ -1253,6 +1266,19 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!currentUserId || !activeProjectId) {
       lastLoadedProjectIdRef.current = null;
+      setOverview(null);
+      setMembers([]);
+      setEvidenceList([]);
+      setEvidenceMetrics(null);
+      setSelectedEvidenceId(null);
+      setSelectedEvidence(null);
+      setFindings([]);
+      setKnowledgeSummary(null);
+      setVerificationQueue([]);
+      setVerificationSummary(null);
+      setHandoverCases([]);
+      setActiveJobs([]);
+      setSourceMappings([]);
       return;
     }
     if (lastLoadedProjectIdRef.current === activeProjectId) {
@@ -1376,49 +1402,59 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   };
 
   // Org & Project actions
-  const createOrganisation = async (name: string, slug?: string) => {
-    const org = await api.organisations.create({ name, slug });
-    await refreshOrganisations();
-    setActiveOrg(org);
-    addToast({
-      type: "success",
-      title: "Organisation Created",
-      message: `Organisation ${org.name} is ready`,
-    });
-    return org;
+  const createOrganisation = async (name: string, slug?: string, description?: string) => {
+    setIsCreatingOrg(true);
+    try {
+      const org = await api.organisations.create({ name, slug, description });
+      await refreshOrganisations();
+      setActiveOrg(org);
+      addToast({
+        type: "success",
+        title: "Organisation Created",
+        message: `Organisation ${org.name} is ready`,
+      });
+      return org;
+    } finally {
+      setIsCreatingOrg(false);
+    }
   };
 
   const createProject = async (
     data: { name: string; slug?: string; description?: string; target_handover_date?: string },
     options?: { orgId?: string; newOrgName?: string }
   ) => {
-    let targetOrg: Organisation | null = activeOrg;
+    setIsCreatingProject(true);
+    try {
+      let targetOrg: Organisation | null = activeOrg;
 
-    if (options?.newOrgName && options.newOrgName.trim()) {
-      targetOrg = await createOrganisation(options.newOrgName.trim());
-    } else if (options?.orgId) {
-      targetOrg = organisations.find((o) => o.id === options.orgId) ?? activeOrg;
+      if (options?.newOrgName && options.newOrgName.trim()) {
+        targetOrg = await createOrganisation(options.newOrgName.trim());
+      } else if (options?.orgId) {
+        targetOrg = organisations.find((o) => o.id === options.orgId) ?? activeOrg;
+      }
+
+      if (!targetOrg && organisations.length > 0 && organisations[0]) {
+        targetOrg = organisations[0];
+        setActiveOrg(targetOrg);
+      }
+
+      if (!targetOrg) {
+        throw new Error("Please specify or create an Organisation workspace first.");
+      }
+
+      const proj = await api.projects.create(targetOrg.id, data);
+      await refreshProjects();
+      setActiveProject(proj);
+      setIsCreateProjectModalOpen(false);
+      addToast({
+        type: "success",
+        title: "Project Workspace Created",
+        message: `Project ${proj.name} is now active in ${targetOrg.name}`,
+      });
+      return proj;
+    } finally {
+      setIsCreatingProject(false);
     }
-
-    if (!targetOrg && organisations.length > 0 && organisations[0]) {
-      targetOrg = organisations[0];
-      setActiveOrg(targetOrg);
-    }
-
-    if (!targetOrg) {
-      throw new Error("Please specify or create an Organisation workspace first.");
-    }
-
-    const proj = await api.projects.create(targetOrg.id, data);
-    await refreshProjects();
-    setActiveProject(proj);
-    setIsCreateProjectModalOpen(false);
-    addToast({
-      type: "success",
-      title: "Project Workspace Created",
-      message: `Project ${proj.name} is now active in ${targetOrg.name}`,
-    });
-    return proj;
   };
 
   // Member actions
@@ -1678,10 +1714,13 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     activeOrg,
     setActiveOrg,
     createOrganisation,
+    isCreatingOrg,
+    isLoadingOrganisations,
     projects,
     activeProject,
     setActiveProject,
     createProject,
+    isCreatingProject,
     isLoadingProjects,
     refreshProjects,
     overview,

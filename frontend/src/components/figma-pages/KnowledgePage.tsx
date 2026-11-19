@@ -3080,17 +3080,35 @@ function KnowledgePageInner({
   evidenceId,
 }: KnowledgePageProps) {
   const params = useParams() as { id?: string; sourceId?: string; evidenceId?: string } | null
-  const { activeProject, projects } = useLiveApp()
+  const { activeProject, activeOrg } = useLiveApp()
   const s = useStore()
 
+  const storePid = s.currentProject?.workspaceId === activeOrg?.id ? s.currentProject?.id : undefined
   const pid =
     projectId ||
     params?.id ||
     activeProject?.id ||
-    s.currentProject?.id ||
+    storePid ||
     ''
-  const sid = sourceId || params?.sourceId || 'src-github-atlas'
-  const eid = evidenceId || params?.evidenceId || 'e-settle-adr'
+  const sid = sourceId || params?.sourceId || ''
+  const eid = evidenceId || params?.evidenceId || ''
+
+  if (!pid) {
+    return (
+      <Card className="p-8 text-center my-6">
+        <EmptyState
+          icon={Boxes}
+          title="No project workspace selected"
+          body="Select or create a project workspace in this organisation to view knowledge intelligence, sources, and evidence."
+          action={
+            <Button icon={Plus} onClick={() => window.location.assign('/projects/new')}>
+              Create project
+            </Button>
+          }
+        />
+      </Card>
+    )
+  }
 
   switch (view) {
     case 'sources':

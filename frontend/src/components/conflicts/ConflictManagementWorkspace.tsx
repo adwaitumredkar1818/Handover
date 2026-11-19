@@ -15,6 +15,7 @@ import { ConflictDashboardBar } from "./ConflictDashboardBar";
 import { ConflictQueuePanel } from "./ConflictQueuePanel";
 import { ConflictInvestigationWorkspace } from "./ConflictInvestigationWorkspace";
 import { GitCompare, AlertCircle, CheckCircle2 } from "lucide-react";
+import { SectionLoader, CardSkeleton } from "../loading";
 
 export function ConflictManagementWorkspace() {
   const { activeProject, members } = useLiveApp();
@@ -269,11 +270,11 @@ export function ConflictManagementWorkspace() {
 
         {/* Right Investigation Workspace */}
         {detailLoading ? (
-          <div className="flex-1 flex items-center justify-center bg-slate-50">
-            <div className="text-center space-y-2">
-              <div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto" />
-              <p className="text-xs text-slate-500 font-medium">Loading comparative investigation...</p>
-            </div>
+          <div className="flex-1 p-6 bg-slate-50 flex flex-col justify-center" role="status" aria-live="polite">
+            <SectionLoader
+              label="Loading comparative investigation..."
+              description="Retrieving contradictory statements, opposing source citations, and confidence metrics."
+            />
           </div>
         ) : selectedDetail ? (
           <ConflictInvestigationWorkspace

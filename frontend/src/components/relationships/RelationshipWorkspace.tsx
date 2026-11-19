@@ -43,6 +43,7 @@ import type { HandoverGraphNode, HandoverGraphEdge } from "../knowledge/ameliora
 import { getCachedGraph, setCachedGraph, invalidateGraphCache } from "@/lib/graphCache";
 import { useProjectProcessingStatus } from "@/hooks/useProjectProcessingStatus";
 import { ProcessingEmptyStateCard } from "@/components/knowledge/LiveProcessingBanner";
+import { GraphSkeleton, TableSkeleton } from "@/components/loading";
 
 export interface KnowledgeEntityNode {
   id: string;
@@ -1540,7 +1541,11 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
             </div>
 
             <div className="flex-1 relative flex flex-col">
-              {handoverNodes.length === 0 && !loading ? (
+              {loading && handoverNodes.length === 0 ? (
+                <div className="flex-1 flex items-center justify-center p-8 bg-slate-50/50" role="status" aria-live="polite">
+                  <GraphSkeleton label="Reconstructing project relationship graph..." />
+                </div>
+              ) : handoverNodes.length === 0 && !loading ? (
                 <ProcessingEmptyStateCard
                   status={processingStatus}
                   onRetry={retryProcessing}

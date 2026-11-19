@@ -90,14 +90,17 @@ const ViewLink = ({ to, children = 'View all' }: { to: string; children?: ReactN
 
 function ProjectSwitcherStrip() {
   const s = useFigmaStore()
-  const { projects: liveProjects, activeProject: liveProject, setActiveProject } = useLiveApp()
-  const projectsList = liveProjects && liveProjects.length > 0 ? liveProjects.map(lp => ({
+  const { projects: liveProjects, activeProject: liveProject, setActiveProject, activeOrg } = useLiveApp()
+  const validStoreProjects = s.projects.filter(p => !activeOrg?.id || p.workspaceId === activeOrg.id)
+  const projectsList = liveProjects ? liveProjects.map(lp => ({
     id: lp.id,
     name: lp.name,
     code: lp.slug?.toUpperCase() || lp.name.slice(0, 3).toUpperCase(),
     color: '#0f766e',
     role: (lp.my_project_role?.toLowerCase() || 'manager') as MemberRole,
-  })) : s.projects
+  })) : validStoreProjects
+
+  if (projectsList.length === 0) return null
 
   return (
     <div className="scrollbar-thin -mx-1 flex gap-1 overflow-x-auto px-1 pb-1" role="tablist" aria-label="Switch project">
@@ -1053,9 +1056,10 @@ function DashboardContent() {
   }
 
   const currentLiveProj = liveProject || (liveProjects && liveProjects.length > 0 ? liveProjects[0] : null)
-  const p: Project | null = s.currentProject || (currentLiveProj ? {
+  const storeProj = s.currentProject?.workspaceId === activeOrg?.id ? s.currentProject : null
+  const p: Project | null = (currentLiveProj ? {
     id: currentLiveProj.id,
-    workspaceId: s.workspaceId || 'workspace',
+    workspaceId: currentLiveProj.organisation_id || activeOrg?.id || s.workspaceId || 'workspace',
     name: currentLiveProj.name,
     code: currentLiveProj.slug?.toUpperCase() || currentLiveProj.name.slice(0, 3).toUpperCase(),
     description: currentLiveProj.description || 'Verified skills and handover reconstruction platform workspace.',
@@ -1069,7 +1073,7 @@ function DashboardContent() {
     startDate: currentLiveProj.start_date || '2026-10-01',
     endDate: currentLiveProj.target_completion_date || currentLiveProj.target_handover_date || '',
     color: '#0f766e',
-  } : null)
+  } : null) || storeProj
 
   const loading = useFakeLoading(450, [p?.id, s.workspaceId])
   const displayName = user?.full_name?.split(' ')[0] || user?.email?.split('@')[0] || 'there'

@@ -1,10 +1,11 @@
 "use client";
 
 import React from "react";
-import { Bot, Sparkles, Database, Search } from "lucide-react";
+import { AssistantThinking3D } from "../assistant/AssistantThinking3D";
+import { Sparkles, Database } from "lucide-react";
 
 export interface AIAssistantThinkingProps {
-  stage?: "initiating" | "planning" | "retrieving" | "synthesizing" | string | null;
+  stage?: "initiating" | "planning" | "retrieving" | "synthesizing" | "delegating" | "streaming" | string | null;
   events?: string[];
   className?: string;
 }
@@ -15,67 +16,54 @@ export function AIAssistantThinking({
   className = "",
 }: AIAssistantThinkingProps) {
   const stageLabels: Record<string, string> = {
-    initiating: "Initiating multi-domain investigation...",
-    planning: "Query planning & subquery expansion...",
-    retrieving: "Hybrid retrieval (ChromaDB vectors + PostgreSQL FTS)...",
-    synthesizing: "Synthesizing evidence-grounded answer...",
+    initiating: "Understanding your question...",
+    planning: "Searching project knowledge...",
+    retrieving: "Reviewing relevant evidence...",
+    delegating: "Consulting specialized project intelligence...",
+    synthesizing: "Preparing your answer...",
+    streaming: "Finalizing response...",
   };
 
   const currentLabel =
     (stage && stageLabels[stage]) ||
     stage ||
-    "Synthesizing verified project intelligence...";
+    "Searching project knowledge...";
 
   return (
     <div
-      className={`p-4 rounded-xl border border-[#DCE3EB] bg-white shadow-2xs space-y-3 animate-fade-in ${className}`}
+      className={`p-5 rounded-2xl border border-blue-100 bg-white/90 backdrop-blur-md shadow-[0_8px_30px_rgb(0,0,0,0.06)] space-y-4 animate-fade-in ${className}`}
       role="status"
       aria-live="polite"
     >
-      {/* Assistant Header Lockup */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <div className="relative flex items-center justify-center">
-            <div className="absolute -inset-1 rounded-full bg-[#8B78C9]/20 blur-xs animate-pulse" />
-            <div className="w-7 h-7 rounded-lg bg-[#203653] text-white flex items-center justify-center">
-              <Bot className="w-4 h-4 text-[#8B78C9]" />
-            </div>
+      {/* 3D Stacked Glass Thinking Animation Lockup */}
+      <div className="flex flex-col sm:flex-row items-center gap-4">
+        <AssistantThinking3D size="sm" isThinking={true} />
+        <div className="flex-1 text-center sm:text-left space-y-1">
+          <div className="flex items-center justify-center sm:justify-start gap-2">
+            <span className="text-xs font-bold text-slate-900">
+              Project Knowledge Assistant
+            </span>
+            <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200/60 rounded-full">
+              <span className="size-1.5 rounded-full bg-blue-500 animate-ping" />
+              Thinking
+            </span>
           </div>
-          <div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-bold text-[#203653]">
-                Knowledge Assistant
-              </span>
-              <span className="text-[10px] font-semibold px-1.5 py-0.2 bg-[#8B78C9]/10 text-[#8B78C9] rounded">
-                Thinking
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Organic 3-Dot Breathing Indicator */}
-        <div className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#F8FAFC] border border-[#E2E8F0]" aria-hidden="true">
-          <div className="w-1.5 h-1.5 rounded-full bg-[#315FBA] animate-bounce" style={{ animationDelay: "0ms" }} />
-          <div className="w-1.5 h-1.5 rounded-full bg-[#299B80] animate-bounce" style={{ animationDelay: "150ms" }} />
-          <div className="w-1.5 h-1.5 rounded-full bg-[#8B78C9] animate-bounce" style={{ animationDelay: "300ms" }} />
+          <p className="text-xs font-medium text-slate-700">{currentLabel}</p>
+          <p className="text-[10px] text-slate-400">
+            Authorized project sources only · Zero fabrication
+          </p>
         </div>
       </div>
 
-      {/* Real-time Subquery Investigation Stage */}
-      <div className="p-2.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] flex items-center gap-2 text-xs text-[#203653]">
-        <Search className="w-3.5 h-3.5 text-[#315FBA] animate-spin" style={{ animationDuration: "3s" }} />
-        <span className="font-medium truncate">{currentLabel}</span>
-      </div>
-
-      {/* Simulated Citation Cards Resolving */}
-      <div className="pt-1 flex items-center gap-2 overflow-hidden" aria-hidden="true">
-        <div className="h-6 w-28 bg-[#F1F5F9] border border-[#E2E8F0] rounded-md animate-pulse flex items-center gap-1.5 px-2">
-          <Database className="w-3 h-3 text-[#94A3B8]" />
-          <div className="h-2 w-16 bg-[#CBD5E1] rounded" />
+      {/* Simulated Citation Resolving Pills */}
+      <div className="pt-2 border-t border-slate-100 flex items-center justify-center sm:justify-start gap-2 overflow-hidden" aria-hidden="true">
+        <div className="h-6 w-32 bg-blue-50/60 border border-blue-100 rounded-md animate-pulse flex items-center gap-1.5 px-2">
+          <Database className="w-3 h-3 text-blue-400" />
+          <div className="h-2 w-20 bg-blue-200/70 rounded" />
         </div>
-        <div className="h-6 w-32 bg-[#F1F5F9] border border-[#E2E8F0] rounded-md animate-pulse flex items-center gap-1.5 px-2">
-          <Sparkles className="w-3 h-3 text-[#94A3B8]" />
-          <div className="h-2 w-20 bg-[#CBD5E1] rounded" />
+        <div className="h-6 w-36 bg-blue-50/60 border border-blue-100 rounded-md animate-pulse flex items-center gap-1.5 px-2">
+          <Sparkles className="w-3 h-3 text-blue-400" />
+          <div className="h-2 w-24 bg-blue-200/70 rounded" />
         </div>
       </div>
     </div>

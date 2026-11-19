@@ -157,7 +157,7 @@ export function ProjectOverviewTab({
             <div className="flex justify-between items-center">
               <dt className="text-muted">Vector Index</dt>
               <dd className="font-mono text-[11px] text-brand">
-                Isolated ChromaDB
+                Isolated Project Index
               </dd>
             </div>
           </dl>
@@ -351,7 +351,7 @@ export function ProjectOverviewTab({
                         Document Ingestion
                       </p>
                       <p className="text-[11px] text-muted">
-                        PDF, DOCX & GLM OCR
+                        PDF &amp; DOCX Documents
                       </p>
                     </div>
                   </div>

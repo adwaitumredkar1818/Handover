@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { Button } from "../ui";
+import { CardSkeleton, ListSkeleton, ButtonLoader } from "../loading";
 import { api } from "../../lib/api";
 
 export function VerificationWorkspaceView({
@@ -153,39 +154,45 @@ export function VerificationWorkspaceView({
       </div>
 
       {/* KPI Metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
-          <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Pending Review</div>
-          <div className="text-2xl font-bold text-[#D39B43] mt-1">
-            {summary?.pending_review ?? 0}
-          </div>
-          <div className="text-[11px] text-[#69778D] mt-0.5">Awaiting human sign-off</div>
+      {isLoading && !summary ? (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4" role="status" aria-live="polite">
+          <CardSkeleton variant="metric" count={4} />
         </div>
+      ) : (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
+            <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Pending Review</div>
+            <div className="text-2xl font-bold text-[#D39B43] mt-1">
+              {summary?.pending_review ?? 0}
+            </div>
+            <div className="text-[11px] text-[#69778D] mt-0.5">Awaiting human sign-off</div>
+          </div>
 
-        <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
-          <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Verified Findings</div>
-          <div className="text-2xl font-bold text-[#249E91] mt-1">
-            {summary?.verified_count ?? 0}
+          <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
+            <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Verified Findings</div>
+            <div className="text-2xl font-bold text-[#249E91] mt-1">
+              {summary?.verified_count ?? 0}
+            </div>
+            <div className="text-[11px] text-[#249E91] mt-0.5">Approved for handover</div>
           </div>
-          <div className="text-[11px] text-[#249E91] mt-0.5">Approved for handover</div>
-        </div>
 
-        <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
-          <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Active Conflicts</div>
-          <div className="text-2xl font-bold text-[#D36D72] mt-1">
-            {summary?.conflicts_count ?? 0}
+          <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
+            <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Active Conflicts</div>
+            <div className="text-2xl font-bold text-[#D36D72] mt-1">
+              {summary?.conflicts_count ?? 0}
+            </div>
+            <div className="text-[11px] text-[#69778D] mt-0.5">Contradictory facts</div>
           </div>
-          <div className="text-[11px] text-[#69778D] mt-0.5">Contradictory facts</div>
-        </div>
 
-        <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
-          <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Verification Rate</div>
-          <div className="text-2xl font-bold text-[#4774A9] mt-1">
-            {summary?.verification_rate ? `${Math.round(summary.verification_rate)}%` : "0%"}
+          <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
+            <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Verification Rate</div>
+            <div className="text-2xl font-bold text-[#4774A9] mt-1">
+              {summary?.verification_rate ? `${Math.round(summary.verification_rate)}%` : "0%"}
+            </div>
+            <div className="text-[11px] text-[#69778D] mt-0.5">Queue completion</div>
           </div>
-          <div className="text-[11px] text-[#69778D] mt-0.5">Queue completion</div>
         </div>
-      </div>
+      )}
 
       {/* Epistemic Guidance Banner */}
       <div className="p-4 rounded-xl bg-blue-50/60 border border-blue-200 flex items-start gap-3 text-xs text-blue-950">
@@ -223,7 +230,11 @@ export function VerificationWorkspaceView({
             </div>
           </div>
 
-          {cases.length === 0 ? (
+          {isLoading && cases.length === 0 ? (
+            <div className="py-2" role="status" aria-live="polite">
+              <ListSkeleton variant="thread" count={5} />
+            </div>
+          ) : cases.length === 0 ? (
             <div className="p-8 text-center my-auto">
               <CheckCircle2 className="w-10 h-10 text-emerald-500 mb-2 mx-auto" />
               <div className="font-bold text-sm text-[#25334B]">Verification Queue Clear</div>
@@ -317,7 +328,7 @@ export function VerificationWorkspaceView({
                     <span>AI Interpretation &amp; Rationale</span>
                   </div>
                   <p className="text-xs text-purple-950 leading-relaxed">
-                    {selectedCase.ai_rationale || "Reconstructed by Qwen3 8B with source attribution."}
+                    {selectedCase.ai_rationale || "Reconstructed by AI with source attribution."}
                   </p>
                 </div>
               </div>

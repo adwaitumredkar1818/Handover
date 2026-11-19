@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { AppLayout } from "../layout/AppLayout";
 import { Card, CardHeader, Button, Badge } from "../ui";
+import { PageSkeleton } from "../loading";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { api } from "../../lib/api";
 import type {
@@ -304,10 +305,9 @@ export function SuccessorOnboardingWorkspace({
         </div>
 
         {isLoading ? (
-          <Card className="flex items-center justify-center p-12 text-sm text-muted">
-            <Loader2 className="mr-2 size-5 animate-spin text-brand" />
-            Loading real project context...
-          </Card>
+          <div role="status" aria-live="polite">
+            <PageSkeleton layout="dashboard" />
+          </div>
         ) : errorMessage || !project ? (
           <Card className="p-6">
             <div className="flex items-start gap-3 text-sm text-red-700">

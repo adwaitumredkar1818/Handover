@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { useProjectProcessingStatus } from "../../hooks/useProjectProcessingStatus";
-import { TableSkeleton, ListSkeleton, CardSkeleton } from "../loading";
+import { TableSkeleton, ListSkeleton, CardSkeleton, ButtonLoader } from "../loading";
 import { MetricBand, Table, Th, Td } from "../ui";
 import { SourceIcon } from "../brand/brand";
 
@@ -55,6 +55,26 @@ function getRowStateBadges(
     ];
   }
 
+  if (sem === "running" || sem === "extracting" || stage === "extracting" || proc === "processing") {
+    return [
+      {
+        label: "Processing",
+        bg: "bg-purple-50 text-purple-700 border-purple-200",
+        isSpinning: true,
+      },
+    ];
+  }
+
+  if (sem === "queued" || stage === "queued" || proc === "queued") {
+    return [
+      {
+        label: "Queued",
+        bg: "bg-amber-50 text-amber-800 border-amber-200",
+        isSpinning: false,
+      },
+    ];
+  }
+
   if (stage === "discovered" || stage === "imported") {
     return [
       {
@@ -65,41 +85,13 @@ function getRowStateBadges(
     ];
   }
 
-  const badges: RowBadgeSpec[] = [
+  return [
     {
-      label: "Deterministic processing complete",
-      bg: "bg-teal-50 text-teal-800 border-teal-200 font-medium",
+      label: "Ready",
+      bg: "bg-emerald-50 text-emerald-700 border-emerald-200",
       isSpinning: false,
     },
   ];
-
-  if (sem === "running" || sem === "extracting" || stage === "extracting") {
-    badges.push({
-      label: "Semantic extraction running",
-      bg: "bg-purple-50 text-purple-700 border-purple-200",
-      isSpinning: true,
-    });
-  } else if (sem === "succeeded" || sem === "completed" || sem === "ready") {
-    badges.push({
-      label: "Semantic extraction complete",
-      bg: "bg-emerald-100 text-emerald-800 border-emerald-400 font-bold",
-      isSpinning: false,
-    });
-  } else if (sem === "queued") {
-    badges.push({
-      label: "Semantic extraction queued",
-      bg: "bg-amber-50 text-amber-800 border-amber-200",
-      isSpinning: false,
-    });
-  } else {
-    badges.push({
-      label: "Not applicable",
-      bg: "bg-slate-100 text-slate-600 border-slate-200",
-      isSpinning: false,
-    });
-  }
-
-  return badges;
 }
 
 // Helper to render category badges consistently
@@ -188,6 +180,17 @@ export function EvidenceCenterView() {
   const [copiedMetadataKey, setCopiedMetadataKey] = useState<string | null>(null);
   const [expandedChunkIds, setExpandedChunkIds] = useState<Record<string, boolean>>({});
   const [syncingMappingId, setSyncingMappingId] = useState<string | null>(null);
+  const [downloadingEvidenceId, setDownloadingEvidenceId] = useState<string | null>(null);
+
+  const handleDownload = async (id: string, title: string) => {
+    if (downloadingEvidenceId) return;
+    setDownloadingEvidenceId(id);
+    try {
+      await downloadEvidence(id, title);
+    } finally {
+      setDownloadingEvidenceId(null);
+    }
+  };
   const initialEvidenceProjectRef = React.useRef<string | null>(null);
   const lastStatusSignatureRef = React.useRef<string | null>(null);
 
@@ -338,26 +341,6 @@ export function EvidenceCenterView() {
         </div>
 
         <div className="flex items-center gap-3 text-xs font-medium text-[#69778D]">
-          {/* Two-Stage Pipeline Indicators */}
-          {projectStatus && projectStatus.total_evidence_count > 0 && (
-            <div className="hidden xl:flex items-center gap-1.5 text-[11px]">
-              <span className="px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-200 font-medium" title="Stage 1: Directly parsed without LLM">
-                Stage 1: {projectStatus.deterministic_ready ?? 0} ready
-              </span>
-              <span className="px-2 py-0.5 rounded-md bg-purple-50 text-purple-800 border border-purple-200 font-medium" title="Stage 2: Background semantic extraction by Qwen3">
-                Stage 2: {projectStatus.semantic_ready ?? 0} ready{projectStatus.semantic_queued ? ` (${projectStatus.semantic_queued} queued)` : ""}
-              </span>
-              <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 font-medium" title="Knowledge items published to interactive graphs">
-                Graphs: {projectStatus.knowledge_item_count} items
-              </span>
-            </div>
-          )}
-
-          <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-[#249E91] font-semibold bg-[#F0FAF8] px-2 py-0.5 rounded-full border border-[#249E91]/30">
-            <Lock className="w-3 h-3" />
-            <span>AES-256 Protected</span>
-          </div>
-
           {/* Layout Mode Switcher */}
           <div className="flex items-center gap-1 bg-[#F4F6F9] p-0.5 rounded-lg border border-[#DCE3EB]">
             <button
@@ -474,7 +457,7 @@ export function EvidenceCenterView() {
                     <Th>Evidence Item</Th>
                     <Th>Source</Th>
                     <Th>Category</Th>
-                    <Th>Pipeline Lifecycle</Th>
+                    <Th>Status</Th>
                     <Th>Author / Identity</Th>
                     <Th>Ingested At</Th>
                     <Th className="text-right">Action</Th>
@@ -586,7 +569,7 @@ export function EvidenceCenterView() {
                   </div>
                   <div>
                     <div className="font-semibold text-xs text-[#25334B]">Uploaded Documents</div>
-                    <div className="text-[10px] text-[#69778D]">PDF &amp; DOCX with GLM-OCR</div>
+                    <div className="text-[10px] text-[#69778D]">PDF &amp; DOCX Documents</div>
                   </div>
                 </div>
                 <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">
@@ -836,9 +819,6 @@ export function EvidenceCenterView() {
                             +{liveKCount} items
                           </span>
                         )}
-                        <span className="text-[10px] text-[#69778D] font-mono">
-                          {item.content_hash.slice(0, 8)}...
-                        </span>
                       </div>
                       <div className="font-semibold text-xs text-[#25334B] truncate" title={item.title}>
                         {item.title}
@@ -885,14 +865,17 @@ export function EvidenceCenterView() {
               <span>Evidence Details &amp; Inspector</span>
             </div>
             {selectedEvidence && (
-              <button
+              <ButtonLoader
                 type="button"
-                onClick={() => downloadEvidence(selectedEvidence.id, selectedEvidence.title)}
-                className="px-2.5 py-1 rounded-lg bg-[#4774A9] hover:bg-[#365F92] text-white text-[11px] font-semibold flex items-center gap-1 transition-colors shadow-2xs"
+                variant="primary"
+                onClick={() => void handleDownload(selectedEvidence.id, selectedEvidence.title)}
+                isLoading={downloadingEvidenceId === selectedEvidence.id}
+                loadingText="Downloading..."
+                icon={<Download className="w-3.5 h-3.5" />}
+                className="px-2.5 py-1 text-[11px] font-semibold shadow-2xs"
               >
-                <Download className="w-3.5 h-3.5" />
-                <span>Download Decrypted</span>
-              </button>
+                Download Decrypted
+              </ButtonLoader>
             )}
           </div>
 
@@ -1128,10 +1111,10 @@ export function EvidenceCenterView() {
                       <div className="font-semibold text-[#25334B]">No Knowledge Items Extracted Yet</div>
                       <p className="text-[11px] max-w-xs text-[#69778D]">
                         {selectedEvidence.semantic_status === "running"
-                          ? "Ollama Qwen3 8B semantic extraction is currently active on this document."
+                          ? "AI knowledge extraction is currently active on this document."
                           : selectedEvidence.semantic_status === "not_applicable"
-                          ? "This evidence item has explicit metadata and is represented directly in Relationship Explorer without LLM reasoning."
-                          : "Knowledge items extracted deterministically or via Ollama will appear here with full provenance."}
+                          ? "This evidence item has structured metadata and is represented directly in project relationship graphs."
+                          : "Knowledge items extracted from this source will appear here with full provenance."}
                       </p>
                     </div>
                   ) : (
@@ -1288,8 +1271,8 @@ export function EvidenceCenterView() {
                         <span className="text-[#69778D]">OCR Processing</span>
                         <span className="text-[#25334B]">
                           {selectedEvidence.ocr_pages_count && selectedEvidence.ocr_pages_count > 0
-                            ? `${selectedEvidence.ocr_pages_count} pages OCR scanned (GLM-OCR)`
-                            : "0 OCR pages (Digital native vector text)"}
+                            ? `${selectedEvidence.ocr_pages_count} pages OCR scanned`
+                            : "Digital text (No OCR needed)"}
                         </span>
                       </div>
                     </div>

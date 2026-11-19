@@ -23,6 +23,7 @@ import {
 import { useLiveApp } from "../../context/LiveAppContext";
 import { SourceIcon, type BrandSourceType } from "../brand/brand";
 import { Card, Button, StatusBadge, Badge } from "../ui";
+import { ButtonLoader, CardSkeleton, ListSkeleton } from "../loading";
 
 interface SourceCardMeta {
   type: BrandSourceType;
@@ -277,8 +278,13 @@ export function ConnectedSourcesView() {
       )}
 
       {/* 4. Beautiful Source Grid Cards (6 Catalog Items + 1 Request Integration) */}
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {SOURCE_CATALOG.map((meta) => {
+      {isLoadingSources && orgConnections.length === 0 ? (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3" role="status" aria-live="polite">
+          <CardSkeleton count={6} />
+        </div>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {SOURCE_CATALOG.map((meta) => {
           const isPlanned = meta.type === "confluence" || meta.type === "gdrive";
           let isConnected = false;
           let recordCount = 0;
@@ -485,6 +491,7 @@ export function ConnectedSourcesView() {
           </Button>
         </Card>
       </div>
+      )}
 
       {/* 5. Organization Credentials & Encryption Management */}
       <div className="bg-white rounded-xl border border-[#DCE3EB] shadow-2xs overflow-hidden">
@@ -511,7 +518,11 @@ export function ConnectedSourcesView() {
 
         {showOrgCredentials && (
           <div>
-            {orgConnections.length === 0 ? (
+            {isLoadingSources && orgConnections.length === 0 ? (
+              <div className="p-4" role="status" aria-live="polite">
+                <ListSkeleton variant="thread" count={3} />
+              </div>
+            ) : orgConnections.length === 0 ? (
               <div className="p-8 text-center">
                 <PlugZap className="w-8 h-8 text-[#69778D] opacity-40 mx-auto mb-2" />
                 <div className="text-xs font-semibold text-[#25334B]">No Stored Credentials</div>
@@ -568,9 +579,6 @@ export function ConnectedSourcesView() {
                         <>
                           <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
                             {conn.status}
-                          </span>
-                          <span className="text-[11px] text-[#69778D] font-mono">
-                            AES-256 Protected
                           </span>
                         </>
                       )}

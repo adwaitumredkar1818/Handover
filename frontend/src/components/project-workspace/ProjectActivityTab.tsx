@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { Activity, Loader2, Filter, Clock } from "lucide-react";
 import { Card, EmptyState, Badge, Avatar, cn } from "../ui";
+import { ListSkeleton } from "../loading";
 import { api } from "../../lib/api";
 import type { Project, ProjectActivityCard } from "../../lib/types";
 
@@ -79,9 +80,8 @@ export function ProjectActivityTab({ project }: ProjectActivityTabProps) {
       {/* Main Activity Timeline Card */}
       <Card className="p-5 sm:p-6">
         {isLoading ? (
-          <div className="flex items-center justify-center p-12 text-xs text-muted gap-2">
-            <Loader2 className="size-4 animate-spin text-brand" />
-            <span>Loading chronological activity stream...</span>
+          <div className="py-2" role="status" aria-live="polite">
+            <ListSkeleton variant="activity" count={5} />
           </div>
         ) : filteredItems.length === 0 ? (
           <EmptyState

@@ -26,6 +26,7 @@ import {
 import { useLiveApp } from "../../context/LiveAppContext";
 import { api } from "../../lib/api";
 import { Card, CardHeader, Button, Badge, EmptyState } from "../ui";
+import { ButtonLoader, CardSkeleton, ListSkeleton } from "../loading";
 import { RelationshipWorkspace } from "../relationships/RelationshipWorkspace";
 
 export interface KnowledgeDomainItem {
@@ -155,57 +156,64 @@ export function KnowledgeWorkspaceView() {
           >
             Refresh
           </Button>
-          <Button
+          <ButtonLoader
             variant="primary"
-            icon={Sparkles}
+            icon={<Sparkles className="size-4" />}
             onClick={handleTriggerExtraction}
-            disabled={isExtracting}
+            isLoading={isExtracting}
+            loadingText="Extracting Knowledge..."
           >
-            {isExtracting ? "Extracting Knowledge..." : "Reconstruct Knowledge"}
-          </Button>
+            Reconstruct Knowledge
+          </ButtonLoader>
         </div>
       </div>
 
       {/* KPI Metrics Band */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
-          <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Total Findings</div>
-          <div className="text-2xl font-bold text-[#25334B] mt-1">
-            {summary ? summary.total_findings : 0}
-          </div>
-          <div className="text-[11px] text-[#249E91] mt-0.5 flex items-center gap-1">
-            <span>Across 8 domains</span>
-          </div>
+      {isLoading && !summary ? (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4" role="status" aria-live="polite">
+          <CardSkeleton variant="metric" count={4} />
         </div>
+      ) : (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
+            <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Total Findings</div>
+            <div className="text-2xl font-bold text-[#25334B] mt-1">
+              {summary ? summary.total_findings : 0}
+            </div>
+            <div className="text-[11px] text-[#249E91] mt-0.5 flex items-center gap-1">
+              <span>Across 8 domains</span>
+            </div>
+          </div>
 
-        <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
-          <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Verified Findings</div>
-          <div className="text-2xl font-bold text-[#249E91] mt-1">
-            {summary ? summary.verified_findings : 0}
+          <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
+            <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Verified Findings</div>
+            <div className="text-2xl font-bold text-[#249E91] mt-1">
+              {summary ? summary.verified_findings : 0}
+            </div>
+            <div className="text-[11px] text-[#69778D] mt-0.5">
+              {summary && summary.total_findings > 0
+                ? `${Math.round((summary.verified_findings / summary.total_findings) * 100)}% verified`
+                : "0% verified"}
+            </div>
           </div>
-          <div className="text-[11px] text-[#69778D] mt-0.5">
-            {summary && summary.total_findings > 0
-              ? `${Math.round((summary.verified_findings / summary.total_findings) * 100)}% verified`
-              : "0% verified"}
-          </div>
-        </div>
 
-        <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
-          <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Pending Review</div>
-          <div className="text-2xl font-bold text-[#D39B43] mt-1">
-            {summary ? summary.pending_verification : 0}
+          <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
+            <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Pending Review</div>
+            <div className="text-2xl font-bold text-[#D39B43] mt-1">
+              {summary ? summary.pending_verification : 0}
+            </div>
+            <div className="text-[11px] text-[#69778D] mt-0.5">Awaiting human sign-off</div>
           </div>
-          <div className="text-[11px] text-[#69778D] mt-0.5">Awaiting human sign-off</div>
-        </div>
 
-        <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
-          <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Readiness Score</div>
-          <div className="text-2xl font-bold text-[#4774A9] mt-1">
-            {summary ? `${Math.round(summary.overall_readiness_pct)}%` : "0%"}
+          <div className="bg-white rounded-xl border border-[#DCE3EB] p-4 shadow-2xs">
+            <div className="text-[11px] font-semibold text-[#69778D] uppercase tracking-wider">Readiness Score</div>
+            <div className="text-2xl font-bold text-[#4774A9] mt-1">
+              {summary ? `${Math.round(summary.overall_readiness_pct)}%` : "0%"}
+            </div>
+            <div className="text-[11px] text-[#69778D] mt-0.5">Transition readiness</div>
           </div>
-          <div className="text-[11px] text-[#69778D] mt-0.5">Transition readiness</div>
         </div>
-      </div>
+      )}
 
       {/* Main Tab View Switcher */}
       <div className="flex border-b border-[#DCE3EB] gap-6 text-xs font-semibold">
@@ -288,8 +296,12 @@ export function KnowledgeWorkspaceView() {
               />
             </div>
 
-            {/* Empty State */}
-            {filteredFindings.length === 0 ? (
+            {/* Findings List or Skeletons or Empty State */}
+            {isLoading && findings.length === 0 ? (
+              <div className="space-y-3" role="status" aria-live="polite">
+                <CardSkeleton variant="domain" count={4} />
+              </div>
+            ) : filteredFindings.length === 0 ? (
               <div className="bg-white rounded-xl border border-[#DCE3EB] p-8 text-center shadow-2xs">
                 <BrainCircuit className="w-12 h-12 text-[#69778D] mb-3 mx-auto" />
                 <div className="font-bold text-sm text-[#25334B]">No Knowledge Items Found</div>
@@ -300,14 +312,15 @@ export function KnowledgeWorkspaceView() {
                 </p>
                 {summary && summary.total_findings === 0 && (
                   <div className="mt-4">
-                    <Button
+                    <ButtonLoader
                       variant="primary"
-                      icon={Sparkles}
+                      icon={<Sparkles className="size-4" />}
                       onClick={handleTriggerExtraction}
-                      disabled={isExtracting}
+                      isLoading={isExtracting}
+                      loadingText="Extracting..."
                     >
-                      {isExtracting ? "Extracting..." : "Reconstruct Knowledge Now"}
-                    </Button>
+                      Reconstruct Knowledge Now
+                    </ButtonLoader>
                   </div>
                 )}
               </div>

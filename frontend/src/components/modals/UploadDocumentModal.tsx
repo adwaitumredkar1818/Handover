@@ -264,7 +264,7 @@ export function UploadDocumentModal() {
           <div className="p-3 rounded-lg bg-emerald-50/60 border border-emerald-200/60 flex items-start gap-2.5 text-emerald-950 text-[11px] leading-relaxed">
             <Shield className="w-4 h-4 text-[#249E91] shrink-0 mt-0.5" />
             <div>
-              <span className="font-semibold">Client-Side Envelope Encryption:</span> All original documents are encrypted with AES-256-GCM before storage and indexed with Nomics 768-dim embeddings in project-isolated vector collections.
+              <span className="font-semibold">End-to-End Encryption &amp; Isolation:</span> All original documents are encrypted before storage and indexed in project-isolated, private knowledge collections.
             </div>
           </div>
 
