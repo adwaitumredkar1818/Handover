@@ -59,7 +59,6 @@ class CaseEvidenceResponse(BaseModel):
     supporting_evidence: list[dict[str, Any]] = Field(default_factory=list)
     conflicts: list[dict[str, Any]] = Field(default_factory=list)
 
-
 @router.get(
     "/projects/{project_id}/verification/summary",
     response_model=VerificationSummaryResponse,

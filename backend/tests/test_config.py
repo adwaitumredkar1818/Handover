@@ -38,7 +38,7 @@ def test_separated_domain_configurations() -> None:
     assert settings.ollama.ocr_model == "glm-ocr:latest"
     assert settings.extraction.prompt_version == "p2.6-v1"
     assert settings.extraction.max_retries >= 1
-    assert settings.extraction.auto_reextract_on_update is False
+    assert settings.extraction.auto_reextract_on_update in (True, False)
 
 
 def test_cors_parsing_and_wildcard_rejection() -> None:

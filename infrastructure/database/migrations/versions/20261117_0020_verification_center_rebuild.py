@@ -14,7 +14,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0020_verification_rebuild"
-down_revision: str | None = "0019_sources_and_evidence"
+down_revision: str | None = "0021_relationship_types"
 branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 

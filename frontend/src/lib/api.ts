@@ -23,9 +23,9 @@ import type {
   InvitationPreviewResponse,
   AcceptInvitationResponse,
   RegisterWithInvitationResponse,
+  ProjectProcessingStatus,
   VerifyEmailResponse,
   RequestEmailVerificationResponse,
-  ProjectProcessingStatus,
   HandoverPackageVersionSummary,
   HandoverVersionSectionsResponse,
   HandoverReadinessIntelligenceResponse,
@@ -253,17 +253,17 @@ export async function request<T>(
   options: RequestInit = {},
   isRetry = false
 ): Promise<T> {
-  const method = (options.method || "GET").toUpperCase();
+  const method = (options.method || 'GET').toUpperCase();
   const token = getToken();
 
   // If modifying data, invalidate cached GET endpoints for this project/resource
-  if (method !== "GET") {
-    const segments = path.split("/").filter(Boolean);
-    const scopePrefix = segments.length >= 2 ? `/${segments[0]}/${segments[1]}` : "";
+  if (method !== 'GET') {
+    const segments = path.split('/').filter(Boolean);
+    const scopePrefix = segments.length >= 2 ? `/${segments[0]}/${segments[1]}` : '';
     if (scopePrefix) clearApiCache(scopePrefix);
     else getCache.clear();
   } else if (!isRetry && !options.body) {
-    const cacheKey = `${path}:${token || ""}`;
+    const cacheKey = `${path}:${token || ''}`;
     const cached = getCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
       return cached.data as T;
@@ -308,19 +308,11 @@ async function requestInternal<T>(
     headers["Content-Type"] = "application/json";
   }
 
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      ...options,
-      credentials: options.credentials || "include",
-      headers,
-    });
-  } catch (err: unknown) {
-    if (err instanceof ApiError) throw err;
-    throw new ApiError("Network unavailable or server restarting", 0, {
-      originalError: err instanceof Error ? err.message : String(err),
-    });
-  }
+  const res = await fetch(url, {
+    ...options,
+    credentials: options.credentials || "include",
+    headers,
+  });
 
   if (
     res.status === 401 &&
@@ -739,7 +731,7 @@ export const api = {
         }
       );
     },
-    async getProcessingStatus(projectId: string): Promise<ProjectProcessingStatus> {
+      async getProcessingStatus(projectId: string): Promise<ProjectProcessingStatus> {
       return request<ProjectProcessingStatus>(`/projects/${projectId}/processing-status`);
     },
     async retryProcessing(projectId: string): Promise<ProjectProcessingStatus> {
@@ -940,7 +932,7 @@ export const api = {
         method: "POST",
       });
     },
-    async extract(projectId: string, evidenceId: string): Promise<unknown> {
+      async extract(projectId: string, evidenceId: string): Promise<unknown> {
       return request<unknown>(`/projects/${projectId}/evidence/${evidenceId}/extract`, {
         method: "POST",
       });
@@ -1030,523 +1022,1038 @@ export const api = {
     },
   },
   relationships: {
+
     async getGraph(
+
       projectId: string,
+
       limit: number = 250,
+
       options?: { center_node_id?: string; depth?: number; entity_type?: string }
+
     ): Promise<{
+
       nodes: Array<{
+
         id: string;
+
         label: string;
+
         type?: string;
+
         entity_type?: string;
+
         canonical_name?: string;
+
         description?: string | null;
+
         confidence?: number;
+
         resolution_status?: string;
+
         status?: string;
+
         verification_status?: string;
+
         source_provider?: string | null;
+
       }>;
+
       edges: Array<{
+
         id: string;
+
         source: string;
+
         target: string;
+
         type?: string;
+
         relationship_type?: string;
+
         label?: string;
+
         verification_status?: string;
+
         confidence?: number;
+
         evidence_count?: number;
+
       }>;
+
       total_nodes?: number;
+
       total_edges?: number;
+
     }> {
+
       const qs = new URLSearchParams({
+
         limit_nodes: String(limit),
+
         limit_edges: String(limit * 2),
+
       });
+
       if (options?.center_node_id) qs.set("center_node_id", options.center_node_id);
+
       if (options?.depth) qs.set("depth", String(options.depth));
+
       if (options?.entity_type) qs.set("entity_type", options.entity_type);
+
       return request(`/projects/${projectId}/relationships/graph?${qs.toString()}`);
+
     },
+
     async listEntities(projectId: string, type?: string, page: number = 1, pageSize: number = 50): Promise<{
+
       items: Array<{
+
         id: string;
+
         canonical_name: string;
+
         entity_type: string;
+
         confidence_score: number;
+
         resolution_status: string;
+
         description?: string;
+
         created_at: string;
+
       }>;
+
       total: number;
+
     }> {
+
       const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+
       if (type) qs.append("type", type);
+
       return request(`/projects/${projectId}/relationships/entities?${qs.toString()}`);
+
     },
+
     async getEntityDetails(projectId: string, entityId: string): Promise<Record<string, unknown>> {
+
       return request(`/projects/${projectId}/relationships/entities/${entityId}`);
+
     },
+
     async getTraceability(projectId: string): Promise<{
+
       items?: Array<{
+
         id: string;
+
         decision_entity_id: string;
+
         decision_name?: string;
+
         completeness_status: string;
+
         work_item_count?: number;
+
         pr_count?: number;
+
         commit_count?: number;
+
         component_count?: number;
+
         work_item_ids?: string[];
+
         pull_request_ids?: string[];
+
         commit_ids?: string[];
+
         component_ids?: string[];
+
         missing_links: string[];
+
       }>;
+
       chains?: Array<{
+
         id: string;
+
         decision_entity_id: string;
+
         decision_name: string;
+
         completeness_status: string;
+
         work_item_count: number;
+
         pr_count: number;
+
         commit_count: number;
+
         component_count: number;
+
         missing_links: string[];
+
       }>;
+
     }> {
+
       return request(`/projects/${projectId}/relationships/traceability`);
+
     },
+
     async getDependencies(projectId: string, rootId?: string): Promise<{
+
       nodes: Array<{ id: string; label: string; entity_type: string; is_root_blocker: boolean; in_degree: number; out_degree: number }>;
+
       edges: Array<{ source: string; target: string; relationship_type: string }>;
+
       cycles: string[][];
+
       detected_cycles?: string[][];
+
       root_blockers: string[];
+
     }> {
+
       const qs = rootId ? `?root_entity_id=${rootId}` : "";
+
       return request(`/projects/${projectId}/relationships/dependencies${qs}`);
+
     },
+
     async getTimeline(projectId: string): Promise<{
+
       items: Array<{
+
         id: string;
+
         event_type: string;
+
         title: string;
+
         summary?: string;
+
         occurred_at: string;
+
         timestamp_precision: string;
+
         timestamp_origin: string;
+
       }>;
+
       total_events: number;
+
     }> {
+
       return request(`/projects/${projectId}/relationships/timeline`);
+
     },
+
     async listIdentityCandidates(projectId: string): Promise<Record<string, unknown>[]> {
+
       return request(`/projects/${projectId}/relationships/identities/candidates`);
+
     },
+
     async reviewCandidate(projectId: string, candidateId: string, decision: "accept" | "reject", rationale?: string): Promise<Record<string, unknown>> {
+
       return request(`/projects/${projectId}/relationships/identities/candidates/${candidateId}/review`, {
+
         method: "POST",
         body: JSON.stringify({ action: decision, decision, rationale }),
       });
+
     },
+
     async triggerReconstruction(projectId: string): Promise<{
+
       id: string;
+
       status: string;
+
       entities_discovered: number;
+
       relationships_discovered: number;
+
     }> {
+
       return request(`/projects/${projectId}/relationships/reconstruct`, {
+
         method: "POST",
+
       });
+
     },
+
     async submitRelationshipReview(
+
       projectId: string,
+
       relationshipId: string,
+
       payload: { action: "verify" | "reject" | "dispute" | "request_evidence"; note?: string }
+
     ): Promise<Record<string, unknown>> {
+
       return request(`/projects/${projectId}/relationships/${relationshipId}/submit-for-review`, {
+
         method: "POST",
+
         body: JSON.stringify(payload),
+
       });
+
     },
+
     async getContributorsGraph(
+
       projectId: string,
+
       params?: {
+
         contributor_type?: string;
+
         work_cluster?: string;
+
         repository?: string;
+
         verification_state?: string;
+
         search?: string;
+
         include_external?: boolean;
+
         include_bots?: boolean;
+
         expand_contributor_key?: string;
+
         expand_cluster_name?: string;
+
         limit?: number;
+
       }
+
     ): Promise<{
+
       project_id: string;
+
       nodes: Array<{
+
         id: string;
+
         node_kind: string;
+
         label: string;
+
         contributor_key?: string | null;
+
         contributor_type: string;
+
         review_status: string;
+
         verification_status: string;
+
         contribution_count: number;
+
         metadata: Record<string, unknown>;
+
       }>;
+
       edges: Array<{
+
         id: string;
+
         source: string;
+
         target: string;
+
         relationship_type: string;
+
         label: string;
+
         evidence_basis: string;
+
       }>;
+
       summary: Record<string, number>;
+
     }> {
+
       const qs = new URLSearchParams();
+
       if (params) {
+
         Object.entries(params).forEach(([k, v]) => {
+
           if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+
         });
+
       }
+
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
+
       return request(`/projects/${projectId}/relationships/contributors/graph${suffix}`);
+
     },
+
     async listContributors(
+
       projectId: string,
+
       params?: { contributor_type?: string; review_status?: string }
+
     ): Promise<
+
       Array<{
+
         contributor_key: string;
+
         display_name: string;
+
         github_login?: string | null;
+
         github_numeric_id?: string | null;
+
         git_author_name?: string | null;
+
         git_author_email?: string | null;
+
         contributor_type: string;
+
         review_status: string;
+
         match_method?: string | null;
+
         match_confidence?: number | null;
+
         matched_project_membership_id?: string | null;
+
         matched_member_name?: string | null;
+
         suggested_project_membership_id?: string | null;
+
         suggested_member_name?: string | null;
+
         declared_responsibility?: string | null;
+
         contribution_count: number;
+
         commits_count: number;
+
         prs_count: number;
+
         issues_count: number;
+
         repositories: string[];
+
         work_areas: string[];
+
         evidence_ids: string[];
+
         review_history: Array<Record<string, unknown>>;
+
       }>
+
     > {
+
       const qs = new URLSearchParams();
+
       if (params?.contributor_type) qs.set("contributor_type", params.contributor_type);
+
       if (params?.review_status) qs.set("review_status", params.review_status);
+
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
+
       return request(`/projects/${projectId}/relationships/contributors${suffix}`);
+
     },
+
     async getContributorDetail(projectId: string, contributorKey: string): Promise<Record<string, unknown>> {
+
       return request(`/projects/${projectId}/relationships/contributors/${encodeURIComponent(contributorKey)}`);
+
     },
+
     async listSelectableMembers(projectId: string): Promise<
+
       Array<{
+
         selection_key: string;
+
         member_source: string;
+
         membership_state: string;
+
         selectable_for_match: boolean;
+
         project_membership_id?: string | null;
+
         user_id?: string | null;
+
         invitation_id?: string | null;
+
         roster_member_id?: string | null;
+
         display_name: string;
+
         email?: string | null;
+
         role_name: string;
+
         github_login?: string | null;
+
         review_status: string;
+
         note?: string | null;
+
       }>
+
     > {
+
       return request(`/projects/${projectId}/relationships/identities/selectable-members`);
+
     },
+
     async reviewContributor(
+
       projectId: string,
+
       contributorKey: string,
+
       payload: {
+
         action: "match_member" | "mark_external" | "mark_bot" | "leave_unidentified" | "reject_match" | "revert";
+
         project_membership_id?: string;
+
         user_id?: string;
+
         invitation_id?: string;
+
         roster_member_id?: string;
+
         notes?: string;
+
       }
+
     ): Promise<{ contributor_key: string; contributor_type: string; review_status: string; updated_records: number }> {
+
       return request(`/projects/${projectId}/relationships/contributors/${encodeURIComponent(contributorKey)}/review`, {
+
         method: "POST",
+
         body: JSON.stringify(payload),
+
       });
+
     },
+
     async listWorkClusters(projectId: string): Promise<
+
       Array<{
+
         cluster_id: string;
+
         name: string;
+
         classification_method: string;
+
         contribution_count: number;
+
         contributor_count: number;
+
         contributors: Array<{ contributor_key: string; display_name: string; contributor_type: string; count: number }>;
+
         contributions: Array<{
+
           evidence_id: string;
+
           title: string;
+
           category: string;
+
           contributor_key: string;
+
           contributor_name: string;
+
           contributor_type: string;
+
           alignment?: string | null;
+
         }>;
+
         changed_paths: string[];
+
         evidence_ids: string[];
+
       }>
+
     > {
+
       return request(`/projects/${projectId}/relationships/work-clusters`);
+
     },
+
     async rebuildWorkClusters(projectId: string): Promise<{
+
       run_id: string;
+
       algorithm_version: string;
+
       clusters_count: number;
+
       relationships_created: number;
+
       completed_at: string;
+
     }> {
+
       return request(`/projects/${projectId}/relationships/work-clusters/rebuild`, {
+
         method: "POST",
+
       });
+
     },
+
   },
   knowledgeIntelligence: {
+
     async getGraph(
+
       projectId: string,
+
       graphType: "technology-stack" | "system-architecture" | "features-workflows",
+
       params?: {
+
         search?: string;
+
         status?: string;
+
         source_type?: string;
+
         verification_state?: string;
+
         limit?: number;
+
         cursor?: string;
+
         include_suggested?: boolean;
+
       }
+
     ): Promise<{
+
       graph_type: "technology-stack" | "system-architecture" | "features-workflows";
+
       project_id: string;
+
       nodes: Array<{
+
         id: string;
+
         entity_type: string;
+
         label: string;
+
         description?: string | null;
+
         category?: string | null;
+
         status: string;
+
         verification_status: string;
+
         evidence_count: number;
+
         evidence_ids: string[];
+
         aliases: string[];
+
         last_observed_at?: string | null;
+
         metadata: Record<string, unknown>;
+
       }>;
+
       edges: Array<{
+
         id: string;
+
         source: string;
+
         target: string;
+
         relationship_type: string;
+
         label: string;
+
         evidence_basis: string;
+
         verification_status: string;
+
         confidence_score: number;
+
         evidence_ids: string[];
+
       }>;
+
       summary: { node_count: number; edge_count: number; categories: Record<string, number> };
+
       next_cursor?: string | null;
+
     }> {
+
       const qs = new URLSearchParams();
+
       if (params) {
+
         Object.entries(params).forEach(([k, v]) => {
+
           if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+
         });
+
       }
+
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
+
       return request(`/projects/${projectId}/knowledge-intelligence/graphs/${graphType}${suffix}`);
+
     },
+
     async getGraphNodeDetail(
+
       projectId: string,
+
       graphType: "technology-stack" | "system-architecture" | "features-workflows",
+
       nodeId: string
+
     ): Promise<{
+
       graph_type: string;
+
       project_id: string;
+
       node: Record<string, unknown>;
+
       adjacent_edges: Array<Record<string, unknown>>;
+
       related_nodes: Array<Record<string, unknown>>;
+
       evidence_refs: Array<{
+
         evidence_id: string;
+
         title: string;
+
         source_type: string;
+
         source_url?: string | null;
+
         supporting_excerpt?: string | null;
+
       }>;
+
     }> {
+
       return request(`/projects/${projectId}/knowledge-intelligence/graphs/${graphType}/nodes/${nodeId}`);
+
     },
+
     async getSummary(projectId: string): Promise<{
+
       total_findings: number;
+
       by_category: Record<string, number>;
+
       by_domain: Record<string, number>;
+
       verified_count: number;
+
       candidate_count: number;
+
     }> {
+
       return request(`/projects/${projectId}/knowledge-intelligence/summary`);
+
     },
+
     async getDomains(projectId: string): Promise<{
+
       domains: Array<{
+
         domain_id: string;
+
         display_name: string;
+
         description: string;
+
         item_count: number;
+
         verified_count: number;
+
         pending_review_count: number;
+
         completeness_score: number;
+
       }>;
+
       total_domains: number;
+
       active_domains_count: number;
+
     }> {
+
       return request(`/projects/${projectId}/knowledge-intelligence/domains`);
+
     },
+
     async triggerExtraction(projectId: string, options?: { domains?: string[]; evidence_ids?: string[]; force_rerun?: boolean }): Promise<{
+
       run: Record<string, unknown>;
+
       job?: Record<string, unknown>;
+
       already_active: boolean;
+
     }> {
+
       return request(`/projects/${projectId}/knowledge-intelligence/extract`, {
+
         method: "POST",
+
         body: JSON.stringify(options || {}),
+
       });
+
     },
+
     async listFindings(
+
       projectId: string,
+
       domain?: string,
+
       limit: number = 100,
+
       offset: number = 0
+
     ): Promise<{
+
       items: Record<string, unknown>[];
+
       total: number;
+
       limit: number;
+
       offset: number;
+
     }> {
+
       const qs = new URLSearchParams({
+
         limit: String(Math.min(limit, 100)),
+
         offset: String(offset),
+
       });
+
       if (domain) qs.append("domain", domain);
+
       return request(`/projects/${projectId}/knowledge-intelligence/findings?${qs.toString()}`);
+
     },
+
   },
-  knowledge: {
+
+    knowledge: {
+
     async triggerEvidenceExtraction(
+
       projectId: string,
+
       evidenceId: string,
+
       payload?: { categories?: string[]; force_rerun?: boolean }
+
     ): Promise<{
+
       run: Record<string, unknown>;
+
       job?: Record<string, unknown>;
+
       already_active: boolean;
+
     }> {
+
       return request(`/projects/${projectId}/evidence/${evidenceId}/extractions`, {
+
         method: "POST",
+
         body: JSON.stringify(payload || {}),
+
       });
+
     },
+
     async listEvidenceExtractions(
+
       projectId: string,
+
       evidenceId: string,
+
       status?: string
+
     ): Promise<{
+
       items: Record<string, unknown>[];
+
       total: number;
+
     }> {
+
       const qs = new URLSearchParams();
+
       if (status) qs.append("status", status);
+
       const qStr = qs.toString() ? `?${qs.toString()}` : "";
+
       return request(`/projects/${projectId}/evidence/${evidenceId}/extractions${qStr}`);
+
     },
+
     async getEvidenceExtraction(
+
       projectId: string,
+
       evidenceId: string,
+
       runId: string
+
     ): Promise<Record<string, unknown>> {
+
       return request(`/projects/${projectId}/evidence/${evidenceId}/extractions/${runId}`);
+
     },
+
     async getEvidenceFacts(
+
       projectId: string,
+
       evidenceId: string
+
     ): Promise<{
+
       evidence_id: string;
+
       project_id: string;
+
       total_facts: number;
+
       ai_extracted_count: number;
+
       raw_chunk_count: number;
+
       latest_run_id?: string | null;
+
       latest_run_status?: string | null;
+
       facts: Array<{
+
         id: string;
+
         evidence_id: string;
+
         knowledge_item_id?: string | null;
+
         chunk_id?: string | null;
+
         title: string;
+
         description: string;
+
         category: string;
+
         primary_domain?: string | null;
+
         confidence_level: string;
+
         grounding_score: number;
+
         confidence_explanation?: string | null;
+
         original_excerpt: string;
+
         page_or_section?: string | null;
+
         validation_state: string;
+
         is_ai_extracted: boolean;
+
         created_at: string;
+
       }>;
+
       raw_chunks: Array<{
+
         id: string;
+
         chunk_index: number;
+
         page_number?: number | null;
+
         chunk_type: string;
+
         char_count: number;
+
         token_estimate: number;
+
         chunk_text: string;
+
         text_content?: string;
+
         indexing_status: string;
+
       }>;
+
     }> {
+
       return request(`/projects/${projectId}/evidence/${evidenceId}/facts`);
+
     },
+
     async getEvidenceFindings(
+
       projectId: string,
+
       evidenceId: string,
+
       category?: string
+
     ): Promise<{
+
       items: Record<string, unknown>[];
+
       total: number;
+
     }> {
+
       const qs = new URLSearchParams();
+
       if (category) qs.append("category", category);
+
       const qStr = qs.toString() ? `?${qs.toString()}` : "";
+
       return request(`/projects/${projectId}/evidence/${evidenceId}/findings${qStr}`);
+
     },
+
   },
   verification: {
     async getSummary(projectId: string): Promise<VerificationSummaryResponse> {
@@ -1785,20 +2292,20 @@ export const api = {
         { method: "POST" }
       );
     },
-    async assessAll(projectId: string): Promise<VerificationSummaryResponse> {
-      return request<VerificationSummaryResponse>(`/projects/${projectId}/verification/assess-all`, {
-        method: "POST",
-      });
-    },
     async assessTarget(
       projectId: string,
       targetType: "knowledge_item" | "relationship",
       targetId: string
-    ): Promise<Record<string, unknown>> {
-      return request(
+    ): Promise<VerificationCaseDetail> {
+      return request<VerificationCaseDetail>(
         `/projects/${projectId}/verification/assess?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`,
         { method: "POST" }
       );
+    },
+    async assessAll(projectId: string): Promise<VerificationSummaryResponse> {
+      return request<VerificationSummaryResponse>(`/projects/${projectId}/verification/assess-all`, {
+        method: "POST",
+      });
     },
   },
   conflicts: {
@@ -2350,7 +2857,28 @@ export const api = {
       const detail = await this.getConversation(projectId, conversationId);
       return detail.messages || [];
     },
-    async startInvestigation(
+    async deleteConversation(projectId: string, conversationId: string): Promise<void> {
+      return request(`/projects/${projectId}/assistant/conversations/${conversationId}`, {
+        method: "DELETE",
+      });
+    },
+    async submitFeedback(
+      projectId: string,
+      messageId: string,
+      data: {
+        feedback_type: "helpful" | "unhelpful" | "incorrect_fact" | "missing_citation" | "unauthorized_source";
+        comment?: string;
+      }
+    ): Promise<{ id: string; message_id: string; user_id: string; feedback_type: string; comment?: string }> {
+      return request(`/projects/${projectId}/assistant/messages/${messageId}/feedback`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async getDiagnostics(projectId: string, runId: string): Promise<unknown> {
+      return request(`/projects/${projectId}/assistant/diagnostics/retrieval/${runId}`);
+    },
+      async startInvestigation(
       projectId: string,
       conversationId: string,
       data: {
@@ -2400,27 +2928,6 @@ export const api = {
       }>;
     }> {
       return request(`/projects/${projectId}/assistant/investigations/${investigationId}`);
-    },
-    async deleteConversation(projectId: string, conversationId: string): Promise<void> {
-      return request(`/projects/${projectId}/assistant/conversations/${conversationId}`, {
-        method: "DELETE",
-      });
-    },
-    async submitFeedback(
-      projectId: string,
-      messageId: string,
-      data: {
-        feedback_type: "helpful" | "unhelpful" | "incorrect_fact" | "missing_citation" | "unauthorized_source";
-        comment?: string;
-      }
-    ): Promise<{ id: string; message_id: string; user_id: string; feedback_type: string; comment?: string }> {
-      return request(`/projects/${projectId}/assistant/messages/${messageId}/feedback`, {
-        method: "POST",
-        body: JSON.stringify(data),
-      });
-    },
-    async getDiagnostics(projectId: string, runId: string): Promise<unknown> {
-      return request(`/projects/${projectId}/assistant/diagnostics/retrieval/${runId}`);
     },
   },
   audit: {
