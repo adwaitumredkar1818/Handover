@@ -4,10 +4,10 @@ import React, { Suspense, useEffect, useState, useMemo, type ReactNode } from 'r
 import { useRouter, useParams, useSearchParams } from 'next/navigation'
 import NextLink from 'next/link'
 import {
-  AlertTriangle, ArrowLeft, ArrowRight, BookOpen, Calendar, Check, CheckCircle2,
+  AlertTriangle, ArrowLeft, ArrowRight, BookOpen, Bot, Calendar, Check, CheckCircle2,
   ClipboardCheck, Clock, Database, Eye, FileText, Filter, FolderKanban, Inbox,
   KeyRound, LayoutGrid, Lightbulb, List, ListTodo, Loader2, Lock, MessageSquareText,
-  Network, Pencil, Plus, Send, ShieldCheck, Sparkles, Undo2, UserRoundCog, Users,
+  Network, Pencil, Plus, RefreshCw, Send, ShieldCheck, Sparkles, Undo2, UserRoundCog, Users,
   Workflow, XCircle, Link2, Ban, FileQuestion, Search
 } from 'lucide-react'
 
@@ -98,17 +98,49 @@ export function getMemberDisplayRole(
   return p?.title || 'Project Member'
 }
 
+export const HANDOVER_TYPE_LABELS: Record<string, string> = {
+  developer: 'Developer Handover',
+  project_manager: 'Project Manager Handover',
+  technical_lead: 'Technical Lead Handover',
+}
+
 export function mapCaseToHandover(hc: any, fallbackProjectId: string): Handover {
   let uiStatus: HandoverStatus = 'in_progress'
   const st = (hc.status || '').toLowerCase()
   if (st === 'draft') uiStatus = 'draft'
-  else if (['assembled', 'ready_for_review', 'under_review', 'pending_review'].includes(st)) uiStatus = 'pending_review'
+  else if (['assembling', 'assembled', 'readiness_pending', 'readiness_assessed'].includes(st)) uiStatus = 'in_progress'
+  else if (['review_pending', 'under_review', 'ready_for_review', 'rejected', 'changes_requested'].includes(st)) uiStatus = 'pending_review'
   else if (['approved', 'ready_for_delivery'].includes(st)) uiStatus = 'approved'
-  else if (['delivered', 'published', 'acknowledged'].includes(st)) uiStatus = 'published'
-  else if (['completed', 'closed'].includes(st)) uiStatus = 'completed'
+  else if (['delivered', 'published'].includes(st)) uiStatus = 'published'
+  else if (['acknowledged', 'transferred', 'completed', 'closed'].includes(st)) uiStatus = 'completed'
   else uiStatus = 'in_progress'
 
-  const prog = uiStatus === 'completed' ? 100 : uiStatus === 'published' ? 85 : uiStatus === 'approved' ? 70 : uiStatus === 'pending_review' ? 50 : 35
+  const prog =
+    uiStatus === 'completed'
+      ? 100
+      : uiStatus === 'published'
+      ? 85
+      : uiStatus === 'approved'
+      ? 70
+      : uiStatus === 'pending_review'
+      ? 55
+      : uiStatus === 'in_progress'
+      ? 35
+      : 15
+
+  const rawHandoverType =
+    hc.handover_type ||
+    (hc.metadata_json && typeof hc.metadata_json.handover_type === 'string'
+      ? hc.metadata_json.handover_type
+      : 'developer')
+
+  const dueFormatted = hc.target_handover_date
+    ? new Date(hc.target_handover_date).toLocaleDateString('en-GB', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+      })
+    : 'Flexible'
 
   return {
     id: hc.id,
@@ -119,8 +151,12 @@ export function mapCaseToHandover(hc: any, fallbackProjectId: string): Handover 
     created: hc.created_at ? new Date(hc.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : 'Recently',
     updated: hc.updated_at ? new Date(hc.updated_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : 'Just now',
     status: uiStatus,
+    rawStatus: hc.status || 'draft',
+    versionNumber: hc.version || 1,
+    handoverType: rawHandoverType,
+    targetHandoverDate: hc.target_handover_date || null,
     progress: prog,
-    due: '31 Jul',
+    due: dueFormatted,
     scope: hc.title || 'Knowledge Reconstruction & Handover',
   }
 }
@@ -469,6 +505,8 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
 
   const [out, setOut] = useState('')
   const [inc, setInc] = useState('')
+  const [handoverTitle, setHandoverTitle] = useState('')
+  const [handoverType, setHandoverType] = useState<'developer' | 'project_manager' | 'technical_lead'>('developer')
 
   const projectSources = useMemo(() => {
     if (sourceMappings && sourceMappings.length > 0) {
@@ -530,11 +568,16 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
 
       // 1. Create Case in PostgreSQL
       const caseRes = await api.handover.createCase(targetPid, {
-        title: `Handover: ${project?.name || activeProject?.name || 'Skill Passport'} Transfer`,
+        title:
+          handoverTitle.trim() ||
+          `Handover: ${project?.name || activeProject?.name || 'Skill Passport'} Transfer`,
         description: scope.notes || 'Knowledge reconstruction for departing team member',
         departing_member_id: targetOut,
         successor_id: targetInc,
+        handover_type: handoverType,
+        target_handover_date: scope.due || undefined,
         metadata_json: {
+          handover_type: handoverType,
           scope_areas: scope.areas,
           from: scope.from,
           to: scope.to,
@@ -635,7 +678,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
         if (submitMode === 'verify') {
           await api.handover.submitSignoff(targetPid, createdCaseId, {
             version_id: assembledVersionId || '',
-            signoff_type: 'departing_verification',
+            signoff_type: 'departing_signoff',
             decision: 'approved',
             comments: 'Submitted for verification by departing member',
           })
@@ -726,6 +769,29 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
                     </button>
                   )
                 })}
+              </div>
+              <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                <Field label="Handover title (optional)">
+                  <Input
+                    value={handoverTitle}
+                    onChange={(e) => setHandoverTitle(e.target.value)}
+                    placeholder={`Handover: ${project?.name || activeProject?.name || 'Project'} Transfer`}
+                  />
+                </Field>
+                <Field label="Handover type & role presentation">
+                  <Select
+                    value={handoverType}
+                    onChange={(e) =>
+                      setHandoverType(
+                        e.target.value as 'developer' | 'project_manager' | 'technical_lead'
+                      )
+                    }
+                  >
+                    <option value="developer">Developer Handover</option>
+                    <option value="project_manager">Project Manager Handover</option>
+                    <option value="technical_lead">Technical Lead Handover</option>
+                  </Select>
+                </Field>
               </div>
             </>
           )}
@@ -923,6 +989,8 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
               <p className="mt-1 text-sm text-muted">Check everything before starting reconstruction.</p>
               <dl className="mt-5 divide-y divide-line rounded-xl border border-line">
                 {[
+                  ['Title', handoverTitle.trim() || `Handover: ${project?.name || activeProject?.name || 'Skill Passport'} Transfer`, 0],
+                  ['Handover type', HANDOVER_TYPE_LABELS[handoverType] || 'Developer Handover', 0],
                   ['Project', project?.name, 0],
                   ['Members', `${getMemberDisplayName(out, liveMembers, user)} → ${inc ? getMemberDisplayName(inc, liveMembers, user) : 'Unassigned'}`, 1],
                   ['Sources', projectSources.length ? projectSources.filter((x) => srcSel.includes(x.id)).map((x) => x.name).join(', ') : 'Project Documents & Evidence', 2],
@@ -1174,6 +1242,7 @@ export function HandoverLayout({
   const [readinessError, setReadinessError] = useState<string | null>(null)
   const [readinessNotAssessed, setReadinessNotAssessed] = useState(false)
   const [readinessNonce, setReadinessNonce] = useState(0)
+  const [isRefreshingDraft, setIsRefreshingDraft] = useState(false)
 
   const resolvedProjectId = (h?.projectId && isUUID(h.projectId) ? h.projectId : activeProject?.id) || ''
 
@@ -1335,6 +1404,54 @@ export function HandoverLayout({
     }
   }
 
+  const refreshDraftPackage = async () => {
+    if (
+      isRefreshingDraft ||
+      !id ||
+      !isUUID(id) ||
+      !resolvedProjectId ||
+      !isUUID(resolvedProjectId)
+    ) {
+      return
+    }
+    setIsRefreshingDraft(true)
+    try {
+      const assembled = await api.handover.assemblePackage(resolvedProjectId, id, {
+        assembly_notes: 'Refreshed handover package snapshot from latest verified project knowledge',
+      })
+      const newVerId = assembled?.id
+      const updatedVersions = await api.handover.getVersions(resolvedProjectId, id)
+      setVersions(Array.isArray(updatedVersions) ? updatedVersions : [])
+      if (newVerId) {
+        setSelectedVersionId(newVerId)
+        try {
+          const updatedReadiness = await api.handover.assessReadiness(
+            resolvedProjectId,
+            id,
+            newVerId,
+            'Automated readiness assessment after draft refresh'
+          )
+          setReadinessData(updatedReadiness)
+          setReadinessNotAssessed(false)
+        } catch {
+          setReadinessNonce((n) => n + 1)
+        }
+      }
+      setRetryNonce((n) => n + 1)
+      await refreshHandovers()
+      s.toast(
+        'Draft refreshed',
+        `New package snapshot v${assembled?.version_number || ''} assembled from verified findings.`,
+        'success'
+      )
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to refresh handover draft.'
+      s.toast('Refresh failed', msg, 'error')
+    } finally {
+      setIsRefreshingDraft(false)
+    }
+  }
+
   if (!h || !project) return <HandoverNotFound />
 
   const sectionsCtx: HandoverSectionsContext = {
@@ -1360,7 +1477,31 @@ export function HandoverLayout({
   const totalCandidates = verifiedCount + pendingCount
   const idx = STAGE_LABELS.findIndex(([k]) => k === h.status)
 
+  const isLockedLifecycle = ['approved', 'published', 'completed'].includes(h.status)
   const actions: ReactNode[] = []
+  if (!isLockedLifecycle) {
+    actions.push(
+      <Button
+        key="refresh-draft"
+        variant="secondary"
+        icon={RefreshCw}
+        disabled={isRefreshingDraft}
+        onClick={() => void refreshDraftPackage()}
+      >
+        {isRefreshingDraft ? 'Refreshing…' : 'Refresh Draft'}
+      </Button>
+    )
+  }
+  actions.push(
+    <Button
+      key="assistant"
+      variant="secondary"
+      icon={Bot}
+      onClick={() => router.push(`/handovers/${h.id}/assistant`)}
+    >
+      Ask Assistant
+    </Button>
+  )
   if (tab !== 'review') {
     actions.push(
       <Button
@@ -1428,6 +1569,11 @@ export function HandoverLayout({
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs font-semibold text-muted">{h.code}</span>
                   <StatusBadge status={h.status} />
+                  <Badge tone="indigo">
+                    {sectionsData?.handover_type_label ||
+                      HANDOVER_TYPE_LABELS[h.handoverType || 'developer'] ||
+                      'Developer Handover'}
+                  </Badge>
                   <Tooltip content="Your perspective on this handover, based on your role in the project.">
                     <span><RoleBadge role={role} /></span>
                   </Tooltip>
@@ -1890,6 +2036,7 @@ export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?:
                 error={sectionsCtx.sectionsError}
                 projectId={resolvedPid}
                 handoverId={h.id}
+                caseStatus={h.rawStatus || h.status}
                 onRetry={sectionsCtx.retryLoadSections}
                 onNavigateTab={navigateTab}
               />
@@ -1935,6 +2082,7 @@ export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?:
             error={sectionsCtx.sectionsError}
             projectId={resolvedPid}
             handoverId={h.id}
+            caseStatus={h.rawStatus || h.status}
             onRetry={sectionsCtx.retryLoadSections}
             onNavigateTab={navigateTab}
             overviewExtras={normalizedTab === 'overview' ? checklistsCard : undefined}
@@ -1951,20 +2099,21 @@ export function PublishedHandovers() {
   const { handoverCases, projects, members, user } = useLiveApp()
 
   const liveHandovers = useMemo(() => {
-    return (handoverCases || []).map((c) => {
-      const pName = projects.find((p) => p.id === c.project_id)?.name || 'Project'
-      return mapCaseToHandover(c, pName)
-    })
-  }, [handoverCases, projects])
+    return (handoverCases || []).map((c) => mapCaseToHandover(c, c.project_id || ''))
+  }, [handoverCases])
 
-  const list = liveHandovers.filter((h) => ['published', 'completed', 'delivered', 'acknowledged'].includes(h.status))
+  const list = liveHandovers.filter((h) => {
+    const isPublished = ['published', 'completed', 'delivered', 'acknowledged'].includes(h.status)
+    if (!isPublished) return false
+    return true
+  })
 
   return (
     <>
       <div className="flex flex-col gap-3 pb-5 sm:flex-row sm:items-center sm:justify-between">
         <PageHeader
           title="Published Handovers"
-          subtitle="Track published handover packages and formal recipient acknowledgements."
+          subtitle="Track approved, published handover packages, versions, and formal recipient acknowledgements."
         />
         <Button icon={Plus} onClick={() => router.push('/handovers/new')}>
           Create handover
@@ -1988,71 +2137,97 @@ export function PublishedHandovers() {
             </div>
           </div>
         ) : (
-          <Table>
-            <thead>
-              <tr>
-                <Th>Handover</Th>
-                <Th>Project</Th>
-                <Th>Recipient</Th>
-                <Th>Updated</Th>
-                <Th>Status</Th>
-                <Th className="text-right">Actions</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {list.map((h) => {
-                const p = projects.find((x) => x.id === h.projectId)
-                const outName = getMemberDisplayName(h.outgoingId, members, user)
-                const incName = getMemberDisplayName(h.incomingId, members, user)
-                const isAck = h.status === 'completed' || (h.status as string) === 'acknowledged'
-                return (
-                  <tr key={h.id} className="hover:bg-slate-50/50">
-                    <Td>
-                      <Link to={`/handovers/${h.id}/review`} className="font-medium text-navy hover:text-brand">
-                        {h.code}
-                      </Link>
-                      <p className="text-xs text-muted">from {outName}</p>
-                    </Td>
-                    <Td className="text-[13px]">{p?.name || 'Project'}</Td>
-                    <Td>
-                      <span className="flex items-center gap-2 whitespace-nowrap text-[13px]">
-                        <Avatar id={h.incomingId} name={incName} size={24} />
-                        {incName}
-                      </span>
-                    </Td>
-                    <Td className="whitespace-nowrap text-[13px] text-muted">{h.updated}</Td>
-                    <Td>
-                      {isAck ? (
-                        <Badge tone="green" icon={CheckCircle2}>Acknowledged</Badge>
-                      ) : (
-                        <Badge tone="amber" icon={Clock}>Pending acknowledgement</Badge>
-                      )}
-                    </Td>
-                    <Td className="text-right">
-                      <div className="flex justify-end gap-1.5">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          icon={ShieldCheck}
-                          onClick={() => router.push(`/handovers/${h.id}/review`)}
-                        >
-                          Publication &amp; Audit
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          icon={BookOpen}
-                          onClick={() => router.push(`/handovers/${h.id}/recipient`)}
-                        >
-                          Recipient View
-                        </Button>
-                      </div>
-                    </Td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </Table>
+          <div className="overflow-x-auto">
+            <Table>
+              <thead>
+                <tr>
+                  <Th>Title</Th>
+                  <Th>Project</Th>
+                  <Th>Departing Member</Th>
+                  <Th>Successor</Th>
+                  <Th>Handover Type</Th>
+                  <Th>Lifecycle State</Th>
+                  <Th>Version</Th>
+                  <Th>Last Updated</Th>
+                  <Th className="text-right">Actions</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {list.map((h) => {
+                  const p = projects.find((x) => x.id === h.projectId)
+                  const outName = getMemberDisplayName(h.outgoingId, members, user)
+                  const incName = h.incomingId ? getMemberDisplayName(h.incomingId, members, user) : 'Unassigned'
+                  const typeLabel = HANDOVER_TYPE_LABELS[h.handoverType || 'developer'] || 'Developer Handover'
+                  const isAck = h.status === 'completed' || (h.status as string) === 'acknowledged'
+                  return (
+                    <tr key={h.id} className="hover:bg-slate-50/50">
+                      <Td>
+                        <Link to={`/handovers/${h.id}`} className="font-medium text-navy hover:text-brand">
+                          {h.scope}
+                        </Link>
+                        <p className="text-xs text-muted">{h.code}</p>
+                      </Td>
+                      <Td className="text-[13px]">{p?.name || 'Project'}</Td>
+                      <Td>
+                        <span className="flex items-center gap-2 whitespace-nowrap text-[13px]">
+                          <Avatar id={h.outgoingId} name={outName} size={24} />
+                          {outName}
+                        </span>
+                      </Td>
+                      <Td>
+                        <span className="flex items-center gap-2 whitespace-nowrap text-[13px]">
+                          <Avatar id={h.incomingId} name={incName} size={24} />
+                          {incName}
+                        </span>
+                      </Td>
+                      <Td className="whitespace-nowrap">
+                        <Badge tone="indigo">{typeLabel}</Badge>
+                      </Td>
+                      <Td>
+                        {isAck ? (
+                          <Badge tone="green" icon={CheckCircle2}>Acknowledged</Badge>
+                        ) : (
+                          <Badge tone="amber" icon={Clock}>Published · Awaiting Ack</Badge>
+                        )}
+                      </Td>
+                      <Td className="whitespace-nowrap text-[13px] font-medium text-navy">
+                        v{h.versionNumber || 1}
+                      </Td>
+                      <Td className="whitespace-nowrap text-[13px] text-muted">{h.updated}</Td>
+                      <Td className="text-right">
+                        <div className="flex justify-end gap-1.5">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            icon={Eye}
+                            onClick={() => router.push(`/handovers/${h.id}/recipient`)}
+                          >
+                            Open
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            icon={FileText}
+                            onClick={() => router.push(`/handovers/${h.id}/report`)}
+                          >
+                            Export
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            icon={Bot}
+                            onClick={() => router.push(`/handovers/${h.id}/assistant`)}
+                          >
+                            Assistant
+                          </Button>
+                        </div>
+                      </Td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </Table>
+          </div>
         )}
       </Card>
     </>

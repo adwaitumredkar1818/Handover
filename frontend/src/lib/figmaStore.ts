@@ -199,6 +199,10 @@ export interface Handover {
   created: string
   updated: string
   status: HandoverStatus
+  rawStatus?: string
+  versionNumber?: number
+  handoverType?: 'developer' | 'project_manager' | 'technical_lead' | string
+  targetHandoverDate?: string | null
   progress: number
   due: string
   scope: string

@@ -28,6 +28,7 @@ import type {
   RequestEmailVerificationResponse,
   HandoverPackageVersionSummary,
   HandoverVersionSectionsResponse,
+  HandoverContextContributionResponse,
   HandoverReadinessIntelligenceResponse,
   HandoverChecklistGroupDetail,
   HandoverChecklistItemDetail,
@@ -2373,6 +2374,10 @@ export const api = {
         updated_at: string;
         departing_member_id?: string;
         successor_id?: string;
+        assigned_reviewer_id?: string | null;
+        target_handover_date?: string | null;
+        handover_type?: string;
+        metadata_json?: Record<string, unknown>;
       }>;
       total: number;
     }> {
@@ -2384,12 +2389,16 @@ export const api = {
       description?: string;
       departing_member_id: string;
       successor_id?: string;
+      handover_type?: string;
+      target_handover_date?: string | null;
       metadata_json?: Record<string, unknown>;
     }): Promise<{
       id: string;
       title: string;
       status: string;
       version: number;
+      handover_type?: string;
+      target_handover_date?: string | null;
       created_at: string;
       updated_at: string;
     }> {
@@ -2408,6 +2417,10 @@ export const api = {
         version: number;
         departing_member_id?: string;
         successor_id?: string;
+        assigned_reviewer_id?: string | null;
+        handover_type?: string;
+        target_handover_date?: string | null;
+        metadata_json?: Record<string, unknown>;
         created_at: string;
         updated_at: string;
       };
@@ -2419,9 +2432,34 @@ export const api = {
     }> {
       return request(`/projects/${projectId}/handover/cases/${caseId}`);
     },
-    async updateCase(projectId: string, caseId: string, data: { title?: string; description?: string; successor_id?: string }): Promise<any> {
+    async updateCase(
+      projectId: string,
+      caseId: string,
+      data: {
+        title?: string;
+        description?: string;
+        successor_id?: string;
+        handover_type?: string;
+        target_handover_date?: string | null;
+      }
+    ): Promise<any> {
       return request(`/projects/${projectId}/handover/cases/${caseId}`, {
         method: "PATCH",
+        body: JSON.stringify(data),
+      });
+    },
+    async contributeContext(
+      projectId: string,
+      caseId: string,
+      data: {
+        category: string;
+        title: string;
+        content: string;
+        rationale?: string;
+      }
+    ): Promise<HandoverContextContributionResponse> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/context`, {
+        method: "POST",
         body: JSON.stringify(data),
       });
     },
@@ -2442,9 +2480,51 @@ export const api = {
     async getVersionSections(
       projectId: string,
       caseId: string,
-      versionId: string
+      versionId: string,
+      role?: string
     ): Promise<HandoverVersionSectionsResponse> {
-      return request(`/projects/${projectId}/handover/cases/${caseId}/versions/${versionId}/sections`);
+      const q = role ? `?role=${encodeURIComponent(role)}` : "";
+      return request(`/projects/${projectId}/handover/cases/${caseId}/versions/${versionId}/sections${q}`);
+    },
+    async draftSectionNarrative(
+      projectId: string,
+      caseId: string,
+      data: {
+        version_id: string;
+        section_type: string;
+        additional_context?: string;
+      }
+    ): Promise<{
+      section_id: string;
+      section_type: string;
+      draft_content: string;
+      content_summary?: string;
+      findings_count: number;
+    }> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/narrative/draft`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async editSectionContent(
+      projectId: string,
+      sectionId: string,
+      data: {
+        section_content?: string;
+        content_summary?: string;
+      }
+    ): Promise<{
+      id: string;
+      version_id: string;
+      section_type: string;
+      section_title: string;
+      section_content: string;
+      content_summary?: string;
+    }> {
+      return request(`/projects/${projectId}/handover/sections/${sectionId}`, {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      });
     },
     async getVersionDetail(projectId: string, caseId: string, versionId: string): Promise<{
       version: any;
@@ -2804,21 +2884,52 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
-    async exportMarkdown(projectId: string, caseId: string): Promise<string> {
-      return request(`/projects/${projectId}/handover/cases/${caseId}/export?format=markdown`);
+    async exportMarkdown(
+      projectId: string,
+      caseId: string,
+      opts?: { versionId?: string; role?: string }
+    ): Promise<string> {
+      const params = new URLSearchParams({ format: "markdown" });
+      if (opts?.versionId) params.set("version_id", opts.versionId);
+      if (opts?.role) params.set("role", opts.role);
+      return request(`/projects/${projectId}/handover/cases/${caseId}/export?${params.toString()}`);
     },
-    async exportJson(projectId: string, caseId: string): Promise<Record<string, unknown>> {
-      return request(`/projects/${projectId}/handover/cases/${caseId}/export?format=json`);
+    async exportJson(
+      projectId: string,
+      caseId: string,
+      opts?: { versionId?: string; role?: string }
+    ): Promise<Record<string, unknown>> {
+      const params = new URLSearchParams({ format: "json" });
+      if (opts?.versionId) params.set("version_id", opts.versionId);
+      if (opts?.role) params.set("role", opts.role);
+      return request(`/projects/${projectId}/handover/cases/${caseId}/export?${params.toString()}`);
+    },
+    async exportPdf(
+      projectId: string,
+      caseId: string,
+      opts?: { versionId?: string; role?: string }
+    ): Promise<Blob> {
+      const params = new URLSearchParams({ format: "pdf" });
+      if (opts?.versionId) params.set("version_id", opts.versionId);
+      if (opts?.role) params.set("role", opts.role);
+      return request(`/projects/${projectId}/handover/cases/${caseId}/export?${params.toString()}`);
     },
   },
   assistant: {
     async listConversations(projectId: string): Promise<AssistantConversation[]> {
       return request<AssistantConversation[]>(`/projects/${projectId}/assistant/conversations`);
     },
-    async createConversation(projectId: string, title?: string): Promise<AssistantConversation> {
+    async createConversation(
+      projectId: string,
+      title?: string,
+      metadata_json?: Record<string, unknown>
+    ): Promise<AssistantConversation> {
       return request<AssistantConversation>(`/projects/${projectId}/assistant/conversations`, {
         method: "POST",
-        body: JSON.stringify({ title: title || "New Investigation" }),
+        body: JSON.stringify({
+          title: title || "New Investigation",
+          ...(metadata_json ? { metadata_json } : {}),
+        }),
       });
     },
     async getConversation(projectId: string, conversationId: string): Promise<AssistantConversationDetail> {
@@ -2833,6 +2944,9 @@ export const api = {
         response_mode?: AssistantResponseMode;
         include_domains?: string[];
         max_citations?: number;
+        handover_case_id?: string;
+        package_version_id?: string;
+        current_section?: string;
       }
     ): Promise<AssistantAnswerResponse> {
       return request<AssistantAnswerResponse>(
@@ -2845,6 +2959,9 @@ export const api = {
             response_mode: data.response_mode || "standard",
             include_domains: data.include_domains,
             max_citations: data.max_citations || 8,
+            ...(data.handover_case_id ? { handover_case_id: data.handover_case_id } : {}),
+            ...(data.package_version_id ? { package_version_id: data.package_version_id } : {}),
+            ...(data.current_section ? { current_section: data.current_section } : {}),
           }),
         }
       );
@@ -2858,6 +2975,9 @@ export const api = {
         response_mode?: AssistantResponseMode;
         include_domains?: string[];
         max_citations?: number;
+        handover_case_id?: string;
+        package_version_id?: string;
+        current_section?: string;
       }
     ): Promise<AssistantAnswerResponse> {
       return this.askQuestion(projectId, conversationId, {
@@ -2866,6 +2986,9 @@ export const api = {
         response_mode: options?.response_mode,
         include_domains: options?.include_domains,
         max_citations: options?.max_citations,
+        handover_case_id: options?.handover_case_id,
+        package_version_id: options?.package_version_id,
+        current_section: options?.current_section,
       });
     },
     async getMessages(projectId: string, conversationId: string): Promise<AssistantConversationDetail["messages"]> {

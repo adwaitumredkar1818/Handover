@@ -23,6 +23,8 @@ import {
   Loader2,
   Lock,
   Network,
+  Pencil,
+  Plus,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
@@ -40,14 +42,20 @@ import {
   Card,
   CardHeader,
   EmptyState,
+  Field,
+  Input,
   Modal,
+  Select,
   Table,
   Td,
+  Textarea,
   Th,
   cn,
 } from '../figma-ui/index'
+import { api } from '../../lib/api'
 import type {
   CanonicalHandoverSectionType,
+  HandoverContextContributionResponse,
   HandoverDomainEpistemicBreakdown,
   HandoverEvidenceProvenance,
   HandoverSectionConflictItem,
@@ -667,6 +675,7 @@ export function CanonicalSectionPanel({
   error,
   projectId,
   handoverId,
+  caseStatus,
   onRetry,
   onNavigateTab,
   overviewExtras,
@@ -677,12 +686,33 @@ export function CanonicalSectionPanel({
   error: string | null
   projectId: string
   handoverId: string
+  caseStatus?: string
   onRetry: () => void
   onNavigateTab: (tab: string) => void
   overviewExtras?: React.ReactNode
 }) {
   const router = useRouter()
   const [inspectItem, setInspectItem] = useState<HandoverSectionKnowledgeItem | null>(null)
+
+  // Contribute Missing Context state
+  const [showContextModal, setShowContextModal] = useState(false)
+  const [ctxCategory, setCtxCategory] = useState<string>(sectionType)
+  const [ctxTitle, setCtxTitle] = useState('')
+  const [ctxContent, setCtxContent] = useState('')
+  const [ctxRationale, setCtxRationale] = useState('')
+  const [ctxSubmitting, setCtxSubmitting] = useState(false)
+  const [ctxError, setCtxError] = useState<string | null>(null)
+  const [ctxResult, setCtxResult] = useState<HandoverContextContributionResponse | null>(null)
+
+  // Section Narrative Drafting / Editing state
+  const [showNarrativeModal, setShowNarrativeModal] = useState(false)
+  const [narrativeDraft, setNarrativeDraft] = useState('')
+  const [narrativeSummary, setNarrativeSummary] = useState('')
+  const [narrativeExtraCtx, setNarrativeExtraCtx] = useState('')
+  const [narrativeGenerating, setNarrativeGenerating] = useState(false)
+  const [narrativeSaving, setNarrativeSaving] = useState(false)
+  const [narrativeWarning, setNarrativeWarning] = useState<string | null>(null)
+  const [narrativeError, setNarrativeError] = useState<string | null>(null)
 
   const domainMeta = CANONICAL_DOMAINS.find((d) => d.sectionType === sectionType) || CANONICAL_DOMAINS[0]!
   const DomainIcon = domainMeta.icon
@@ -759,6 +789,95 @@ export function CanonicalSectionPanel({
 
   const openVerification = () => router.push(`/verification?project=${projectId}`)
   const openConflicts = () => router.push(`/conflicts?project=${projectId}`)
+  const normalizedStatus = (caseStatus || '').toLowerCase()
+  const isLockedVersion =
+    Boolean((data.version as unknown as { is_locked?: boolean })?.is_locked) ||
+    ['approved', 'ready_for_delivery', 'delivered', 'published', 'acknowledged', 'transferred', 'completed'].includes(
+      normalizedStatus
+    )
+
+  const handleOpenContextModal = () => {
+    setCtxCategory(sectionType)
+    setCtxTitle('')
+    setCtxContent('')
+    setCtxRationale('')
+    setCtxError(null)
+    setCtxResult(null)
+    setShowContextModal(true)
+  }
+
+  const handleSubmitContext = async () => {
+    if (!ctxTitle.trim() || !ctxContent.trim()) {
+      setCtxError('Please enter both a clear title and the missing context details.')
+      return
+    }
+    setCtxSubmitting(true)
+    setCtxError(null)
+    try {
+      const res = await api.handover.contributeContext(projectId, handoverId, {
+        category: ctxCategory,
+        title: ctxTitle.trim(),
+        content: ctxContent.trim(),
+        rationale: ctxRationale.trim() || undefined,
+      })
+      setCtxResult(res)
+      onRetry()
+    } catch (err: unknown) {
+      setCtxError(err instanceof Error ? err.message : 'Failed to contribute missing context.')
+    } finally {
+      setCtxSubmitting(false)
+    }
+  }
+
+  const handleOpenNarrativeModal = () => {
+    setNarrativeDraft(section.section_content || '')
+    setNarrativeSummary(section.content_summary || '')
+    setNarrativeExtraCtx('')
+    setNarrativeWarning(null)
+    setNarrativeError(null)
+    setShowNarrativeModal(true)
+  }
+
+  const handleGenerateNarrativeDraft = async () => {
+    setNarrativeGenerating(true)
+    setNarrativeError(null)
+    setNarrativeWarning(null)
+    try {
+      const res = await api.handover.draftSectionNarrative(projectId, handoverId, {
+        version_id: section.version_id,
+        section_type: section.section_type,
+        additional_context: narrativeExtraCtx.trim() || undefined,
+      })
+      setNarrativeDraft(res.draft_content || '')
+      if (res.content_summary && !narrativeSummary.trim()) {
+        setNarrativeSummary(res.content_summary)
+      }
+      setNarrativeWarning(
+        `AI-generated draft synthesized ${res.findings_count} verified finding(s) — review and edit before saving.`
+      )
+    } catch (err: unknown) {
+      setNarrativeError(err instanceof Error ? err.message : 'Failed to generate AI narrative draft.')
+    } finally {
+      setNarrativeGenerating(false)
+    }
+  }
+
+  const handleSaveNarrative = async () => {
+    setNarrativeSaving(true)
+    setNarrativeError(null)
+    try {
+      await api.handover.editSectionContent(projectId, section.id, {
+        section_content: narrativeDraft,
+        content_summary: narrativeSummary.trim() || undefined,
+      })
+      setShowNarrativeModal(false)
+      onRetry()
+    } catch (err: unknown) {
+      setNarrativeError(err instanceof Error ? err.message : 'Failed to save section narrative.')
+    } finally {
+      setNarrativeSaving(false)
+    }
+  }
 
   const renderEmptyVerifiedState = () => {
     const pendingMsg =
@@ -782,6 +901,7 @@ export function CanonicalSectionPanel({
     )
   }
 
+  const renderDomainBody = (): React.ReactNode => {
   /* ---- Domain 1: Project Overview & Strategic Context ---- */
   if (sectionType === 'project_overview_context') {
     const ctx = section.domain_context || {}
@@ -1346,6 +1466,256 @@ export function CanonicalSectionPanel({
         projectId={projectId}
         onClose={() => setInspectItem(null)}
       />
+    </div>
+  )
+  }
+
+  const mandatoryMatch = (data.mandatory_sections || []).find((ms) =>
+    ms.source_domains.includes(sectionType)
+  )
+
+  return (
+    <div className="space-y-5">
+      {/* Contribution, Drafting & Epistemic Notice Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-white px-4 py-3 shadow-xs">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[13px] font-semibold text-navy">{section.section_title}</span>
+            {data.handover_type_label && (
+              <Badge tone="indigo">{data.handover_type_label}</Badge>
+            )}
+            {mandatoryMatch?.is_role_priority && (
+              <Badge tone="blue" icon={Sparkles}>
+                Priority for {data.handover_type_label || 'Role'}
+              </Badge>
+            )}
+          </div>
+          <p className="mt-0.5 text-xs text-muted">
+            {mandatoryMatch?.role_emphasis_note ||
+              data.role_focus_summary ||
+              'All verified items remain linked to source evidence and human verification decisions.'}
+          </p>
+        </div>
+        {!isLockedVersion && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={Plus}
+              onClick={handleOpenContextModal}
+            >
+              Contribute Missing Context
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={Pencil}
+              onClick={handleOpenNarrativeModal}
+            >
+              Draft / Edit Section Narrative
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Persisted Human-Edited Section Narrative Summary (if authored) */}
+      {(section.section_content || section.content_summary) && (
+        <Card className="p-5">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <FileText className="size-4 text-brand" />
+              <h3 className="text-sm font-semibold text-navy">Section Narrative Summary</h3>
+              <Badge tone="blue">Handover Narrative</Badge>
+            </div>
+            {!isLockedVersion && (
+              <Button size="sm" variant="ghost" icon={Pencil} onClick={handleOpenNarrativeModal}>
+                Edit narrative
+              </Button>
+            )}
+          </div>
+          {section.content_summary && (
+            <p className="mb-2 text-xs font-medium text-muted">{section.content_summary}</p>
+          )}
+          {section.section_content && (
+            <p className="whitespace-pre-wrap text-[13.5px] leading-relaxed text-slate-700">
+              {section.section_content}
+            </p>
+          )}
+        </Card>
+      )}
+
+      {renderDomainBody()}
+
+      {/* Contribute Missing Context Modal */}
+      <Modal
+        open={showContextModal}
+        onClose={() => setShowContextModal(false)}
+        title="Contribute Missing Handover Context"
+        subtitle="Additions are recorded as attributable candidate evidence and queued in Verification Center — never auto-verified."
+        footer={
+          ctxResult ? (
+            <div className="flex w-full items-center justify-between gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={ShieldCheck}
+                onClick={() => {
+                  setShowContextModal(false)
+                  router.push(`/verification?project=${projectId}`)
+                }}
+              >
+                Open in Verification Center
+              </Button>
+              <Button size="sm" onClick={() => setShowContextModal(false)}>
+                Done
+              </Button>
+            </div>
+          ) : (
+            <div className="flex w-full justify-end gap-2">
+              <Button variant="secondary" onClick={() => setShowContextModal(false)}>
+                Cancel
+              </Button>
+              <Button
+                icon={Plus}
+                disabled={ctxSubmitting}
+                onClick={() => void handleSubmitContext()}
+              >
+                {ctxSubmitting ? 'Submitting…' : 'Submit Candidate Context'}
+              </Button>
+            </div>
+          )
+        }
+      >
+        {ctxResult ? (
+          <div className="space-y-3">
+            <Callout tone="amber" icon={Clock} title="Recorded as candidate context (pending review)">
+              <p className="text-xs">
+                <strong>{ctxResult.title}</strong> has been stored with epistemic status{' '}
+                <code>{ctxResult.epistemic_status}</code> and review status{' '}
+                <code>{ctxResult.review_status}</code>. A human reviewer must approve it in Verification Center before it enters approved handover facts.
+              </p>
+              <p className="mt-1.5 font-mono text-[11px] text-amber-800">
+                Verification Case: {ctxResult.verification_case_id}
+              </p>
+            </Callout>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <Callout tone="blue" icon={ShieldAlert} title="Strict Epistemic Rule">
+              Contributed context is attributable to your account and remains unverified (
+              <code>extracted</code> / <code>pending_review</code>) until confirmed in Verification Center.
+            </Callout>
+            {ctxError && (
+              <Callout tone="red" icon={AlertTriangle} title="Submission error">
+                {ctxError}
+              </Callout>
+            )}
+            <Field label="Knowledge Domain Category">
+              <Select value={ctxCategory} onChange={(e) => setCtxCategory(e.target.value)}>
+                <option value="project_overview_context">Project Overview & Context</option>
+                <option value="decisions_rationale">Decisions & Rationale</option>
+                <option value="technical_architecture">Architecture & Technical Systems</option>
+                <option value="work_progress">Completed & Unfinished Work</option>
+                <option value="responsibilities_ownership">Responsibilities & Ownership</option>
+                <option value="dependencies_relationships">Dependencies & Relationships</option>
+                <option value="bugs_blockers_risks">Risks, Bugs & Blockers</option>
+                <option value="operational_historical">Operations, Setup & Next Steps</option>
+              </Select>
+            </Field>
+            <Field label="Short Title">
+              <Input
+                value={ctxTitle}
+                onChange={(e) => setCtxTitle(e.target.value)}
+                placeholder="e.g. Why Redis caching was deferred in Worker Lane B"
+              />
+            </Field>
+            <Field label="Context Details (decisions, caveats, pending tasks, risks)">
+              <Textarea
+                rows={4}
+                value={ctxContent}
+                onChange={(e) => setCtxContent(e.target.value)}
+                placeholder="Document concrete technical facts, constraints, owners, or open risks for your successor…"
+              />
+            </Field>
+            <Field label="Rationale / Background (optional)">
+              <Input
+                value={ctxRationale}
+                onChange={(e) => setCtxRationale(e.target.value)}
+                placeholder="Why was this decision made or what blocks resolution?"
+              />
+            </Field>
+          </div>
+        )}
+      </Modal>
+
+      {/* Draft / Edit Section Narrative Modal */}
+      <Modal
+        open={showNarrativeModal}
+        onClose={() => setShowNarrativeModal(false)}
+        size="lg"
+        title={`Edit Narrative — ${section.section_title}`}
+        subtitle="Draft prose grounded in this section's human-verified findings, then edit and save."
+        footer={
+          <div className="flex w-full flex-wrap items-center justify-between gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={Sparkles}
+              disabled={narrativeGenerating}
+              onClick={() => void handleGenerateNarrativeDraft()}
+            >
+              {narrativeGenerating ? 'Generating Grounded Draft…' : 'Generate Grounded AI Draft'}
+            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" onClick={() => setShowNarrativeModal(false)}>
+                Cancel
+              </Button>
+              <Button
+                icon={CheckCircle2}
+                disabled={narrativeSaving}
+                onClick={() => void handleSaveNarrative()}
+              >
+                {narrativeSaving ? 'Saving…' : 'Save Section Narrative'}
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        <div className="space-y-4">
+          {narrativeWarning && (
+            <Callout tone="amber" icon={Sparkles} title="AI Assistance Notice">
+              {narrativeWarning}
+            </Callout>
+          )}
+          {narrativeError && (
+            <Callout tone="red" icon={AlertTriangle} title="Narrative error">
+              {narrativeError}
+            </Callout>
+          )}
+          <Field label="Executive Summary Line (optional)">
+            <Input
+              value={narrativeSummary}
+              onChange={(e) => setNarrativeSummary(e.target.value)}
+              placeholder="Concise one-line takeaway for the successor…"
+            />
+          </Field>
+          <Field label="Guidance for AI Draft (optional)">
+            <Input
+              value={narrativeExtraCtx}
+              onChange={(e) => setNarrativeExtraCtx(e.target.value)}
+              placeholder="e.g. Emphasise immediate day-1 risks and operational runbooks…"
+            />
+          </Field>
+          <Field label="Section Narrative Markdown / Text">
+            <Textarea
+              rows={8}
+              value={narrativeDraft}
+              onChange={(e) => setNarrativeDraft(e.target.value)}
+              placeholder="Write or generate the transition narrative grounded in approved findings…"
+            />
+          </Field>
+        </div>
+      </Modal>
     </div>
   )
 }

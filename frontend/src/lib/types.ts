@@ -423,6 +423,10 @@ export interface HandoverCaseItem {
   incoming_owner_user_id?: string;
   departing_member_id?: string;
   successor_id?: string;
+  assigned_reviewer_id?: string | null;
+  target_handover_date?: string | null;
+  handover_type?: "developer" | "project_manager" | "technical_lead" | string;
+  metadata_json?: Record<string, unknown>;
   current_version_id?: string;
   readiness_score?: number;
   latest_readiness_score?: number;
@@ -586,6 +590,37 @@ export interface HandoverSectionDetail {
   domain_context: Record<string, unknown>;
 }
 
+export interface HandoverContextContributionResponse {
+  evidence_id: UUID;
+  knowledge_item_id: UUID;
+  verification_case_id: UUID;
+  epistemic_status: string;
+  review_status: string;
+  category: string;
+  title: string;
+  created_at: string;
+}
+
+export interface HandoverMandatorySection {
+  section_number: number;
+  section_key: string;
+  section_title: string;
+  source_domains: string[];
+  role_priority_rank: number;
+  is_role_priority: boolean;
+  role_emphasis_note: string;
+  readiness_status: string;
+  insufficient_info_message?: string | null;
+  content_markdown: string;
+  knowledge_items: HandoverSectionKnowledgeItem[];
+  relationships: HandoverSectionRelationship[];
+  unresolved_conflicts: HandoverSectionConflictItem[];
+  evidence_references: HandoverEvidenceProvenance[];
+  recommended_steps: Array<Record<string, unknown>>;
+  responsibilities_summary: Array<Record<string, unknown>>;
+  pending_verification_count: number;
+}
+
 export interface HandoverVersionSectionsResponse {
   case_id: UUID;
   project_id: UUID;
@@ -593,6 +628,10 @@ export interface HandoverVersionSectionsResponse {
   sections: HandoverSectionDetail[];
   missing_section_types: string[];
   epistemic_summary: HandoverDomainEpistemicBreakdown;
+  handover_type?: string;
+  handover_type_label?: string;
+  role_focus_summary?: string;
+  mandatory_sections?: HandoverMandatorySection[];
 }
 
 // ---------------------------------------------------------------------------
