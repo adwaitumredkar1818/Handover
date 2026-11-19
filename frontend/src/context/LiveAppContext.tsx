@@ -853,8 +853,10 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     const targetProjectId = activeProject?.id || null;
     setIsLoadingSources(true);
     try {
-      clearApiCache(`/projects/${activeProject.id}/sources`);
-      clearApiCache(`/organisations/${activeOrg.id}/sources`);
+      if (targetProjectId) {
+        clearApiCache(`/projects/${targetProjectId}/sources`);
+      }
+      clearApiCache(`/organisations/${targetOrgId}/sources`);
       const [mappingsRes, connsRes] = await Promise.allSettled([
         targetProjectId
           ? api.sources.listProjectMappings(targetProjectId)
