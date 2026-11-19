@@ -234,14 +234,7 @@ export function PrototypeProvider({ children }: { children: ReactNode }) {
 
   const setTransitionRoles = useCallback(
     (departingId: string, successorId: string, scope?: string) => {
-      if (departingId === successorId) {
-        addToast({
-          type: "error",
-          title: "Invalid Transition Configuration",
-          message: "The departing member and incoming successor must be different individuals.",
-        });
-        return false;
-      }
+      const isSelfTransition = departingId === successorId;
 
       const departing = members.find((m) => m.id === departingId);
       const successor = members.find((m) => m.id === successorId);

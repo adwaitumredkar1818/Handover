@@ -234,7 +234,7 @@ interface RawOverviewResponse {
 
 const inFlightRequests = new Map<string, Promise<unknown>>();
 const getCache = new Map<string, { timestamp: number; data: unknown }>();
-const CACHE_TTL_MS = 30000; // 30s in-memory deduplication & read cache for fast tab navigation
+const CACHE_TTL_MS = 2000; // 2s in-memory deduplication for concurrent callers without freezing live sync
 
 export function clearApiCache(pathPrefix?: string) {
   if (!pathPrefix) {
@@ -1145,12 +1145,12 @@ export const api = {
       return request(`/projects/${projectId}/relationships/timeline`);
     },
     async listIdentityCandidates(projectId: string): Promise<Record<string, unknown>[]> {
-      return request(`/projects/${projectId}/relationships/identity-candidates`);
+      return request(`/projects/${projectId}/relationships/identities/candidates`);
     },
     async reviewCandidate(projectId: string, candidateId: string, decision: "accept" | "reject", rationale?: string): Promise<Record<string, unknown>> {
-      return request(`/projects/${projectId}/relationships/identity-candidates/${candidateId}/review`, {
+      return request(`/projects/${projectId}/relationships/identities/candidates/${candidateId}/review`, {
         method: "POST",
-        body: JSON.stringify({ decision, rationale }),
+        body: JSON.stringify({ action: decision, decision, rationale }),
       });
     },
     async triggerReconstruction(projectId: string): Promise<{

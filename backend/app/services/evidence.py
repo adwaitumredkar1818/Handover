@@ -693,7 +693,7 @@ class EvidenceService:
             limit=limit,
             offset=offset,
         )
-        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=60)
+        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=3)
         return resp
 
     def download_evidence_content(
@@ -752,7 +752,7 @@ class EvidenceService:
             by_provider=data["by_provider"],
             by_status=data["by_status"],
         )
-        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=60)
+        local_response_cache.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=3)
         return resp
 
     def get_evidence_detail(

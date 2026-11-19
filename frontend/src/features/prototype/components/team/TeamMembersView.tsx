@@ -560,9 +560,9 @@ export function TeamMembersView() {
               </div>
 
               {departingId === successorId && (
-                <div className="p-2.5 rounded bg-[#C65B60]/10 border border-[#C65B60]/30 text-[#C65B60] flex items-center gap-2">
+                <div className="p-2.5 rounded bg-amber-50 border border-amber-200 text-amber-700 flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
-                  <span>The departing member and successor cannot be the same person.</span>
+                  <span>Single-participant / self-handover mode: Same member designated as departing and successor.</span>
                 </div>
               )}
 
@@ -576,8 +576,7 @@ export function TeamMembersView() {
                 </button>
                 <button
                   type="submit"
-                  disabled={departingId === successorId}
-                  className="px-3.5 py-1.5 rounded bg-[#249E91] text-white font-semibold hover:bg-[#1f877c] disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="px-3.5 py-1.5 rounded bg-[#249E91] text-white font-semibold hover:bg-[#1f877c]"
                 >
                   Save Transition Configuration
                 </button>

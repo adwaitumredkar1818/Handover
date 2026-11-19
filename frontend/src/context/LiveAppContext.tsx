@@ -10,7 +10,7 @@ import React, {
   type ReactNode,
 } from "react";
 import { usePathname } from "next/navigation";
-import { api, setStoredToken, setStoredUser, getStoredUser, ApiError } from "../lib/api";
+import { api, setStoredToken, setStoredUser, getStoredUser, ApiError, clearApiCache } from "../lib/api";
 import { invalidateGraphCache, setGraphCacheUser } from "../lib/graphCache";
 import { createClient as createSupabaseClient } from "../lib/supabase/client";
 import { registerPerson } from "../lib/figmaStore";
@@ -773,6 +773,8 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
     setIsLoadingSources(true);
     try {
+      clearApiCache(`/projects/${activeProject.id}/sources`);
+      clearApiCache(`/organisations/${activeOrg.id}/sources`);
       const [mappingsRes, connsRes] = await Promise.allSettled([
         api.sources.listProjectMappings(activeProject.id),
         api.sources.listOrgConnections(activeOrg.id),
@@ -795,19 +797,25 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const isFetchingEvidenceRef = useRef(false);
   const evidenceListLenRef = useRef(0);
   evidenceListLenRef.current = evidenceList.length;
+  const hasPendingRefreshEvidenceRef = useRef(false);
   const refreshEvidence = useCallback(async () => {
     if (!user || !activeProject) {
       setEvidenceList([]);
       setEvidenceMetrics(null);
       return;
     }
-    if (isFetchingEvidenceRef.current) return;
+    if (isFetchingEvidenceRef.current) {
+      hasPendingRefreshEvidenceRef.current = true;
+      return;
+    }
     isFetchingEvidenceRef.current = true;
+    hasPendingRefreshEvidenceRef.current = false;
     const currentProjectId = activeProject.id;
     if (evidenceListLenRef.current === 0) {
       setIsLoadingEvidence(true);
     }
     try {
+      clearApiCache(`/projects/${currentProjectId}/evidence`);
       const [itemsRes, metricsRes] = await Promise.allSettled([
         api.evidence.list(currentProjectId, {
           limit: 500,
@@ -839,6 +847,10 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         setIsLoadingEvidence(false);
       }
       isFetchingEvidenceRef.current = false;
+      if (hasPendingRefreshEvidenceRef.current) {
+        hasPendingRefreshEvidenceRef.current = false;
+        void refreshEvidence();
+      }
     }
   }, [user?.id, activeProject?.id]);
 
@@ -1080,6 +1092,14 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
           title: "Background Task Finished",
           message: "All background sync and extraction jobs have completed.",
         });
+      } else if (prevJobs.length > jobs.length) {
+        void refreshEvidence();
+        void refreshSources();
+        void refreshNotifications();
+      } else if (jobs.length > 0) {
+        // While jobs are actively running, refresh evidence and sources so newly committed extractions appear immediately
+        void refreshEvidence();
+        void refreshSources();
       }
     } catch {
       // ignore
@@ -1122,7 +1142,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     void refreshNotifications();
     void refreshActiveJobs();
 
-    const intervalTime = hasActiveJobs ? 3000 : 15000;
+    const intervalTime = hasActiveJobs ? 2500 : 15000;
     const timer = setInterval(() => {
       if (typeof document !== "undefined" && document.hidden) {
         return;
@@ -1167,6 +1187,8 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         void refreshSources();
         void refreshEvidence();
       }
+      void refreshFindings();
+      void refreshVerification();
     });
     return () => {
       active = false;
@@ -1372,16 +1394,34 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const triggerSync = async (mappingId: string) => {
-    if (!activeProject) return;
+  const triggerSync = async (mappingId: string, projectId?: string) => {
+    const targetProjectId = projectId || activeProject?.id;
+    if (!targetProjectId) return;
     try {
-      const res = await api.sources.triggerSync(activeProject.id, mappingId);
+      clearApiCache();
+      const res = await api.sources.triggerSync(targetProjectId, mappingId);
       addToast({
         type: "info",
         title: "Sync Started",
         message: res.message || "Background sync job submitted",
       });
-      void Promise.allSettled([refreshSources(), refreshEvidence(), refreshOverview()]);
+      await refreshSources();
+      await refreshEvidence();
+      await refreshOverview();
+      void refreshActiveJobs();
+
+      // Responsive polling while worker executes sync
+      let pollCount = 0;
+      const pollTimer = setInterval(async () => {
+        pollCount += 1;
+        clearApiCache();
+        await refreshActiveJobs();
+        await refreshSources();
+        await refreshEvidence();
+        if (pollCount >= 60) {
+          clearInterval(pollTimer);
+        }
+      }, 2000);
     } catch (err: unknown) {
       addToast({
         type: "error",

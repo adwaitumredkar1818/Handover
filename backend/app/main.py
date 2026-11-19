@@ -97,7 +97,11 @@ def _build_lifespan(
 
                 from app.worker import build_worker_service
 
-                composite_worker, _worker_engine = build_worker_service(settings)
+                composite_worker, _worker_engine = build_worker_service(
+                    settings,
+                    engine=engine,
+                    session_factory=session_factory,
+                )
                 poll_interval = max(1.0, float(settings.ingestion.worker_poll_interval_seconds))
                 lane_events: dict[str, threading.Event] = {
                     "IPKRHLaneA-Sync": threading.Event(),

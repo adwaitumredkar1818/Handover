@@ -566,6 +566,13 @@ def get_reconstruction_run(
     status_code=status.HTTP_200_OK,
     summary="List candidate identity matches for review",
 )
+@router.get(
+    "/projects/{project_id}/relationships/identity-candidates",
+    response_model=list[IdentityCandidateResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List candidate identity matches for review (alias)",
+    include_in_schema=False,
+)
 def list_identity_candidates(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
     db_session: Annotated[Session, Depends(get_db_session)],
@@ -624,6 +631,13 @@ def list_identity_candidates(
     response_model=IdentityCandidateResponse,
     status_code=status.HTTP_200_OK,
     summary="Review and merge/reject an identity candidate",
+)
+@router.post(
+    "/projects/{project_id}/relationships/identity-candidates/{candidate_id}/review",
+    response_model=IdentityCandidateResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Review and merge/reject an identity candidate (alias)",
+    include_in_schema=False,
 )
 def review_identity_candidate(
     candidate_id: uuid.UUID,

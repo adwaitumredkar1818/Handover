@@ -1436,6 +1436,7 @@ export interface ActiveSyncJob {
   progress_percent: number;
   attempt_count: number;
   message?: string;
+  mapping_id?: string;
   created_at: string;
   started_at?: string;
 }

@@ -256,6 +256,7 @@ def list_active_project_jobs(
                 total_steps=payload.get("total_steps"),
                 completed_steps=payload.get("completed_steps"),
                 message=payload.get("current_item") or job.error_message,
+                mapping_id=str(payload.get("mapping_id")) if payload.get("mapping_id") else None,
                 created_at=job.created_at,
                 started_at=job.started_at,
             )

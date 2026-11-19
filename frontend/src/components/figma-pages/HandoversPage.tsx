@@ -510,6 +510,10 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
       if (departing && !out) {
         setOut(departing.personId)
       }
+      if (!inc && projectMembers.length > 1) {
+        const other = projectMembers.find((m) => m.personId !== departing?.personId)
+        if (other) setInc(other.personId)
+      }
     }
     setSrcSel(projectSources.filter((x) => x.status !== 'error').map((x) => x.id))
   }, [pid, projectMembers, projectSources, user?.id, out])
@@ -526,7 +530,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
       if (!targetOut || !isUUID(targetOut)) {
         throw new Error('Please select a valid departing team member.')
       }
-      const targetInc = isUUID(inc) && inc !== targetOut ? inc : undefined
+      const targetInc = isUUID(inc) ? inc : (inc === out ? targetOut : undefined)
 
       // 1. Create Case in PostgreSQL
       const caseRes = await api.handover.createCase(targetPid, {
@@ -614,7 +618,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
   const projGaps = gaps.filter((g) => g.projectId === pid)
   const valid = Boolean([
     !!pid && isUUID(pid),
-    Boolean(out && isUUID(out) && (!inc || (isUUID(inc) && inc !== out))),
+    Boolean(out && isUUID(out) && (!inc || isUUID(inc))),
     projectSources.length === 0 || srcSel.length > 0,
     scope.areas.length > 0 && scope.from < scope.to,
     true,
@@ -757,9 +761,12 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
                 </Field>
               </div>
               {out && inc && out === inc && (
-                <p className="mt-3 text-[13px] text-bad">Outgoing and incoming members must be different people.</p>
+                <div className="mt-3 flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50/80 px-3.5 py-2.5 text-[13px] text-amber-800">
+                  <ShieldCheck className="size-4 shrink-0 text-amber-600" />
+                  <span>Single-participant / self-handover mode: Same member designated as outgoing and incoming participant.</span>
+                </div>
               )}
-              {out && (!inc || out !== inc) && (
+              {out && (
                 <div className="mt-6 flex items-center gap-4 rounded-xl bg-slate-50 p-4">
                   <div className="flex-1 text-center">
                     <Avatar
@@ -777,7 +784,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
                   </div>
                   <div className="flex flex-col items-center text-brand">
                     <Workflow className="size-5" />
-                    <span className="mt-1 text-[11px] font-medium">hands over to</span>
+                    <span className="mt-1 text-[11px] font-medium">{out === inc ? 'self-transition' : 'hands over to'}</span>
                   </div>
                   <div className="flex-1 text-center">
                     {inc ? (
