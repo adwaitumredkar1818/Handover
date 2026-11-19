@@ -176,6 +176,19 @@ describe("Threshold-based Expandable Large Graphs (LARGE_GRAPH_THRESHOLD = 24)",
     expect(expanded.nodes.length).toBeGreaterThan(overview.nodes.length);
     expect(expanded.groups.filter((g) => g.expanded).length).toBe(1);
 
+    // 2b. Expanding ALL groups manually reveals 100% of all canonical nodes (no 14-node cap)
+    const allExpanded = buildExpandableProjection({
+      rawNodes: nodes,
+      rawEdges: edges,
+      mode: "technology-stack",
+      expandedGroupIds: new Set(overview.groups.map((g) => g.groupId)),
+      revealedCountsByGroup: new Map(),
+    });
+    const visibleIds = new Set(allExpanded.nodes.map((n) => n.id));
+    for (const n of nodes) {
+      expect(visibleIds.has(n.id)).toBe(true);
+    }
+
     // 3. Search finds FastAPI inside collapsed group and auto-expands it
     const searched = buildExpandableProjection({
       rawNodes: nodes,

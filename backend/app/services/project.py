@@ -68,6 +68,7 @@ from app.schemas.project import (
     ProjectSummaryResponse,
     ProjectTransitionResponse,
     TeamOwnershipCard,
+    UpdateMemberNameRequest,
     UpdateProjectMemberRoleRequest,
     UpdateProjectRequest,
     UpsertProjectTransitionRequest,
@@ -800,6 +801,66 @@ class ProjectService:
             )
         return _build_project_member_response(refreshed)
 
+    def update_project_member_name(
+        self,
+        *,
+        ctx: ProjectContext,
+        target_user_id: uuid.UUID,
+        payload: UpdateMemberNameRequest,
+    ) -> ProjectMemberResponse:
+        """Update an active project member's display name (manager or self)."""
+        self._require_active_organisation_and_project(ctx=ctx)
+        is_self = target_user_id == ctx.principal.user.id
+        if not is_self and "project.members.manage" not in ctx.permissions:
+            raise ForbiddenError(
+                "You do not have permission to edit another member's name.",
+                code="PERMISSION_DENIED",
+            )
+
+        membership = self._project_repo.get_active_membership(
+            project_id=ctx.project.id,
+            user_id=target_user_id,
+        )
+        if membership is None or membership.user is None:
+            raise NotFoundError(
+                "Active project membership was not found.",
+                code="MEMBERSHIP_NOT_FOUND",
+            )
+
+        previous_name = membership.user.full_name
+        membership.user.full_name = payload.full_name
+        self._audit.record_event(
+            event_type="project.member.name_updated",
+            resource_type="user",
+            actor_user_id=ctx.principal.user.id,
+            organisation_id=ctx.organisation.id,
+            project_id=ctx.project.id,
+            resource_id=str(target_user_id),
+            metadata={
+                "target_user_id": str(target_user_id),
+                "previous_name": previous_name,
+                "new_name": payload.full_name,
+            },
+            message=(
+                f"Updated member '{target_user_id}' display name in project '{ctx.project.id}'."
+            ),
+        )
+        self._db.commit()
+        local_response_cache.invalidate_prefix(f"project_transition:{ctx.project.id}:")
+        cache_service.invalidate_prefix(f"dash:overview:proj:{ctx.project.id}")
+        local_response_cache.invalidate_prefix(f"project_members:{ctx.project.id}:")
+        self._invalidate_relationship_caches(ctx.project.id)
+        refreshed = self._project_repo.get_active_membership(
+            project_id=ctx.project.id,
+            user_id=target_user_id,
+        )
+        if refreshed is None:
+            raise NotFoundError(
+                "Active project membership was not found.",
+                code="MEMBERSHIP_NOT_FOUND",
+            )
+        return _build_project_member_response(refreshed)
+
     def remove_project_member(
         self,
         *,
@@ -859,6 +920,10 @@ class ProjectService:
             f"rel_entities:{project_id}:",
             f"rel_candidates:{project_id}:",
             f"rel_responsibilities:{project_id}:",
+            f"ki_graph:{project_id}:",
+            f"rel_graph:{project_id}:",
+            f"ki_findings:{project_id}:",
+            f"ki_domains:{project_id}:",
         ):
             local_response_cache.invalidate_prefix(prefix)
 

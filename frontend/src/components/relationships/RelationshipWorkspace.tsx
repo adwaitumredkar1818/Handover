@@ -392,13 +392,22 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     activeProjectIdRef.current = projectId;
   }, [projectId]);
 
-  const refreshProjectMembersList = useCallback(async () => {
+  const refreshProjectMembersList = useCallback(async (forceRefresh = false) => {
     if (!projectId) return;
+    const cacheKey = `rel_selectable:${projectId}`;
+    if (!forceRefresh) {
+      const cached = getCachedGraph<typeof selectableMembers>(cacheKey);
+      if (Array.isArray(cached) && cached.length > 0) {
+        setSelectableMembers(cached);
+        return;
+      }
+    }
     try {
       const res = await api.relationships.listSelectableMembers(projectId);
       if (activeProjectIdRef.current !== projectId) return;
       if (Array.isArray(res)) {
         setSelectableMembers(res);
+        setCachedGraph(cacheKey, res);
       }
     } catch {
       // Fallback to direct project members endpoint only if selectable-members is unavailable
@@ -652,7 +661,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     const targetProjectId = projectId;
 
     if (graphSubmode === "contributors") {
-      const cacheKey = `rel_contribs:${projectId}:${contributorTypeFilter}:${workClusterFilter}:${searchQuery.trim()}:${includeExternal}:${includeBots}:${expandContributorKey || ""}:${expandClusterName || ""}`;
+      const cacheKey = `rel_contribs:${projectId}:${contributorTypeFilter || "_"}:${workClusterFilter || "_"}:${searchQuery.trim() || "_"}:${includeExternal}:${includeBots}:${expandContributorKey || "_"}:${expandClusterName || "_"}`;
       if (!forceRefresh) {
         const cached = getCachedGraph<{
           graphRes: typeof rawContributorGraph;
@@ -672,7 +681,6 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
       }
 
       setRawContributorGraph({ nodes: [], edges: [], summary: {} });
-      setContributors([]);
       setClusters([]);
       setLoading(true);
       setError(null);
@@ -931,7 +939,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
           setClusters(res);
           setCachedGraph(cacheKey, res);
         }
-      } else if (tab === "identity_review" || tab === "responsibilities") {
+      } else if (tab === "responsibilities") {
         const contribKey = `rel_contrib_list:${projectId}`;
         const attrKey = `rel_attributions:${projectId}`;
         const cachedContrib = !forceRefresh ? getCachedGraph<ContributorRecord[]>(contribKey) : null;
@@ -949,6 +957,28 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
         setAttributions(attrs as unknown as Array<Record<string, unknown>>);
         setCachedGraph(contribKey, contribs);
         setCachedGraph(attrKey, attrs as unknown as Array<Record<string, unknown>>);
+      } else if (tab === "identity_review") {
+        const contribKey = `rel_contrib_list:${projectId}`;
+        const candKey = `rel_candidates:${projectId}`;
+        const cachedContrib = !forceRefresh ? getCachedGraph<ContributorRecord[]>(contribKey) : null;
+        const cachedCands = !forceRefresh ? getCachedGraph<IdentityCandidateItem[]>(candKey) : null;
+        if (cachedContrib && cachedCands && cachedContrib.length > 0) {
+          setContributors(cachedContrib);
+          setCandidates(cachedCands);
+          return;
+        }
+        const [contribs, candList] = await Promise.all([
+          cachedContrib && cachedContrib.length > 0
+            ? Promise.resolve(cachedContrib)
+            : api.relationships.listContributors(projectId),
+          cachedCands
+            ? Promise.resolve(cachedCands)
+            : api.relationships.listIdentityCandidates(projectId).catch(() => []),
+        ]);
+        setContributors(contribs);
+        setCandidates(candList as unknown as IdentityCandidateItem[]);
+        setCachedGraph(contribKey, contribs);
+        setCachedGraph(candKey, candList as unknown as IdentityCandidateItem[]);
       } else if (tab === "traceability") {
         const cacheKey = `rel_traceability:${projectId}`;
         if (!forceRefresh) {
@@ -1008,25 +1038,6 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
           setCachedGraph(cacheKey, items);
         }
       }
-      if (tab === "identity_review") {
-        const cacheKey = `rel_candidates:${projectId}`;
-        if (!forceRefresh) {
-          const cached = getCachedGraph<IdentityCandidateItem[]>(cacheKey);
-          if (cached) {
-            setCandidates(cached);
-            return;
-          }
-        }
-        if (candidates.length === 0 || forceRefresh) {
-          try {
-            const cList = (await api.relationships.listIdentityCandidates(projectId)) as unknown as IdentityCandidateItem[];
-            setCandidates(cList);
-            setCachedGraph(cacheKey, cList);
-          } catch {
-            // Non-fatal if no entity merge candidates exist
-          }
-        }
-      }
     } catch (err: unknown) {
       setError((err as Error)?.message || "Failed to load view data.");
     }
@@ -1039,6 +1050,12 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     timelineEvents.length,
     candidates.length,
   ]);
+
+  useEffect(() => {
+    if (activeTab !== "people") {
+      void loadTabDetails(activeTab);
+    }
+  }, [projectId, activeTab, loadTabDetails]);
 
   const handleProcessingComplete = useCallback(() => {
     invalidateGraphCache(`rel_`);
@@ -1092,28 +1109,59 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
       const nkind = raw.node_kind || raw.metadata?.node_kind;
       if (nkind === "contributor" && ckey) {
         setSelectedEntityDetail(null);
+        const detailKey = `rel_contrib_detail:${projectId}:${ckey}`;
+        const cached = getCachedGraph<ContributorRecord>(detailKey);
+        if (cached) {
+          setSelectedContributorDetail(cached);
+          return;
+        }
+        const localFallback = contributors.find((c) => c.contributor_key === ckey) || null;
+        if (localFallback) {
+          setSelectedContributorDetail(localFallback);
+        }
         try {
-          const detail = await api.relationships.getContributorDetail(projectId, ckey);
-          setSelectedContributorDetail(detail as unknown as ContributorRecord);
+          const detail = (await api.relationships.getContributorDetail(
+            projectId,
+            ckey
+          )) as unknown as ContributorRecord;
+          setCachedGraph(detailKey, detail);
+          setSelectedContributorDetail((prev) =>
+            !prev || prev.contributor_key === ckey ? detail : prev
+          );
         } catch {
-          const fallback = contributors.find((c) => c.contributor_key === ckey) || null;
-          setSelectedContributorDetail(fallback);
+          if (!localFallback) setSelectedContributorDetail(null);
         }
       }
       return;
     }
 
     setSelectedContributorDetail(null);
+    const entityDetailKey = `rel_entity_detail:${projectId}:${raw.id}`;
+    const cachedEntity = getCachedGraph<{
+      entity: KnowledgeEntityNode;
+      adjacent_edges?: Array<Record<string, unknown>>;
+      related_nodes?: Array<Record<string, unknown>>;
+      evidence_links?: Array<Record<string, unknown>>;
+    }>(entityDetailKey);
+    if (cachedEntity) {
+      setSelectedEntityDetail(cachedEntity);
+      return;
+    }
+    setSelectedEntityDetail({ entity: raw });
     try {
       const detail = await api.relationships.getEntityDetails(projectId, raw.id);
-      setSelectedEntityDetail({
+      const enriched = {
         entity: (detail.entity as KnowledgeEntityNode) || raw,
         adjacent_edges: (detail.adjacent_edges as Array<Record<string, unknown>>) || [],
         related_nodes: (detail.related_nodes as Array<Record<string, unknown>>) || [],
         evidence_links: (detail.evidence_links as Array<Record<string, unknown>>) || [],
-      });
+      };
+      setCachedGraph(entityDetailKey, enriched);
+      setSelectedEntityDetail((prev) =>
+        prev?.entity.id === raw.id ? enriched : prev
+      );
     } catch {
-      setSelectedEntityDetail({ entity: raw });
+      // Keep already-open immediate detail view
     }
   };
 
@@ -1129,26 +1177,82 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     }
   };
 
+  const reviewActionSeqRef = React.useRef(0);
+
   const handleContributorReviewAction = async (
     contributorKey: string,
     action: "match_member" | "mark_external" | "mark_bot" | "leave_unidentified" | "reject_match" | "revert"
   ) => {
     setError(null);
     setActionFeedback(null);
+    const contributorItem = contributors.find((item) => item.contributor_key === contributorKey);
+    const selectedVal =
+      selectedMatchMemberByKey[contributorKey] ||
+      (contributorItem?.matched_project_membership_id ? `pm:${contributorItem.matched_project_membership_id}` : "") ||
+      (contributorItem?.suggested_project_membership_id ? `pm:${contributorItem.suggested_project_membership_id}` : "");
+    const selectedTarget = selectableMembers.find((m) => m.selection_key === selectedVal);
+    if (
+      action === "match_member" &&
+      (!selectedTarget || !selectedTarget.selectable_for_match || (!selectedTarget.project_membership_id && !selectedTarget.invitation_id))
+    ) {
+      setError("Select an active project member or pending invitation before confirming identity match.");
+      return;
+    }
+
+    const seq = ++reviewActionSeqRef.current;
+    const prevContributors = contributors;
+
+    // Optimistic 0ms UI update for every identity review action
+    setContributors((prev) =>
+      prev.map((item) => {
+        if (item.contributor_key !== contributorKey) return item;
+        if (action === "match_member" && selectedTarget) {
+          return {
+            ...item,
+            contributor_type: "confirmed_member",
+            review_status: "confirmed",
+            matched_project_membership_id: selectedTarget.project_membership_id ?? null,
+            matched_member_name: selectedTarget.invitation_id
+              ? `${selectedTarget.display_name} (Invited)`
+              : selectedTarget.display_name,
+            display_name: selectedTarget.display_name,
+          };
+        }
+        if (action === "mark_external") {
+          return {
+            ...item,
+            contributor_type: "external_contributor",
+            review_status: "marked_external",
+            matched_project_membership_id: null,
+            matched_member_name: null,
+          };
+        }
+        if (action === "mark_bot") {
+          return {
+            ...item,
+            contributor_type: "bot",
+            review_status: "marked_bot",
+            matched_project_membership_id: null,
+            matched_member_name: null,
+          };
+        }
+        return {
+          ...item,
+          contributor_type: "unidentified",
+          review_status:
+            action === "revert"
+              ? "reverted"
+              : action === "reject_match"
+                ? "rejected"
+                : "pending",
+          matched_project_membership_id: null,
+          matched_member_name: null,
+        };
+      })
+    );
+    setActionFeedback(`Updated contributor identity (${action.replace(/_/g, " ")}).`);
+
     try {
-      const contributorItem = contributors.find((item) => item.contributor_key === contributorKey);
-      const selectedVal =
-        selectedMatchMemberByKey[contributorKey] ||
-        (contributorItem?.matched_project_membership_id ? `pm:${contributorItem.matched_project_membership_id}` : "") ||
-        (contributorItem?.suggested_project_membership_id ? `pm:${contributorItem.suggested_project_membership_id}` : "");
-      const selectedTarget = selectableMembers.find((m) => m.selection_key === selectedVal);
-      if (
-        action === "match_member" &&
-        (!selectedTarget || !selectedTarget.selectable_for_match || (!selectedTarget.project_membership_id && !selectedTarget.invitation_id))
-      ) {
-        setError("Select an active project member or pending invitation before confirming identity match.");
-        return;
-      }
       await api.relationships.reviewContributor(projectId, contributorKey, {
         action,
         project_membership_id: action === "match_member" ? (selectedTarget?.project_membership_id ?? undefined) : undefined,
@@ -1159,14 +1263,31 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
         notes: `Reviewed in Relationship Explorer (${action})`,
       });
       invalidateGraphCache("rel_");
-      setActionFeedback(`Updated contributor identity (${action.replace(/_/g, " ")}).`);
-      // Authoritatively update selectable members, contributor list & graphs immediately
-      await refreshProjectMembersList();
-      const freshContributors = await api.relationships.listContributors(projectId);
-      setContributors(freshContributors as unknown as ContributorRecord[]);
-      await loadPeopleAndEntityGraphs(true);
-      setAttributions((await api.roster.listAttributions(projectId)) as unknown as Array<Record<string, unknown>>);
+      // Non-blocking background sync; only apply if no newer optimistic review is in flight
+      void (async () => {
+        try {
+          const [, freshContributors] = await Promise.all([
+            refreshProjectMembersList(true),
+            api.relationships.listContributors(projectId),
+            loadPeopleAndEntityGraphs(true),
+            activeTab === "responsibilities"
+              ? api.roster.listAttributions(projectId).then((res) =>
+                  setAttributions(res as unknown as Array<Record<string, unknown>>)
+                )
+              : Promise.resolve(),
+          ]);
+          if (reviewActionSeqRef.current === seq) {
+            setContributors(freshContributors as unknown as ContributorRecord[]);
+          }
+        } catch {
+          // Background refresh error should not revert a succeeded mutation
+        }
+      })();
     } catch (err) {
+      if (reviewActionSeqRef.current === seq) {
+        setContributors(prevContributors);
+      }
+      setActionFeedback(null);
       setError(err instanceof Error ? err.message : "Failed to submit contributor review.");
     }
   };
@@ -1683,7 +1804,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                         <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[11px]">
                           {c.match_method === "pending_identity"
                             ? "project member · pending identity link"
-                            : `${c.contributor_type.replace(/_/g, " ")} · ${c.review_status}`}
+                            : `${(c.contributor_type || "unidentified").replace(/_/g, " ")} · ${c.review_status || "pending"}`}
                         </span>
                       </div>
                       <p className="text-xs text-slate-500">
@@ -1692,7 +1813,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                         {c.git_author_email ? ` · Email: ${c.git_author_email}` : ""}
                       </p>
                       <p className="text-xs text-slate-500">
-                        Contributions: {c.contribution_count} · Repos: {c.repositories.join(", ") || "N/A"} · Basis: {c.match_method || "unmatched"}
+                        Contributions: {c.contribution_count ?? 0} · Repos: {(c.repositories || []).join(", ") || "N/A"} · Basis: {c.match_method || "unmatched"}
                       </p>
                       {c.match_method === "pending_identity" && (
                         <p className="text-xs text-amber-700">Not linked to a source identity</p>

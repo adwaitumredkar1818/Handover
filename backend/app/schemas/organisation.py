@@ -155,6 +155,19 @@ class UpdateOrganisationMemberRoleRequest(BaseSchema):
         return _clean_role_name(value)
 
 
+class UpdateOrganisationMemberNameRequest(BaseSchema):
+    """Request to update an organisation member's display name."""
+
+    full_name: str = Field(min_length=1, max_length=255)
+
+    @field_validator("full_name")
+    @classmethod
+    def _validate_full_name(cls, value: str) -> str:
+        return normalize_display_name(
+            value, field_label="Full name", min_len=1, max_len=255
+        )
+
+
 class RemoveMembershipResponse(BaseSchema):
     """Confirmation returned after removing an organisation or project membership."""
 

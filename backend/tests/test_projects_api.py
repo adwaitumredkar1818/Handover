@@ -285,6 +285,32 @@ def test_project_lifecycle_ownership_and_member_role_management(
         assert demote_prev_owner.status_code == 200
         assert demote_prev_owner.json()["role_name"] == "reviewer"
 
+        # New owner (dev) can rename a project member; non-manager (reviewer) cannot rename others
+        rename_resp = client.patch(
+            f"/api/v1/projects/{proj_id}/members/{owner.user_id}/name",
+            headers=dev.headers,
+            json={"full_name": "Original Owner Renamed"},
+        )
+        assert rename_resp.status_code == 200
+        assert rename_resp.json()["full_name"] == "Original Owner Renamed"
+
+        # Self-rename works for any active project member
+        self_rename = client.patch(
+            f"/api/v1/projects/{proj_id}/members/{reviewer.user_id}/name",
+            headers=reviewer.headers,
+            json={"full_name": "Reviewer Self Renamed"},
+        )
+        assert self_rename.status_code == 200
+        assert self_rename.json()["full_name"] == "Reviewer Self Renamed"
+
+        # Non-manager cannot rename another member
+        forbidden_rename = client.patch(
+            f"/api/v1/projects/{proj_id}/members/{dev.user_id}/name",
+            headers=reviewer.headers,
+            json={"full_name": "Should Fail"},
+        )
+        assert forbidden_rename.status_code == 403
+
         # New owner removes reviewer -> reviewer loses access to private project immediately
         rm_rev = client.delete(
             f"/api/v1/projects/{proj_id}/members/{reviewer.user_id}",

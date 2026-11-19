@@ -42,6 +42,7 @@ from app.schemas.project import (
     ProjectOverviewResponse,
     ProjectResponse,
     ProjectTransitionResponse,
+    UpdateMemberNameRequest,
     UpdateProjectMemberRoleRequest,
     UpdateProjectRequest,
     UpsertProjectTransitionRequest,
@@ -209,6 +210,26 @@ def update_project_member_role(
 ) -> ProjectMemberResponse:
     """Update a project member's project-scoped role with owner continuity guards."""
     return project_service.update_project_member_role(
+        ctx=project_ctx,
+        target_user_id=user_id,
+        payload=payload,
+    )
+
+
+@router.patch(
+    "/projects/{project_id}/members/{user_id}/name",
+    response_model=ProjectMemberResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update a project member's display name (manager or self)",
+)
+def update_project_member_name(
+    user_id: uuid.UUID,
+    payload: UpdateMemberNameRequest,
+    project_ctx: Annotated[ProjectContext, Depends(resolve_project_read_context)],
+    project_service: Annotated[ProjectService, Depends(get_project_service)],
+) -> ProjectMemberResponse:
+    """Update an active project member's display name (User.full_name)."""
+    return project_service.update_project_member_name(
         ctx=project_ctx,
         target_user_id=user_id,
         payload=payload,

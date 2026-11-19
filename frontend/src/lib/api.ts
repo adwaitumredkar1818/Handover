@@ -498,6 +498,12 @@ export const api = {
       const res = await request<unknown>(`/organisations/${orgId}/members`);
       return unwrapList<OrganisationMember>(res);
     },
+    async updateMemberName(orgId: string, userId: string, fullName: string): Promise<OrganisationMember> {
+      return request<OrganisationMember>(`/organisations/${orgId}/members/${userId}/name`, {
+        method: "PATCH",
+        body: JSON.stringify({ full_name: fullName }),
+      });
+    },
     async listInvitations(
       orgId: string,
       params?: { status?: string; limit?: number; offset?: number }
@@ -771,6 +777,16 @@ export const api = {
       return request<ProjectMember>(`/projects/${projectId}/members/${userId}/role`, {
         method: "PATCH",
         body: JSON.stringify(data),
+      });
+    },
+    async updateName(
+      projectId: string,
+      userId: string,
+      fullName: string
+    ): Promise<ProjectMember> {
+      return request<ProjectMember>(`/projects/${projectId}/members/${userId}/name`, {
+        method: "PATCH",
+        body: JSON.stringify({ full_name: fullName }),
       });
     },
     async remove(projectId: string, userId: string): Promise<{ success: boolean; message: string }> {
@@ -2278,6 +2294,16 @@ export const api = {
     async assess(projectId: string, targetType: "knowledge_item" | "relationship", targetId: string): Promise<VerificationCaseDetail> {
       return request<VerificationCaseDetail>(
         `/projects/${projectId}/verification/assess?target_type=${targetType}&target_id=${targetId}`,
+        { method: "POST" }
+      );
+    },
+    async ensureTargetCase(
+      projectId: string,
+      targetType: "knowledge_item" | "relationship",
+      targetId: string
+    ): Promise<{ id: string; version: number; case_status: string }> {
+      return request<{ id: string; version: number; case_status: string }>(
+        `/projects/${projectId}/verification/target-case?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`,
         { method: "POST" }
       );
     },

@@ -6,11 +6,14 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db_session, require_project_permission
+from app.core.cache.local_cache import local_response_cache
 from app.core.exceptions import NotFoundError
 from app.models.evidence import EvidenceItem
+from app.models.verification import VerificationCase
 from app.schemas.verification import (
     ApproveFindingRequest,
     AssignReviewerRequest,
@@ -32,6 +35,48 @@ from app.services.verification_engine import VerificationEngine
 from app.services.verification_review import VerificationReviewService
 
 router = APIRouter(tags=["Verification Center"])
+
+
+def _invalidate_ki_caches(project_id: uuid.UUID) -> None:
+    local_response_cache.invalidate_prefix(f"ki_findings:{project_id}:")
+    local_response_cache.invalidate_prefix(f"ki_domains:{project_id}:")
+
+
+@router.post("/projects/{project_id}/verification/target-case")
+def ensure_target_verification_case(
+    project_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.knowledge.review"))
+    ],
+    session: Annotated[Session, Depends(get_db_session)],
+    target_type: str = Query(...),
+    target_id: uuid.UUID = Query(...),
+) -> dict[str, object]:
+    """Fast indexed lookup (or lazy sync) of a VerificationCase by target_type + target_id."""
+    vc = session.execute(
+        select(VerificationCase).where(
+            VerificationCase.project_id == project_ctx.project.id,
+            VerificationCase.target_type == target_type,
+            VerificationCase.target_id == target_id,
+        )
+    ).scalar_one_or_none()
+    if vc is None:
+        VerificationEngine(session).sync_project_findings(project_ctx.project.id)
+        session.commit()
+        vc = session.execute(
+            select(VerificationCase).where(
+                VerificationCase.project_id == project_ctx.project.id,
+                VerificationCase.target_type == target_type,
+                VerificationCase.target_id == target_id,
+            )
+        ).scalar_one_or_none()
+    if vc is None:
+        raise NotFoundError("Verification case not found for target.", code="VERIFICATION_CASE_NOT_FOUND")
+    return {
+        "id": str(vc.id),
+        "version": vc.version,
+        "case_status": str(getattr(vc.case_status, "value", vc.case_status)),
+    }
 
 
 @router.get(
@@ -159,7 +204,9 @@ def approve_verification_case(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationCaseDetailResponse:
     service = VerificationReviewService(session)
-    return service.approve_case(case_id, project_ctx=project_ctx, payload=payload)
+    res = service.approve_case(case_id, project_ctx=project_ctx, payload=payload)
+    _invalidate_ki_caches(project_ctx.project.id)
+    return res
 
 
 @router.post(
@@ -176,7 +223,9 @@ def reject_verification_case(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationCaseDetailResponse:
     service = VerificationReviewService(session)
-    return service.reject_case(case_id, project_ctx=project_ctx, payload=payload)
+    res = service.reject_case(case_id, project_ctx=project_ctx, payload=payload)
+    _invalidate_ki_caches(project_ctx.project.id)
+    return res
 
 
 @router.patch(
@@ -264,7 +313,9 @@ def mark_case_unresolved(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationCaseDetailResponse:
     service = VerificationReviewService(session)
-    return service.mark_unresolved(case_id, project_ctx=project_ctx, payload=payload)
+    res = service.mark_unresolved(case_id, project_ctx=project_ctx, payload=payload)
+    _invalidate_ki_caches(project_ctx.project.id)
+    return res
 
 
 @router.post(

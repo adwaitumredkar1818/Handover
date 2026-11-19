@@ -86,6 +86,8 @@ interface NavGroup {
 }
 
 function WorkspaceSwitcher({ collapsed }: { collapsed: boolean }) {
+  const router = useRouter();
+  const pathname = usePathname();
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => {
     setMounted(true);
@@ -149,6 +151,14 @@ function WorkspaceSwitcher({ collapsed }: { collapsed: boolean }) {
                 onClick={() => {
                   setActiveOrg(org);
                   close();
+                  if (
+                    org.id !== activeOrg?.id &&
+                    pathname &&
+                    /^\/projects\/[^/]+/.test(pathname) &&
+                    !pathname.startsWith("/projects/new")
+                  ) {
+                    router.push("/overview");
+                  }
                 }}
               >
                 <span className="block truncate font-medium">{org.name}</span>
@@ -182,6 +192,7 @@ function ProjectSwitcher({
   onDone?: () => void;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => {
     setMounted(true);
@@ -324,7 +335,9 @@ function ProjectSwitcher({
                   setActiveProject(p as unknown as Parameters<typeof setActiveProject>[0]);
                   close();
                   onDone?.();
-                  router.push(`/projects/${p.id}`);
+                  if (pathname && /^\/projects\/[^/]+/.test(pathname) && !pathname.startsWith("/projects/new")) {
+                    router.push(pathname.replace(/^\/projects\/[^/]+/, `/projects/${p.id}`));
+                  }
                 }}
                 className={cn(
                   "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-tint transition-colors cursor-pointer",

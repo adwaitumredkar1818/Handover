@@ -59,6 +59,7 @@ from app.schemas.organisation import (
     OrganisationResponse,
     OrganisationSummaryResponse,
     RemoveMembershipResponse,
+    UpdateOrganisationMemberNameRequest,
     UpdateOrganisationMemberRoleRequest,
     UpdateOrganisationRequest,
 )
@@ -494,6 +495,90 @@ class OrganisationService:
         invalidate_rbac_cache(user_id=target_user_id, organisation_id=ctx.organisation.id)
         local_response_cache.invalidate_prefix("orgs:my:")
         local_response_cache.invalidate_prefix("org_projects:")
+        refreshed = self._org_repo.get_active_membership(
+            organisation_id=ctx.organisation.id,
+            user_id=target_user_id,
+        )
+        if refreshed is None:
+            raise NotFoundError(
+                "Active organisation membership was not found.",
+                code="MEMBERSHIP_NOT_FOUND",
+            )
+        return _build_member_response(refreshed)
+
+    def update_member_name(
+        self,
+        *,
+        ctx: OrganisationContext,
+        target_user_id: uuid.UUID,
+        payload: UpdateOrganisationMemberNameRequest,
+    ) -> OrganisationMemberResponse:
+        """Update an active organisation member's display name (manager or self)."""
+        self._require_active_organisation(ctx.organisation)
+        is_self = target_user_id == ctx.principal.user.id
+        if not is_self and "organisation.members.manage" not in ctx.permissions:
+            raise ForbiddenError(
+                "You do not have permission to edit another member's name.",
+                code="PERMISSION_DENIED",
+            )
+
+        membership = self._org_repo.get_active_membership(
+            organisation_id=ctx.organisation.id,
+            user_id=target_user_id,
+        )
+        if membership is None or membership.user is None:
+            raise NotFoundError(
+                "Active organisation membership was not found.",
+                code="MEMBERSHIP_NOT_FOUND",
+            )
+
+        previous_name = membership.user.full_name
+        membership.user.full_name = payload.full_name
+        self._audit.record_event(
+            event_type="organisation.member.name_updated",
+            resource_type="user",
+            actor_user_id=ctx.principal.user.id,
+            organisation_id=ctx.organisation.id,
+            resource_id=str(target_user_id),
+            metadata={
+                "target_user_id": str(target_user_id),
+                "previous_name": previous_name,
+                "new_name": payload.full_name,
+            },
+            message=(
+                f"Updated member '{target_user_id}' display name in org '{ctx.organisation.id}'."
+            ),
+        )
+        self._db.commit()
+
+        from sqlalchemy import select
+        from app.core.cache import cache_service
+        from app.models.project import Project
+
+        local_response_cache.invalidate_prefix("orgs:my:")
+        local_response_cache.invalidate_prefix("org_projects:")
+        project_ids = self._db.scalars(
+            select(Project.id).where(Project.organisation_id == ctx.organisation.id)
+        ).all()
+        for pid in project_ids:
+            cache_service.invalidate_prefix(f"dash:overview:proj:{pid}")
+            for prefix in (
+                f"project_members:{pid}:",
+                f"project_transition:{pid}:",
+                f"rel_contributors:{pid}:",
+                f"rel_selectable_members:{pid}:",
+                f"contrib_graph:{pid}:",
+                f"work_clusters:{pid}:",
+                f"rel_entities:{pid}:",
+                f"rel_candidates:{pid}:",
+                f"rel_responsibilities:{pid}:",
+                f"ki_graph:{pid}:",
+                f"rel_graph:{pid}:",
+                f"ki_findings:{pid}:",
+                f"ki_domains:{pid}:",
+            ):
+                local_response_cache.invalidate_prefix(prefix)
+
         refreshed = self._org_repo.get_active_membership(
             organisation_id=ctx.organisation.id,
             user_id=target_user_id,

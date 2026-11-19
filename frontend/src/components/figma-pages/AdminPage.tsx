@@ -20,6 +20,7 @@ import {
   LogOut,
   Mail,
   MoreHorizontal,
+  Pencil,
   Plug,
   Send,
   ShieldCheck,
@@ -100,7 +101,7 @@ function mapOrgRoleToLabel(roleName?: string): 'Owner' | 'Admin' | 'Member' {
 export function SettingsTeam() {
   const router = useRouter()
   const s = useFigmaStore()
-  const { activeOrg, refreshNotifications } = useLiveApp()
+  const { activeOrg, refreshNotifications, syncMemberNameUpdate, addToast } = useLiveApp()
   const [rows, setRows] = useState<TeamRow[]>([])
   const [loadingTeam, setLoadingTeam] = useState(false)
   const [q, setQ] = useState('')
@@ -113,6 +114,44 @@ export function SettingsTeam() {
   const [inviting, setInviting] = useState(false)
   const [inviteError, setInviteError] = useState<string | null>(null)
   const [remove, setRemove] = useState<TeamRow | null>(null)
+  const [editMember, setEditMember] = useState<TeamRow | null>(null)
+  const [editedMemberName, setEditedMemberName] = useState('')
+  const [savingName, setSavingName] = useState(false)
+  const [editNameError, setEditNameError] = useState<string | null>(null)
+
+  const handleSaveMemberName = async () => {
+    if (!activeOrg?.id || !editMember) return
+    const trimmed = editedMemberName.trim()
+    if (!trimmed) return
+    setSavingName(true)
+    setEditNameError(null)
+    try {
+      const updated = await api.organisations.updateMemberName(
+        activeOrg.id,
+        editMember.id,
+        trimmed
+      )
+      const nextName = updated.full_name || trimmed
+      setRows((prev) =>
+        prev.map((row) =>
+          row.id === editMember.id ? { ...row, name: nextName } : row
+        )
+      )
+      syncMemberNameUpdate(editMember.id, nextName)
+      addToast({
+        type: 'success',
+        title: 'Name updated',
+        message: `Updated member name to "${nextName}".`,
+      })
+      setEditMember(null)
+    } catch (err) {
+      setEditNameError(
+        err instanceof Error ? err.message : 'Failed to update member name.'
+      )
+    } finally {
+      setSavingName(false)
+    }
+  }
 
   const loadTeam = React.useCallback(async () => {
     if (!activeOrg?.id) {
@@ -327,16 +366,33 @@ export function SettingsTeam() {
                       {p.joinedAt ? new Date(p.joinedAt).toLocaleDateString() : '—'}
                     </Td>
                     <Td>
-                      {p.wsRole !== 'Owner' && (
+                      {(p.status === 'Active' || p.wsRole !== 'Owner') && (
                         <Dropdown
                           trigger={() => (
-                            <button className="flex size-7 items-center justify-center rounded-lg text-muted hover:bg-slate-100">
+                            <button
+                              type="button"
+                              aria-label={`Actions for ${p.name}`}
+                              className="flex size-7 items-center justify-center rounded-lg text-muted hover:bg-slate-100"
+                            >
                               <MoreHorizontal className="size-4" />
                             </button>
                           )}
                         >
                           {(close) => (
                             <>
+                              {p.status === 'Active' && (
+                                <MenuItem
+                                  icon={Pencil}
+                                  onClick={() => {
+                                    close()
+                                    setEditMember(p)
+                                    setEditedMemberName(p.name)
+                                    setEditNameError(null)
+                                  }}
+                                >
+                                  Edit name
+                                </MenuItem>
+                              )}
                               <MenuItem
                                 icon={FolderKanban}
                                 onClick={() => {
@@ -346,7 +402,7 @@ export function SettingsTeam() {
                               >
                                 View projects
                               </MenuItem>
-                              {p.status === 'Invited' && (
+                              {p.status === 'Invited' && p.wsRole !== 'Owner' && (
                                 <MenuItem
                                   icon={Trash2}
                                   danger
@@ -428,6 +484,51 @@ export function SettingsTeam() {
               />
             </div>
           </div>
+        </div>
+      </Modal>
+      <Modal
+        open={Boolean(editMember)}
+        onClose={() => {
+          setEditMember(null)
+          setEditNameError(null)
+        }}
+        title="Edit member name"
+        subtitle={editMember?.email}
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setEditMember(null)
+                setEditNameError(null)
+              }}
+              disabled={savingName}
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={savingName || !editedMemberName.trim()}
+              onClick={() => void handleSaveMemberName()}
+            >
+              {savingName ? 'Saving...' : 'Save name'}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          {editNameError && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-bad">
+              {editNameError}
+            </div>
+          )}
+          <Field label="Full name" required>
+            <Input
+              value={editedMemberName}
+              onChange={(e) => setEditedMemberName(e.target.value)}
+              placeholder="Enter member full name"
+              autoFocus
+            />
+          </Field>
         </div>
       </Modal>
       <ConfirmDialog
