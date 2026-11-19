@@ -66,23 +66,23 @@ export function DevelopersPageContent() {
 
           {/* Section 2: Developer Cards with Cyan Energy Platform Underneath */}
           <section
-            className="mx-auto w-full max-w-[1380px] px-4 sm:px-6 lg:px-8"
+            className="mx-auto w-full max-w-[1540px] px-4 sm:px-6 lg:px-8"
             aria-label="Developer Profiles"
           >
             {/* Responsive Layout: Desktop 4 cards in one row, Medium 2 cards, Mobile 1 card */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-y-16 gap-x-6 justify-items-center">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-y-16 gap-x-8 lg:gap-x-10 justify-items-center">
               {DEVELOPERS.map((dev, idx) => (
                 <div
                   key={dev.id}
-                  className="flex flex-col items-center w-[310px]"
+                  className="flex flex-col items-center w-[340px]"
                 >
-                  {/* Primary Developer Card (Uiverse.io by Smit-Prajapati) */}
+                  {/* Primary Developer Card (Enhanced Uiverse.io Card) */}
                   <DeveloperCard
                     developer={dev}
                     priority={idx < 2}
                   />
 
-                  {/* Animated Cyan Energy / Bow Platform Underneath with Tilted Angled Beam */}
+                  {/* Animated Sci-Fi Cyan Energy Pedestal with Tilted Angled Hologram Beam */}
                   <DeveloperEnergyEffect
                     ariaLabel={`Energy platform illuminating ${dev.name}'s card`}
                   />

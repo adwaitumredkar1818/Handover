@@ -443,14 +443,14 @@
 
 /* Developer Card Base */
 .dev-card {
-  width: 310px !important;
-  height: 350px !important;
+  width: 340px !important;
+  height: 440px !important;
   background: #ffffff !important;
-  border-radius: 34px !important;
-  padding: 3px !important;
+  border-radius: 36px !important;
+  padding: 4px !important;
   position: relative !important;
   border: 1px solid #d9e1f0;
-  box-shadow: 0 16px 36px -12px rgba(32, 54, 83, 0.14), 0 4px 12px -2px rgba(32, 54, 83, 0.04);
+  box-shadow: 0 16px 36px -12px rgba(32, 54, 83, 0.14), 0 20px 36px -8px rgba(0, 242, 254, 0.32);
   transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1);
   overflow: hidden;
   cursor: pointer;
@@ -459,8 +459,8 @@
 
 .dev-card:hover,
 .dev-card[data-expanded="true"] {
-  border-top-left-radius: 55px !important;
-  box-shadow: 0 24px 48px -12px rgba(49, 95, 186, 0.24), 0 6px 16px -2px rgba(32, 54, 83, 0.08);
+  border-top-left-radius: 46px !important;
+  box-shadow: 0 24px 48px -12px rgba(49, 95, 186, 0.28), 0 26px 44px -6px rgba(0, 242, 254, 0.48);
 }
 
 /* Developer Card Top-Right Mail Action */
@@ -472,8 +472,8 @@
   backdrop-filter: blur(8px);
   border: 1px solid rgba(217, 225, 240, 0.9);
   border-radius: 50%;
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -500,19 +500,18 @@
   stroke: #315fba;
 }
 
-/* Developer Profile Picture Container */
+/* Developer Profile Picture Container (Full Card Illustration) */
 .dev-card-profile-pic {
   position: absolute !important;
-  width: calc(100% - 6px) !important;
-  height: calc(100% - 6px) !important;
-  top: 3px !important;
-  left: 3px !important;
-  border-radius: 31px !important;
+  width: calc(100% - 8px) !important;
+  height: calc(100% - 8px) !important;
+  top: 4px !important;
+  left: 4px !important;
+  border-radius: 32px !important;
   z-index: 1 !important;
-  border: 0px solid #315fba;
   overflow: hidden !important;
   background: #f6f8fc;
-  transition: all 0.5s ease-in-out 0.15s, z-index 0.5s ease-in-out 0.15s;
+  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1);
 }
 
 .dev-card-profile-pic img {
@@ -520,41 +519,92 @@
   width: 100% !important;
   height: 100% !important;
   object-position: center top !important;
-  transition: all 0.5s ease-in-out 0s;
+  transition: transform 0.5s ease-in-out;
+}
+
+.dev-card:hover .dev-card-profile-pic img,
+.dev-card[data-expanded="true"] .dev-card-profile-pic img {
+  transform: scale(1.04);
 }
 
 /* Expanding Bottom Section */
 .dev-card-bottom {
   position: absolute !important;
-  bottom: 3px !important;
-  left: 3px !important;
-  right: 3px !important;
-  background: linear-gradient(150deg, #18283f 0%, #203653 50%, #2b4f8c 100%) !important;
-  top: 83% !important;
+  bottom: 4px !important;
+  left: 4px !important;
+  right: 4px !important;
+  background: linear-gradient(150deg, rgba(16, 26, 42, 0.94) 0%, rgba(24, 40, 64, 0.96) 50%, rgba(32, 56, 92, 0.98) 100%) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  top: 73% !important;
   border-radius: 28px !important;
-  z-index: 2 !important;
-  box-shadow: rgba(17, 32, 52, 0.28) 0px 5px 10px 0px inset;
+  z-index: 3 !important;
+  box-shadow: rgba(17, 32, 52, 0.3) 0px 4px 12px 0px inset, 0 -2px 10px rgba(0, 242, 254, 0.15);
   overflow: hidden;
-  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1) 0s;
+  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1);
+  padding: 10px 14px 10px 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
 }
 
-/* Expanded Content */
+/* Default State Preview: Developer name & role clearly visible without hovering */
+.dev-card-default-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  opacity: 1;
+  transition: opacity 0.3s ease;
+  pointer-events: auto;
+}
+
+.dev-card-default-name {
+  font-size: 1.08rem;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: -0.02em;
+  line-height: 1.22;
+}
+
+.dev-card-default-role {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #38bdf8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Expanded Content Container */
 .dev-card-content {
-  position: absolute;
-  top: 12px;
-  left: 14px;
-  right: 14px;
   opacity: 0;
   transform: translateY(14px);
-  transition: opacity 0.35s ease 0.1s, transform 0.35s ease 0.1s;
   pointer-events: none;
+  height: 0;
+  overflow: hidden;
+  transition: opacity 0.35s ease 0.1s, transform 0.35s ease 0.1s;
 }
 
-/* Header block offset to the right of the circular avatar */
-.dev-card-header-block {
-  margin-left: 78px;
-  padding-right: 0.25rem;
-  min-height: 68px;
+/* Expanded Header: Avatar badge on left, name & role on right */
+.dev-card-expanded-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dev-card-avatar-thumb {
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2.5px solid #ffffff;
+  box-shadow: 0 0 14px rgba(0, 242, 254, 0.4);
+  flex-shrink: 0;
+  background: #112034;
+}
+
+.dev-card-header-text {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -562,11 +612,11 @@
 
 .dev-card-name {
   display: block;
-  font-size: 1.15rem;
+  font-size: 1.2rem;
   color: #ffffff;
   font-weight: 800;
   letter-spacing: -0.02em;
-  line-height: 1.25;
+  line-height: 1.2;
 }
 
 .dev-card-role-tag {
@@ -577,7 +627,7 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #38bdf8;
-  margin-top: 0.3rem;
+  margin-top: 0.25rem;
   background: rgba(56, 189, 248, 0.14);
   padding: 0.15rem 0.5rem;
   border-radius: 6px;
@@ -585,27 +635,48 @@
   width: fit-content;
 }
 
-/* Full description clearly readable without any truncation */
+.dev-card-divider {
+  width: 100%;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.12);
+  margin: 10px 0 10px 0;
+}
+
+/* Full description clearly readable without any truncation or ellipsis */
 .dev-card-about {
   display: block !important;
   overflow: visible !important;
-  font-size: 0.77rem;
-  line-height: 1.52;
-  color: rgba(255, 255, 255, 0.94);
-  margin-top: 1rem;
-  padding-right: 0.25rem;
+  font-size: 0.81rem;
+  line-height: 1.58;
+  color: rgba(241, 245, 249, 0.94);
+  margin: 0 0 10px 0;
+  font-weight: 400;
+}
+
+.dev-card-email-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: #38bdf8;
+  text-decoration: none;
+  transition: color 0.2s ease;
+  margin-bottom: 8px;
+  width: fit-content;
+}
+
+.dev-card-email-link:hover {
+  color: #ffffff;
+  text-decoration: underline;
 }
 
 /* Bottom Actions Container */
 .dev-card-bottom-bar {
-  position: absolute;
-  bottom: 0.9rem;
-  left: 1.25rem;
-  right: 1.25rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  z-index: 5;
+  margin-top: auto;
+  padding-top: 4px;
 }
 
 .dev-card-social-links {
@@ -664,9 +735,21 @@
 /* Card Hover & Expanded Transition Behaviors */
 .dev-card:hover .dev-card-bottom,
 .dev-card[data-expanded="true"] .dev-card-bottom {
-  top: 14% !important;
-  border-radius: 76px 28px 28px 28px !important;
-  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1) 0.15s;
+  top: 4px !important;
+  border-radius: 32px !important;
+  background: linear-gradient(160deg, rgba(14, 22, 36, 0.98) 0%, rgba(19, 32, 52, 0.98) 50%, rgba(27, 48, 80, 0.99) 100%) !important;
+  backdrop-filter: blur(24px);
+  padding: 16px 16px 14px 16px !important;
+  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1);
+}
+
+.dev-card:hover .dev-card-default-preview,
+.dev-card[data-expanded="true"] .dev-card-default-preview {
+  opacity: 0;
+  height: 0;
+  margin: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 
 .dev-card:hover .dev-card-content,
@@ -674,32 +757,12 @@
   opacity: 1;
   transform: translateY(0);
   pointer-events: auto;
-  transition: opacity 0.4s ease 0.25s, transform 0.4s ease 0.25s;
-}
-
-.dev-card:hover .dev-card-profile-pic,
-.dev-card[data-expanded="true"] .dev-card-profile-pic {
-  width: 68px !important;
-  height: 68px !important;
-  aspect-ratio: 1 !important;
-  top: 12px !important;
-  left: 14px !important;
-  border-radius: 50% !important;
-  z-index: 4 !important;
-  border: 3.5px solid #ffffff !important;
-  box-shadow: 0 6px 16px rgba(17, 32, 52, 0.25) !important;
-  transition: all 0.5s ease-in-out, z-index 0.5s ease-in-out 0.1s;
-}
-
-.dev-card:hover .dev-card-profile-pic:hover,
-.dev-card[data-expanded="true"] .dev-card-profile-pic:hover {
-  transform: scale(1.08);
-}
-
-.dev-card:hover .dev-card-profile-pic img,
-.dev-card[data-expanded="true"] .dev-card-profile-pic img {
-  transform: scale(1.12);
-  transition: all 0.5s ease-in-out 0.2s;
+  height: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: visible;
+  transition: opacity 0.4s ease 0.2s, transform 0.4s ease 0.2s;
 }
 
 /* Reduced Motion Handling */

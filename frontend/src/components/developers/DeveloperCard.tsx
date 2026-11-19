@@ -38,10 +38,10 @@ export const DeveloperCard: React.FC<DeveloperCardProps> = ({
       tabIndex={0}
       aria-label={`${developer.name} - ${developer.role}`}
       data-expanded={isExpanded}
-      className="dev-card relative w-[310px] h-[350px] shrink-0"
+      className="dev-card relative w-[340px] h-[440px] shrink-0"
       style={{
-        width: 310,
-        height: 350,
+        width: 340,
+        height: 440,
         position: "relative",
         overflow: "hidden",
         boxSizing: "border-box",
@@ -60,7 +60,7 @@ export const DeveloperCard: React.FC<DeveloperCardProps> = ({
         <Mail aria-hidden="true" />
       </a>
 
-      {/* Developer Portrait Container */}
+      {/* Developer Portrait Container (Full Card Illustration) */}
       <div
         className="dev-card-profile-pic"
         style={{ position: "absolute", overflow: "hidden" }}
@@ -68,26 +68,56 @@ export const DeveloperCard: React.FC<DeveloperCardProps> = ({
         <Image
           src={developer.image}
           alt={developer.avatarAlt}
-          width={310}
-          height={350}
+          width={340}
+          height={440}
           priority={priority}
           className="w-full h-full object-cover object-top select-none pointer-events-none"
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />
       </div>
 
-      {/* Expanding Bottom Panel */}
+      {/* Interactive Bottom Section (Shows Name & Role in default view, expands to full details on hover/tap) */}
       <div className="dev-card-bottom">
-        {/* Expanded Profile Details (Visible upon Hover / Expand) */}
+        {/* Default State Preview: Always visible so visitor knows who the developer is */}
+        <div className="dev-card-default-preview">
+          <div className="dev-card-default-name">{developer.name}</div>
+          <div className="dev-card-default-role">{developer.role}</div>
+        </div>
+
+        {/* Expanded State Content: Full profile details with complete description */}
         <div className="dev-card-content">
-          {/* Header block offset to the right of the circular avatar */}
-          <div className="dev-card-header-block">
-            <span className="dev-card-name">{developer.name}</span>
-            <div className="dev-card-role-tag">{developer.role}</div>
+          {/* Header block with avatar thumbnail, full name, and role tag */}
+          <div className="dev-card-expanded-header">
+            <div className="dev-card-avatar-thumb">
+              <Image
+                src={developer.image}
+                alt=""
+                width={56}
+                height={56}
+                className="w-full h-full object-cover object-top"
+              />
+            </div>
+            <div className="dev-card-header-text">
+              <span className="dev-card-name">{developer.name}</span>
+              <div className="dev-card-role-tag">{developer.role}</div>
+            </div>
           </div>
 
-          {/* Full description completely visible without line-clamp truncation */}
+          <div className="dev-card-divider" />
+
+          {/* Full description clearly readable without any truncation */}
           <p className="dev-card-about">{developer.responsibility}</p>
+
+          {/* Quick email display */}
+          <a
+            href={`mailto:${developer.email}`}
+            className="dev-card-email-link"
+            onClick={(e) => e.stopPropagation()}
+            title={`Send email to ${developer.email}`}
+          >
+            <Mail className="size-3.5 shrink-0" aria-hidden="true" />
+            <span className="truncate">{developer.email}</span>
+          </a>
         </div>
 
         {/* Social Links & Action Button (Visible in both default and expanded states) */}

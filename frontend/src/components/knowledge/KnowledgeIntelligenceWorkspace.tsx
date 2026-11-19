@@ -78,6 +78,47 @@ const DOMAIN_DEFS: Array<{ id: string; label: string; desc: string }> = [
   { id: "OPERATIONAL_HISTORICAL", label: "Operational & Historical", desc: "Runbooks, deployment notes, and past context" },
 ];
 
+const DOMAIN_CATEGORY_MAP: Record<string, string> = {
+  decisions: "DECISIONS_RATIONALE",
+  decisions_rationale: "DECISIONS_RATIONALE",
+  technical_architecture: "ARCHITECTURE_TECHNICAL",
+  architecture_technical: "ARCHITECTURE_TECHNICAL",
+  architecture: "ARCHITECTURE_TECHNICAL",
+  technical: "ARCHITECTURE_TECHNICAL",
+  work_items: "WORK_PROGRESS",
+  work_progress: "WORK_PROGRESS",
+  tasks: "WORK_PROGRESS",
+  responsibilities: "RESPONSIBILITIES_OWNERSHIP",
+  responsibilities_ownership: "RESPONSIBILITIES_OWNERSHIP",
+  ownership: "RESPONSIBILITIES_OWNERSHIP",
+  dependencies: "DEPENDENCIES_RELATIONSHIPS",
+  dependencies_relationships: "DEPENDENCIES_RELATIONSHIPS",
+  risks_blockers: "RISKS_BLOCKERS_QUESTIONS",
+  risks_blockers_questions: "RISKS_BLOCKERS_QUESTIONS",
+  risks: "RISKS_BLOCKERS_QUESTIONS",
+  blockers: "RISKS_BLOCKERS_QUESTIONS",
+  operational_procedures: "OPERATIONAL_HISTORICAL",
+  historical_discussions: "OPERATIONAL_HISTORICAL",
+  operational_historical: "OPERATIONAL_HISTORICAL",
+  operations: "OPERATIONAL_HISTORICAL",
+  historical: "OPERATIONAL_HISTORICAL",
+  project_overview: "PROJECT_OVERVIEW_CONTEXT",
+  project_overview_context: "PROJECT_OVERVIEW_CONTEXT",
+  overview: "PROJECT_OVERVIEW_CONTEXT",
+};
+
+function normalizeDomain(val: unknown): string {
+  if (!val) return "";
+  const s = String(val).trim().toLowerCase();
+  return DOMAIN_CATEGORY_MAP[s] || String(val).toUpperCase();
+}
+
+function getDomainBadgeLabel(val: unknown): string {
+  const norm = normalizeDomain(val);
+  const def = DOMAIN_DEFS.find((d) => d.id === norm);
+  return def ? def.label : String(val || "GENERAL");
+}
+
 class CanvasErrorBoundary extends React.Component<
   { children: React.ReactNode; onReset: () => void },
   { hasError: boolean; error: Error | null }
@@ -522,8 +563,8 @@ export function KnowledgeIntelligenceWorkspace({
         return false;
       }
       if (selectedDomain !== "all") {
-        const pDom = String(item.primary_domain || item.category || "").toUpperCase();
-        if (pDom !== selectedDomain) return false;
+        const itemDomain = normalizeDomain(item.primary_domain || item.category);
+        if (itemDomain !== selectedDomain) return false;
       }
       return true;
     });
@@ -846,7 +887,7 @@ export function KnowledgeIntelligenceWorkspace({
                       <div>
                         <div className="flex items-center justify-between gap-2 text-xs mb-1.5">
                           <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-medium">
-                            {String(f.primary_domain || f.category || "GENERAL")}
+                            {getDomainBadgeLabel(f.primary_domain || f.category)}
                           </span>
                           <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
                             {String(f.epistemic_status || "extracted")} · {String(f.review_status || "pending_review")}
@@ -1002,7 +1043,7 @@ export function KnowledgeIntelligenceWorkspace({
           <div className="absolute right-4 top-4 bottom-4 w-96 bg-white border border-slate-200 rounded-xl shadow-xl p-5 z-20 overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <span className="text-xs font-semibold text-blue-700">
-                {String(selectedFinding.primary_domain || selectedFinding.category || "")}
+                {getDomainBadgeLabel(selectedFinding.primary_domain || selectedFinding.category)}
               </span>
               <button
                 type="button"
