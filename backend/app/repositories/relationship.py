@@ -276,15 +276,53 @@ class EntityRepository:
         by_type_norm, by_id = self._project_entities(project_id)
         existing = by_type_norm.get((entity_type, norm_name))
         if existing is not None:
+            changed = False
             if last_observed_at is not None:
                 cand_last = _as_utc(last_observed_at)
                 cur_last = _as_utc(existing.last_observed_at)
                 if cur_last is None or (cand_last is not None and cand_last > cur_last):
                     existing.last_observed_at = cand_last
+                    changed = True
+            if description and (
+                not existing.description
+                or (len(description.strip()) > len(existing.description.strip()) + 10)
+            ):
+                existing.description = description
+                changed = True
             if metadata_json:
                 merged_meta = dict(existing.metadata_json or {})
-                merged_meta.update(metadata_json)
-                existing.metadata_json = merged_meta
+                _usage_rank = {
+                    "unknown": 0,
+                    "mentioned_only": 1,
+                    "mentioned": 1,
+                    "documented": 2,
+                    "documented_planned": 2,
+                    "proposed": 2,
+                    "declared_dependency": 3,
+                    "implemented": 4,
+                    "directly_evidenced_use": 4,
+                    "verified": 5,
+                }
+                for mk, mv in metadata_json.items():
+                    if mv is None or mv == "":
+                        continue
+                    if mk == "usage_basis":
+                        cur_rank = _usage_rank.get(str(merged_meta.get(mk) or "").lower(), 0)
+                        new_rank = _usage_rank.get(str(mv).lower(), 0)
+                        if new_rank >= cur_rank:
+                            merged_meta[mk] = mv
+                    elif mk not in merged_meta or merged_meta[mk] in (None, "", "unknown"):
+                        merged_meta[mk] = mv
+                    elif mk in {"version", "role_in_project", "usage_status", "technology_category", "purpose"} and mv != merged_meta[mk]:
+                        # Enrich with newer non-empty metadata without clobbering pinned manifest version with null
+                        if mk == "version" and merged_meta.get("manifest_path") and not metadata_json.get("manifest_path"):
+                            continue
+                        merged_meta[mk] = mv
+                if merged_meta != (existing.metadata_json or {}):
+                    existing.metadata_json = merged_meta
+                    changed = True
+            if changed:
+                existing.updated_at = utc_now()
             return existing
 
         entity = KnowledgeEntity(

@@ -50,6 +50,18 @@
 
 ---
 
+## Record 007: Phase AI-9 Acceptance Gate Certification
+- **Date**: 2026-11-18
+- **Decision**: Formally certify the Project Intelligence Engine as **PASS — ACCEPTED FOR PRODUCTION**.
+- **Reasoning**:
+  1. All 6 sub-phases (AI-9.1 through AI-9.6) satisfied all defined thresholds against real PostgreSQL 16, Redis 7.2, ChromaDB, and local Ollama `qwen3:8b`.
+  2. Hybrid retrieval demonstrated 100.0% Recall@5 and 1.000 MRR; citation precision was 100.0% with 0.0% ungrounded claims.
+  3. All three AI-8.4 carryover invariants (PostgreSQL restart durability, cross-worker concurrency idempotency, and SSE cursor resumption) passed with zero defects.
+  4. Both regression test suites passed (30/30 Gateway, 13/13 Backend AI), and the Next.js frontend compiled 69/69 routes cleanly in production mode.
+- **Trade-offs**: Local developer environment requires `OLLAMA_MAX_CONCURRENT_AI_JOBS=1` on 6GB VRAM GPUs to guarantee sequential inference queuing.
+
+---
+
 ## Record 005: Redis-Backed Durable Checkpoints for In-Flight Investigations
 - **Date**: 2026-11-17
 - **Decision**: In `InvestigationRuntimeRegistry`, back active `InvestigationState` and `SSEEventFrame` buffers with Redis keys (`investigation:{id}:state` and `investigation:{id}:events`) while retaining in-memory listener queues for SSE subscribers.
@@ -62,11 +74,33 @@
 ---
 
 ## Record 006: Idempotent Consequential Tool Execution Gating
-- **Date**: 2026-11-17
-- **Decision**: Consequential tool execution in `ToolRegistry` enforces a SHA-256 fingerprint binding the tool ID, caller user ID, project ID, and canonical sorted JSON arguments.
+- **Date**: 2026-11-17 (Updated 2026-11-18 in AI-8.3)
+- **Decision**: Consequential tool execution in `ToolRegistry` enforces a SHA-256 fingerprint binding the tool ID, caller user ID, project ID, and canonical sorted JSON arguments, backed by a distributed Redis key (`tool:idempotency:{fingerprint}`) with a 7-day TTL and local set fallback.
 - **Reasoning**:
-  1. Once a consequential action (e.g. `approve_handover_task`) is approved by a human and executed, replaying the same approval or duplicated request must not re-execute the underlying handler.
-  2. Prevents race conditions and duplicate approvals from executing operations twice.
+  1. Once a consequential action (e.g. `approve_handover_task`) is approved by a human and executed, replaying the same approval or duplicated request across multiple worker processes or after a backend restart must not re-execute the underlying handler.
+  2. Distributed Redis lock prevents race conditions and duplicate approvals from executing operations twice across multi-process clusters.
 - **Trade-offs**: If a user genuinely wishes to run the tool again later with identical arguments, a distinct invocation timestamp or run ID can be supplied in the request.
+
+---
+
+## Record 007: Bounded Multi-Agent Delegation Policy
+- **Date**: 2026-11-18 (Phase AI-8.3)
+- **Decision**: In `ProjectIntelligenceOrchestrator._node_delegate_agents`, inspect multi-facet query keywords to identify candidate domain agents, and bound sequential dispatch to a maximum of 2 specialized agents per investigation turn.
+- **Reasoning**:
+  1. Complex queries often span multiple domains (e.g., architecture decisions + database schema). Restricting execution to a single agent left major knowledge domains unaddressed.
+  2. Dispatching more than 2 agents introduces excessive latency and exhausts token budgets.
+  3. Sequential dispatch adheres strictly to the single-GPU concurrency semaphore protecting the local RTX 4050 6GB VRAM.
+- **Trade-offs**: Multi-facet queries execute two worker turns before synthesis, but produce comprehensive, role-attributed findings across both requested domains.
+
+---
+
+## Record 008: Authoritative PostgreSQL Durability for Investigations & Tool Idempotency
+- **Date**: 2026-11-18 (Phase AI-8.4)
+- **Decision**: Make PostgreSQL the authoritative durable store for both intermediate investigation state (and event history arrays) in `assistant_messages.structured_payload_json`, and consequential tool execution idempotency in `audit_logs`, retaining Redis strictly as a runtime acceleration cache and pub/sub distributor.
+- **Reasoning**:
+  1. Relying exclusively on Redis created a single point of failure where Redis restarts or evictions orphaned in-flight investigations or allowed duplicate execution of approved operations.
+  2. Storing typed intermediate checkpoints and event arrays inside `assistant_messages.structured_payload_json` enables 100% independent recovery from PostgreSQL without violating the unreviewed remote schema migration freeze.
+  3. Recording `tool.execution.state` in PostgreSQL `audit_logs` ensures consequential actions have an immutable transactional record that blocks replay across any process restart or Redis data loss.
+- **Trade-offs**: Checkpointing to PostgreSQL introduces a few milliseconds of transactional commit latency per graph step, which is negligible compared to LLM inference duration (~5-10s) and provides complete durability.
 
 

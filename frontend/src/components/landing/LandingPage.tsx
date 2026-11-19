@@ -3,13 +3,18 @@
 import React, { useEffect } from "react";
 import { BrandIntro } from "./BrandIntro";
 import { LandingNav } from "./LandingNav";
+import { ReadingProgressBar } from "./ReadingProgressBar";
+import { BackToTop } from "./BackToTop";
 import { HeroSection } from "./HeroSection";
 import { SectionDivider } from "./SectionDivider";
 import { ProblemSection } from "./ProblemSection";
 import { IntroducingSection } from "./IntroducingSection";
 import { HowItWorksSection } from "./HowItWorksSection";
+import { ConnectedSourcesSection } from "./ConnectedSourcesSection";
+import { EvidenceCenterSection } from "./EvidenceCenterSection";
 import { IntelligenceSection } from "./IntelligenceSection";
 import { ExplorerSection } from "./ExplorerSection";
+import { KnowledgeAssistantSection } from "./KnowledgeAssistantSection";
 import { HandoversSection } from "./HandoversSection";
 import { RolesSection } from "./RolesSection";
 import { TrustSection } from "./TrustSection";
@@ -19,75 +24,94 @@ import { LandingFooter } from "./LandingFooter";
 
 export function LandingPage() {
   useEffect(() => {
-    // Reset scroll to top on initial page mount if no hash is present
     if (!window.location.hash) {
       window.scrollTo(0, 0);
     }
   }, []);
 
   return (
-    <div className="ambient-canvas min-h-screen w-full max-w-full overflow-x-hidden text-[#203653] font-sans antialiased selection:bg-[#315FBA]/15 selection:text-[#203653]">
-      {/* Branded Opening Transition Experience */}
+    <div className="ambient-canvas min-h-screen w-full max-w-full overflow-x-clip text-[#203653] font-sans antialiased selection:bg-[#315FBA]/15 selection:text-[#203653]">
+      {/* Global Reading Progress Bar (2.5px gradient indicator) */}
+      <ReadingProgressBar />
+
+      {/* Floating Back to Top Control (appears after scrolling past hero) */}
+      <BackToTop />
+
+      {/* SECTION 01 — Cinematic Brand Intro */}
       <BrandIntro />
 
-      {/* 1. Navigation */}
+      {/* Global Sticky Glass Navigation */}
       <LandingNav />
 
       <main>
-        {/* 2. Hero with Organic Knowledge Sphere */}
+        {/* SECTION 02 — Hero */}
         <HeroSection />
 
-        {/* Section Divider: Hero -> Problem (Animated travelling light beam) */}
-        <SectionDivider label="SEC_01 // THE_PROBLEM" />
+        <SectionDivider label="SEC_03 // THE_PROBLEM" />
 
-        {/* 3. Problem */}
+        {/* SECTION 03 — The Problem */}
         <ProblemSection />
 
-        <SectionDivider label="SEC_02 // KNOWLEDGE_SYNTHESIS" />
+        <SectionDivider label="SEC_04 // INTRODUCING_HANDOVER" />
 
-        {/* 4. Introducing Handover */}
+        {/* SECTION 04 — Introducing Handover */}
         <IntroducingSection />
 
-        <SectionDivider label="SEC_03 // VERIFICATION_LIFECYCLE" />
+        <SectionDivider label="SEC_05 // HOW_IT_WORKS" />
 
-        {/* 5. How It Works */}
+        {/* SECTION 05 — How It Works (CONNECT -> RECONSTRUCT -> VERIFY -> REVIEW -> HANDOVER) */}
         <HowItWorksSection />
 
-        <SectionDivider label="SEC_04 // INTELLIGENCE_DOMAINS" />
+        <SectionDivider label="SEC_06 // CONNECTED_SOURCES" />
 
-        {/* 6. Knowledge Intelligence */}
+        {/* SECTION 06 — Connected Sources */}
+        <ConnectedSourcesSection />
+
+        <SectionDivider label="SEC_07 // EVIDENCE_RECONSTRUCTION" />
+
+        {/* SECTION 07 — Evidence Reconstruction */}
+        <EvidenceCenterSection />
+
+        <SectionDivider label="SEC_08 // EIGHT_KNOWLEDGE_DOMAINS" />
+
+        {/* SECTION 08 — Eight Knowledge Domains */}
         <IntelligenceSection />
 
-        <SectionDivider label="SEC_05 // RELATIONSHIP_GRAPH" />
+        <SectionDivider label="SEC_09 // RELATIONSHIP_EXPLORER" />
 
-        {/* 7. Knowledge Explorer */}
+        {/* SECTION 09 — Relationship Explorer */}
         <ExplorerSection />
 
-        <SectionDivider label="SEC_06 // AUDITABLE_TRANSFERS" />
+        <SectionDivider label="SEC_10 // KNOWLEDGE_ASSISTANT" />
 
-        {/* 8. Structured Handovers */}
+        {/* SECTION 10 — Knowledge Assistant */}
+        <KnowledgeAssistantSection />
+
+        <SectionDivider label="SEC_11 // HANDOVER_DOSSIER" />
+
+        {/* SECTION 11 — Handover Dossier */}
         <HandoversSection />
 
-        <SectionDivider label="SEC_07 // ROLE_EXPERIENCES" />
+        <SectionDivider label="SEC_12 // ROLE_CONTINUITY" />
 
-        {/* 9. Role-Based Experiences */}
+        {/* SECTION 12 — Role Continuity */}
         <RolesSection />
 
-        <SectionDivider label="SEC_08 // TRUST_AND_SECURITY" />
+        <SectionDivider label="SEC_13 // TRUST_AND_VERIFICATION" />
 
-        {/* 10. Trust & Security */}
+        {/* SECTION 13 — Trust & Verification (4 Epistemic Layers) */}
         <TrustSection />
 
-        <SectionDivider label="SEC_09 // FREQUENTLY_ASKED" />
+        <SectionDivider label="SEC_14 // FREQUENTLY_ASKED" />
 
-        {/* 11. FAQ */}
+        {/* SECTION 14 — FAQ */}
         <FaqSection />
 
-        {/* 12. Final CTA */}
+        {/* SECTION 15 — Final CTA */}
         <FinalCtaSection />
       </main>
 
-      {/* 13. Footer */}
+      {/* Global Footer */}
       <LandingFooter />
     </div>
   );

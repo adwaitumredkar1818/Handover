@@ -265,12 +265,17 @@ export function adaptContributorToHandoverGraph(contributorGraph: {
       typeLabel = "Bot";
     }
 
+    const matchMethod = (n.metadata?.match_method as string | undefined);
     return {
       id: n.id,
       label: n.label,
       entity_type,
       category,
-      status: n.review_status === "confirmed" ? "HUMAN_VERIFIED" : n.review_status,
+      status: n.review_status === "confirmed" && matchMethod === "human_confirmed"
+        ? "HUMAN_VERIFIED"
+        : n.review_status === "confirmed"
+        ? "SOURCE_EXTRACTED"
+        : n.review_status,
       verification_status: n.verification_status || n.review_status,
       evidence_count: n.contribution_count || 0,
       evidence_ids: (n.metadata?.evidence_ids as string[]) || [],
@@ -363,24 +368,68 @@ export function adaptEntityToHandoverGraph(entityGraph: {
 
 export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps) {
   const { members: liveMembers } = useLiveApp();
-  const [fetchedMembers, setFetchedMembers] = useState<any[]>([]);
+  const [selectableMembers, setSelectableMembers] = useState<
+    Array<{
+      selection_key: string;
+      member_source: string;
+      membership_state: string;
+      selectable_for_match: boolean;
+      project_membership_id?: string | null;
+      user_id?: string | null;
+      invitation_id?: string | null;
+      roster_member_id?: string | null;
+      display_name: string;
+      email?: string | null;
+      role_name: string;
+      github_login?: string | null;
+      review_status: string;
+      note?: string | null;
+    }>
+  >([]);
   const activeProjectIdRef = useRef(projectId);
 
   useEffect(() => {
     activeProjectIdRef.current = projectId;
   }, [projectId]);
 
-  useEffect(() => {
+  const refreshProjectMembersList = useCallback(async () => {
     if (!projectId) return;
-    api.members.list(projectId).then((m) => {
+    try {
+      const res = await api.relationships.listSelectableMembers(projectId);
       if (activeProjectIdRef.current !== projectId) return;
-      if (Array.isArray(m) && m.length > 0) {
-        setFetchedMembers(m);
+      if (Array.isArray(res)) {
+        setSelectableMembers(res);
       }
-    }).catch(() => {});
+    } catch {
+      // Fallback to direct project members endpoint only if selectable-members is unavailable
+      try {
+        const m = await api.members.list(projectId);
+        if (activeProjectIdRef.current !== projectId) return;
+        if (Array.isArray(m)) {
+          setSelectableMembers(
+            m.map((item: any) => ({
+              selection_key: `pm:${item.id}`,
+              member_source: "project_membership",
+              membership_state: item.status || "active",
+              selectable_for_match: true,
+              project_membership_id: String(item.id),
+              user_id: item.user_id ? String(item.user_id) : null,
+              display_name: item.user_full_name || item.full_name || "Unknown Member",
+              email: item.user_email || item.email || null,
+              role_name: item.role_name || item.role || "project_member",
+              review_status: "pending_identity",
+            }))
+          );
+        }
+      } catch {
+        // Keep current state cleanly
+      }
+    }
   }, [projectId]);
 
-  const projectMembers = fetchedMembers.length > 0 ? fetchedMembers : liveMembers;
+  useEffect(() => {
+    refreshProjectMembersList();
+  }, [refreshProjectMembersList]);
 
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -425,7 +474,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   }>({ nodes: [], edges: [], summary: {} });
 
   // Filters & expansion
-  const [layoutMode, setLayoutMode] = useState<"cluster" | "grid" | "circle">("cluster");
+  const [layoutMode, setLayoutMode] = useState<"layered" | "grid">("layered");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [selectedTypeFilter, setSelectedTypeFilter] = useState<string>("all");
   const [contributorTypeFilter, setContributorTypeFilter] = useState<string>("all");
@@ -487,29 +536,36 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
 
   const { depHandoverNodes, depHandoverEdges } = useMemo(() => {
     if (!depGraph || !depGraph.nodes) return { depHandoverNodes: [], depHandoverEdges: [] };
-    const nodes: HandoverGraphNode[] = depGraph.nodes.map((n: any) => ({
-      id: String(n.id),
-      label: n.name || n.label || String(n.id),
-      entity_type: n.type || "technical_component",
-      category: n.category || "technical_component",
-      status: n.status || "SOURCE_EXTRACTED",
-      verification_status: n.verification_status || "unverified",
-      evidence_count: n.evidence_count || 1,
-      evidence_ids: n.evidence_ids || [],
-      aliases: [],
-      metadata: { raw: n },
-    }));
-    const edges: HandoverGraphEdge[] = (depGraph.edges || []).map((e: any) => ({
-      id: String(e.id || `${e.source}->${e.target}`),
-      source: String(e.source),
-      target: String(e.target),
-      relationship_type: e.relationship_type || e.type || "depends_on",
-      label: e.label || e.relationship_type || "depends on",
-      evidence_basis: "explicit",
-      verification_status: e.verification_status || "unverified",
-      confidence_score: 1.0,
-      evidence_ids: [],
-    }));
+    const nodes: HandoverGraphNode[] = depGraph.nodes.map((n: any) => {
+      const nodeId = String(n.entity_id || n.id);
+      return {
+        id: nodeId,
+        label: n.name || n.canonical_name || n.label || nodeId,
+        entity_type: n.entity_type || n.type || "technical_component",
+        category: n.category || n.entity_type || "technical_component",
+        status: n.status || "SOURCE_EXTRACTED",
+        verification_status: n.verification_status || "unverified",
+        evidence_count: n.evidence_count || 1,
+        evidence_ids: n.evidence_ids || [],
+        aliases: [],
+        metadata: { raw: n },
+      };
+    });
+    const edges: HandoverGraphEdge[] = (depGraph.edges || []).map((e: any) => {
+      const src = String(e.source_id || e.source);
+      const tgt = String(e.target_id || e.target);
+      return {
+        id: String(e.id || `${src}->${tgt}`),
+        source: src,
+        target: tgt,
+        relationship_type: e.dependency_type || e.relationship_type || e.type || "depends_on",
+        label: e.label || e.dependency_type || e.relationship_type || "depends on",
+        evidence_basis: e.relationship_basis || "explicit",
+        verification_status: e.verification_status || "unverified",
+        confidence_score: typeof e.confidence === "number" ? e.confidence : 1.0,
+        evidence_ids: [],
+      };
+    });
     return { depHandoverNodes: nodes, depHandoverEdges: edges };
   }, [depGraph]);
 
@@ -536,7 +592,7 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   }, [projectId]);
 
   const computeEntityLayout = useCallback(
-    (nodesList: KnowledgeEntityNode[], mode: "cluster" | "grid" | "circle") => {
+    (nodesList: KnowledgeEntityNode[], mode: "layered" | "grid") => {
       const total = nodesList.length;
       if (total === 0) return [];
       if (mode === "grid") {
@@ -547,49 +603,42 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
           position: { x: (idx % cols) * 260 + 40, y: Math.floor(idx / cols) * 150 + 40 },
         }));
       }
-      if (mode === "cluster") {
-        const typeGroups: Record<string, KnowledgeEntityNode[]> = {};
-        nodesList.forEach((n) => {
-          const t = (n.entity_type || n.type || "general").toLowerCase();
-          (typeGroups[t] ||= []).push(n);
-        });
-        const types = Object.keys(typeGroups);
-        const angleStep = (2 * Math.PI) / Math.max(1, types.length);
-        const radius = Math.max(420, types.length * 130);
-        const out: Array<{ id: string; raw: KnowledgeEntityNode; position: { x: number; y: number } }> = [];
-        types.forEach((type, tIdx) => {
-          const items = typeGroups[type]!;
-          const cx = 750 + radius * Math.cos(tIdx * angleStep);
-          const cy = 650 + radius * Math.sin(tIdx * angleStep);
-          const cols = Math.max(2, Math.ceil(Math.sqrt(items.length)));
-          items.forEach((item, idx) => {
-            out.push({
-              id: String(item.id),
-              raw: item,
-              position: {
-                x: cx - (cols * 240) / 2 + (idx % cols) * 240,
-                y: cy - (Math.ceil(items.length / cols) * 130) / 2 + Math.floor(idx / cols) * 130,
-              },
-            });
+      // Clean top-to-bottom layered grouping by entity type (no circular/radial layout)
+      const typeGroups: Record<string, KnowledgeEntityNode[]> = {};
+      nodesList.forEach((n) => {
+        const t = (n.entity_type || n.type || "general").toLowerCase();
+        (typeGroups[t] ||= []).push(n);
+      });
+      const types = Object.keys(typeGroups).sort();
+      const out: Array<{ id: string; raw: KnowledgeEntityNode; position: { x: number; y: number } }> = [];
+      let currentY = 40;
+      const maxCols = 4;
+      types.forEach((type) => {
+        const items = typeGroups[type]!;
+        const rowCols = Math.min(items.length, maxCols);
+        const totalW = (rowCols - 1) * 260;
+        items.forEach((item, idx) => {
+          const row = Math.floor(idx / maxCols);
+          const col = idx % maxCols;
+          out.push({
+            id: String(item.id),
+            raw: item,
+            position: {
+              x: Math.round(400 - totalW / 2 + col * 260),
+              y: currentY + row * 150,
+            },
           });
         });
-        return out;
-      }
-      const r = Math.max(480, total * 20);
-      return nodesList.map((n, idx) => {
-        const angle = (idx / total) * 2 * Math.PI;
-        return {
-          id: String(n.id),
-          raw: n,
-          position: { x: 800 + r * Math.cos(angle), y: 700 + r * Math.sin(angle) },
-        };
+        currentY += Math.ceil(items.length / maxCols) * 150 + 60;
       });
+      return out;
     },
     []
   );
 
   // Reset state on project switch to prevent any cross-project leakage
   useEffect(() => {
+    setSelectableMembers([]);
     setRawContributorGraph({ nodes: [], edges: [], summary: {} });
     setRawEntityGraph({ nodes: [], edges: [] });
     setContributors([]);
@@ -885,25 +934,21 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
       } else if (tab === "identity_review" || tab === "responsibilities") {
         const contribKey = `rel_contrib_list:${projectId}`;
         const attrKey = `rel_attributions:${projectId}`;
-        if (!forceRefresh) {
-          const cachedContrib = getCachedGraph<ContributorRecord[]>(contribKey);
-          const cachedAttrs = getCachedGraph<Array<Record<string, unknown>>>(attrKey);
-          if (cachedContrib && cachedAttrs && cachedContrib.length > 0) {
-            setContributors(cachedContrib);
-            setAttributions(cachedAttrs);
-            return;
-          }
+        const cachedContrib = !forceRefresh ? getCachedGraph<ContributorRecord[]>(contribKey) : null;
+        const cachedAttrs = !forceRefresh ? getCachedGraph<Array<Record<string, unknown>>>(attrKey) : null;
+        if (cachedContrib && cachedAttrs && cachedContrib.length > 0) {
+          setContributors(cachedContrib);
+          setAttributions(cachedAttrs);
+          return;
         }
-        if (contributors.length === 0 || attributions.length === 0 || forceRefresh) {
-          const [contribs, attrs] = await Promise.all([
-            api.relationships.listContributors(projectId),
-            api.roster.listAttributions(projectId),
-          ]);
-          setContributors(contribs);
-          setAttributions(attrs as unknown as Array<Record<string, unknown>>);
-          setCachedGraph(contribKey, contribs);
-          setCachedGraph(attrKey, attrs as unknown as Array<Record<string, unknown>>);
-        }
+        const [contribs, attrs] = await Promise.all([
+          api.relationships.listContributors(projectId),
+          api.roster.listAttributions(projectId),
+        ]);
+        setContributors(contribs);
+        setAttributions(attrs as unknown as Array<Record<string, unknown>>);
+        setCachedGraph(contribKey, contribs);
+        setCachedGraph(attrKey, attrs as unknown as Array<Record<string, unknown>>);
       } else if (tab === "traceability") {
         const cacheKey = `rel_traceability:${projectId}`;
         if (!forceRefresh) {
@@ -996,13 +1041,12 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   ]);
 
   const handleProcessingComplete = useCallback(() => {
-    invalidateGraphCache(`rel_contribs:${projectId}`);
-    invalidateGraphCache(`rel_entities:${projectId}`);
+    invalidateGraphCache(`rel_`);
     loadPeopleAndEntityGraphs(true);
     if (activeTab !== "people") {
       loadTabDetails(activeTab, true);
     }
-  }, [projectId, loadPeopleAndEntityGraphs, activeTab, loadTabDetails]);
+  }, [loadPeopleAndEntityGraphs, activeTab, loadTabDetails]);
 
   const {
     status: processingStatus,
@@ -1011,6 +1055,32 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
   } = useProjectProcessingStatus(projectId, {
     onProcessingComplete: handleProcessingComplete,
   });
+
+  // Auto-sync Relationship Explorer when team members change in LiveAppContext (no F5 required)
+  const membersSignature = useMemo(
+    () =>
+      (liveMembers || [])
+        .map((m) => `${m.id}:${m.user_id || ""}:${m.role_name || ""}`)
+        .sort()
+        .join("|"),
+    [liveMembers]
+  );
+  const prevMembersSigRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (prevMembersSigRef.current === null) {
+      prevMembersSigRef.current = membersSignature;
+      return;
+    }
+    if (prevMembersSigRef.current !== membersSignature) {
+      prevMembersSigRef.current = membersSignature;
+      invalidateGraphCache("rel_");
+      refreshProjectMembersList();
+      loadPeopleAndEntityGraphs(true);
+      if (activeTab === "identity_review" || activeTab === "responsibilities") {
+        loadTabDetails(activeTab, true);
+      }
+    }
+  }, [membersSignature, activeTab, refreshProjectMembersList, loadPeopleAndEntityGraphs, loadTabDetails]);
 
   const handleNodeClick = async (_: unknown, node: Node) => {
     const rawData = (node.data as { raw?: any })?.raw;
@@ -1066,19 +1136,32 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
     setError(null);
     setActionFeedback(null);
     try {
-      const selectedMembershipId = selectedMatchMemberByKey[contributorKey];
-      if (action === "match_member" && !selectedMembershipId) {
-        setError("Select a project member before confirming identity match.");
+      const contributorItem = contributors.find((item) => item.contributor_key === contributorKey);
+      const selectedVal =
+        selectedMatchMemberByKey[contributorKey] ||
+        (contributorItem?.matched_project_membership_id ? `pm:${contributorItem.matched_project_membership_id}` : "") ||
+        (contributorItem?.suggested_project_membership_id ? `pm:${contributorItem.suggested_project_membership_id}` : "");
+      const selectedTarget = selectableMembers.find((m) => m.selection_key === selectedVal);
+      if (
+        action === "match_member" &&
+        (!selectedTarget || !selectedTarget.selectable_for_match || (!selectedTarget.project_membership_id && !selectedTarget.invitation_id))
+      ) {
+        setError("Select an active project member or pending invitation before confirming identity match.");
         return;
       }
       await api.relationships.reviewContributor(projectId, contributorKey, {
         action,
-        project_membership_id: action === "match_member" ? selectedMembershipId : undefined,
+        project_membership_id: action === "match_member" ? (selectedTarget?.project_membership_id ?? undefined) : undefined,
+        invitation_id:
+          action === "match_member" && !selectedTarget?.project_membership_id
+            ? (selectedTarget?.invitation_id ?? undefined)
+            : undefined,
         notes: `Reviewed in Relationship Explorer (${action})`,
       });
       invalidateGraphCache("rel_");
       setActionFeedback(`Updated contributor identity (${action.replace(/_/g, " ")}).`);
-      // Authoritatively update contributor list & graphs immediately
+      // Authoritatively update selectable members, contributor list & graphs immediately
+      await refreshProjectMembersList();
       const freshContributors = await api.relationships.listContributors(projectId);
       setContributors(freshContributors as unknown as ContributorRecord[]);
       await loadPeopleAndEntityGraphs(true);
@@ -1315,13 +1398,12 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                   </select>
                   <select
                     value={layoutMode}
-                    onChange={(e) => setLayoutMode(e.target.value as "cluster" | "grid" | "circle")}
+                    onChange={(e) => setLayoutMode(e.target.value as "layered" | "grid")}
                     aria-label="Graph layout"
                     className="px-2.5 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700"
                   >
-                    <option value="cluster">Cluster Layout</option>
+                    <option value="layered">Clean Layered Layout</option>
                     <option value="grid">Grid Layout</option>
-                    <option value="circle">Radial Layout</option>
                   </select>
                 </>
               )}
@@ -1599,7 +1681,9 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                         )}
                         <span className="font-semibold text-slate-900 text-sm">{c.display_name}</span>
                         <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[11px]">
-                          {c.contributor_type.replace(/_/g, " ")} · {c.review_status}
+                          {c.match_method === "pending_identity"
+                            ? "project member · pending identity link"
+                            : `${c.contributor_type.replace(/_/g, " ")} · ${c.review_status}`}
                         </span>
                       </div>
                       <p className="text-xs text-slate-500">
@@ -1610,6 +1694,9 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                       <p className="text-xs text-slate-500">
                         Contributions: {c.contribution_count} · Repos: {c.repositories.join(", ") || "N/A"} · Basis: {c.match_method || "unmatched"}
                       </p>
+                      {c.match_method === "pending_identity" && (
+                        <p className="text-xs text-amber-700">Not linked to a source identity</p>
+                      )}
                       {c.suggested_member_name && !c.matched_member_name && (
                         <p className="text-xs text-amber-700">Suggested member candidate: {c.suggested_member_name}</p>
                       )}
@@ -1619,8 +1706,21 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 text-xs">
+                      {(() => {
+                        const currentSelectedKey =
+                          selectedMatchMemberByKey[c.contributor_key] ||
+                          (c.matched_project_membership_id ? `pm:${c.matched_project_membership_id}` : "") ||
+                          (c.suggested_project_membership_id ? `pm:${c.suggested_project_membership_id}` : "");
+                        const selectedTarget = selectableMembers.find((m) => m.selection_key === currentSelectedKey);
+                        const canMatchTarget = Boolean(
+                          selectedTarget &&
+                            selectedTarget.selectable_for_match &&
+                            (selectedTarget.project_membership_id || selectedTarget.invitation_id)
+                        );
+                        return (
+                          <>
                       <select
-                        value={selectedMatchMemberByKey[c.contributor_key] || c.matched_project_membership_id || c.suggested_project_membership_id || ""}
+                        value={currentSelectedKey}
                         onChange={(e) =>
                           setSelectedMatchMemberByKey((prev) => ({
                             ...prev,
@@ -1628,17 +1728,30 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                           }))
                         }
                         aria-label={`Select project member for ${c.display_name}`}
-                        className="px-2.5 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700 min-w-[240px]"
+                        className="px-2.5 py-1.5 border border-slate-200 rounded-lg bg-white text-slate-700 min-w-[260px]"
                       >
                         <option value="">Select Project Member...</option>
-                        {projectMembers.map((m) => {
-                          const fullName = m.user_full_name || m.full_name || "Unknown Member";
-                          const email = m.user_email || m.email || "";
-                          const rawRole = (m.role_name || m.role || "Member");
-                          const role = rawRole.replace(/_/g, " ").replace(/\b\w/g, (l: string) => l.toUpperCase());
-                          const label = email ? `${fullName} (${email}) — ${role}` : `${fullName} — ${role}`;
+                        {selectableMembers.map((m) => {
+                          const role = (m.role_name || "Member")
+                            .replace(/_/g, " ")
+                            .replace(/\b\w/g, (l: string) => l.toUpperCase());
+                          const stateSuffix =
+                            m.membership_state === "invited"
+                              ? " · Invited (Pending Acceptance)"
+                              : m.membership_state === "roster_only"
+                                ? " · Roster Only (Requires Active Membership)"
+                                : m.membership_state === "org_member_unassigned"
+                                  ? " · Org Member (Add to Project Team First)"
+                                  : "";
+                          const label = m.email
+                            ? `${m.display_name} (${m.email}) — ${role}${stateSuffix}`
+                            : `${m.display_name} — ${role}${stateSuffix}`;
                           return (
-                            <option key={m.id} value={m.id}>
+                            <option
+                              key={m.selection_key}
+                              value={m.selection_key}
+                              disabled={!m.selectable_for_match}
+                            >
                               {label}
                             </option>
                           );
@@ -1646,11 +1759,15 @@ export function RelationshipWorkspace({ projectId }: RelationshipWorkspaceProps)
                       </select>
                       <button
                         type="button"
+                        disabled={!canMatchTarget}
                         onClick={() => handleContributorReviewAction(c.contributor_key, "match_member")}
-                        className="px-3 py-1.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700"
+                        className="px-3 py-1.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {c.matched_project_membership_id ? "Update Match" : "Match Member"}
                       </button>
+                          </>
+                        );
+                      })()}
                       <button
                         type="button"
                         onClick={() => handleContributorReviewAction(c.contributor_key, "mark_external")}

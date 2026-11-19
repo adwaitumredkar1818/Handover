@@ -827,6 +827,7 @@ function EmptyWorkspace({
   project?: Project | null
 }) {
   const router = useRouter()
+  const { setIsCreateProjectModalOpen } = useLiveApp()
   const [mounted, setMounted] = useState(false)
   useEffect(() => {
     setMounted(true)
@@ -952,7 +953,13 @@ function EmptyWorkspace({
                 size="sm"
                 variant={st.done ? 'secondary' : (i === 0 ? 'primary' : 'secondary')}
                 className="mt-5 w-full"
-                onClick={() => router.push(st.to)}
+                onClick={() => {
+                  if (i === 0 && !st.done) {
+                    setIsCreateProjectModalOpen(true)
+                  } else {
+                    router.push(st.to)
+                  }
+                }}
               >
                 {st.done ? st.completedCta : st.cta}
               </Button>
@@ -982,6 +989,7 @@ function DashboardContent() {
     handoverCases,
     findings,
     verificationSummary,
+    setIsCreateProjectModalOpen,
   } = useLiveApp()
 
   const projectsCount = liveProjects?.length || (liveProject ? 1 : 0)
@@ -1057,7 +1065,7 @@ function DashboardContent() {
 
   const quick = {
     manager: [
-      { label: 'New project', icon: FolderPlus, to: '/projects/new' },
+      { label: 'New project', icon: FolderPlus, onClick: () => setIsCreateProjectModalOpen(true) },
       { label: 'Create handover', icon: Plus, to: '/handovers/new', primary: true },
     ],
     outgoing: [
@@ -1100,7 +1108,7 @@ function DashboardContent() {
                 key={q.label}
                 variant={'primary' in q && q.primary ? 'primary' : 'secondary'}
                 icon={q.icon}
-                onClick={() => router.push(q.to)}
+                onClick={() => ('onClick' in q && q.onClick ? q.onClick() : router.push((q as { to: string }).to))}
               >
                 {q.label}
               </Button>

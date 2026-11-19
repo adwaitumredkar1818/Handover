@@ -188,6 +188,10 @@ def test_dynamic_parent_org_membership_blocks_stale_project_membership(
             org_mem.status = OrganisationMembershipStatus.SUSPENDED.value
             session.commit()
 
+        # Invalidate in-memory cache to reflect out-of-band DB modification
+        from app.api.deps import invalidate_rbac_cache
+        invalidate_rbac_cache(user_id=worker.user_id, project_id=uuid.UUID(proj_id))
+
         # Worker is immediately denied 404 despite still having active ProjectMembership!
         assert client.get(f"/api/v1/projects/{proj_id}", headers=worker.headers).status_code == 404
         assert (

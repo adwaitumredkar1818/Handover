@@ -39,6 +39,7 @@ from app.repositories.relationship import (
 from app.services.contribution_attribution import (
     ContributionAttributionService,
     build_contributor_key,
+    is_explicit_rag_evidence,
 )
 
 _UNCLUSTERED_LABEL = "Other / Unclustered Contributions"
@@ -349,10 +350,17 @@ class WorkGroupingService:
             meta = attr.metadata_json or {}
             ckey = str(meta.get("contributor_key") or build_contributor_key(meta, attr.contributor_identifier))
             raw_areas = list(meta.get("work_areas") or [attr.contribution_category or "Other"])
-            areas = [
-                _UNCLUSTERED_LABEL if str(a).strip().lower() == "other" else str(a).strip()
-                for a in raw_areas
-            ]
+            areas: list[str] = []
+            for a in raw_areas:
+                a_str = str(a).strip()
+                if a_str in ("RAG", "RAG and Retrieval"):
+                    changed_paths = " ".join(str(p) for p in (meta.get("changed_files") or []))
+                    if not (is_explicit_rag_evidence(ev.title or "") or is_explicit_rag_evidence(changed_paths)):
+                        if meta.get("classification_method") in ("deterministic_path", "deterministic_keyword", None):
+                            continue
+                areas.append(_UNCLUSTERED_LABEL if a_str.lower() == "other" else a_str)
+            if not areas:
+                areas = [_UNCLUSTERED_LABEL]
             for area in areas:
                 ent = cluster_entities.get(area)
                 grp = groups.get(area)
@@ -390,25 +398,28 @@ class WorkGroupingService:
                     }
                 grp["contributors"][ckey]["count"] += 1
 
-                # If commit was directed by a human project member, also register human member on cluster
+                # Only register a separate human director if this commit was made by an AI tool or bot
+                # AND that human director is NOT already the author (to prevent duplicate cards).
                 d_pm_id = meta.get("directed_by_pm_id")
-                if not d_pm_id:
-                    repo = str(meta.get("repository") or "")
-                    repo_owner = repo.split("/")[0].strip().lower() if "/" in repo else None
-                    if repo_owner and repo_owner in gh_to_pm:
-                        d_pm_id = str(gh_to_pm[repo_owner].id)
-                if d_pm_id:
+                is_tool = (
+                    attr.contributor_type == ContributorType.BOT.value
+                    or meta.get("attribution_classification") == "tool_associated"
+                    or "[bot]" in c_name.lower()
+                    or "lovable" in c_name.lower()
+                )
+                if d_pm_id and is_tool:
                     human_ckey = f"member:{d_pm_id}"
-                    human_pm = next((m for m in memberships if str(m.id) == str(d_pm_id)), None)
-                    human_name = human_pm.user.full_name if (human_pm and human_pm.user) else "Project Member"
-                    if human_ckey not in grp["contributors"]:
-                        grp["contributors"][human_ckey] = {
-                            "contributor_key": human_ckey,
-                            "display_name": human_name,
-                            "contributor_type": ContributorType.CONFIRMED_MEMBER.value,
-                            "count": 0,
-                        }
-                    grp["contributors"][human_ckey]["count"] += 1
+                    if human_ckey != ckey:
+                        human_pm = next((m for m in memberships if str(m.id) == str(d_pm_id)), None)
+                        human_name = human_pm.user.full_name if (human_pm and human_pm.user) else "Project Member"
+                        if human_ckey not in grp["contributors"]:
+                            grp["contributors"][human_ckey] = {
+                                "contributor_key": human_ckey,
+                                "display_name": human_name,
+                                "contributor_type": ContributorType.CONFIRMED_MEMBER.value,
+                                "count": 0,
+                            }
+                        grp["contributors"][human_ckey]["count"] += 1
 
                 grp["contributions"].append(
                     {

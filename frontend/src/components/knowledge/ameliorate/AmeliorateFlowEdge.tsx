@@ -47,8 +47,13 @@ function AmeliorateFlowEdgeBase({
     targetPosition,
   });
 
-  const finalLabelX = edgeData?.labelX ?? defaultLabelX;
-  const finalLabelY = edgeData?.labelY ?? defaultLabelY;
+  const hasCustomLabel =
+    typeof edgeData?.labelX === "number" &&
+    typeof edgeData?.labelY === "number" &&
+    Math.hypot(edgeData.labelX - defaultLabelX, edgeData.labelY - defaultLabelY) <= 120;
+
+  const finalLabelX = hasCustomLabel ? edgeData!.labelX! : defaultLabelX;
+  const finalLabelY = hasCustomLabel ? edgeData!.labelY! : defaultLabelY;
 
   const stroke = isPrimary || isHovered ? AMELIORATE_PRIMARY_SPOTLIGHT : AMELIORATE_DEFAULT_EDGE_COLOR;
   const strokeWidth = isPrimary ? 2.2 : isHovered ? 2.0 : 1.4;

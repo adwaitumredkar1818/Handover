@@ -23,39 +23,52 @@ from app.models.enums import (
 )
 from app.models.evidence import EvidenceItem
 from app.models.integration import UserSourceAuthorisation
-from app.models.project import ProjectMembership
+from app.models.organisation import OrganisationInvitation, OrganisationMembership
+from app.models.project import Project, ProjectMembership
+from app.models.rbac import Role
 from app.models.team_roster import ContributionAttribution, TeamRosterMember
 from app.services.integrations.github_sync import is_bot_identity
 from app.services.llm import LLMGenerationRequest, StructuredLLMClient
 
 logger = logging.getLogger("app.services.contribution_attribution")
 
+_RAG_EXPLICIT_RE = re.compile(
+    r"(?:^|[/\\._\-\s])rag(?:$|[/\\._\-\s])|retrieval[-_ ]augmented|rag[-_ ]pipeline|rag[-_ ]chain|hybrid[-_ ]rag",
+    re.IGNORECASE,
+)
+
+
+def is_explicit_rag_evidence(text: str) -> bool:
+    """Return True only when text explicitly evidences Retrieval-Augmented Generation (RAG),
+    never matching 'rag' as a substring of unrelated words like 'storage' or 'coverage'.
+    """
+    return bool(text and _RAG_EXPLICIT_RE.search(text))
+
+
 _PATH_DOMAIN_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("Database", ("migrations/", "alembic/", "/models/", ".sql", "schema", "database")),
+    ("Database", ("migrations/", "alembic/", "/models/", ".sql", "schema", "database", "vector_store", "chroma")),
     ("Authentication", ("/auth", "jwt", "oauth", "rbac", "supabase_verifier", "password", "session")),
     ("Security", ("security", "token_encryption", "access_policy", "rls", "crypto")),
-    ("RAG", ("embedding", "vector_store", "retrieval", "chunking", "chroma", "rag")),
     ("OCR", ("/ocr", "document_extraction", "pymupdf", "docx")),
-    ("AI/ML", ("/llm", "extraction_prompts", "knowledge_validator", "reconstruction_worker", "ollama", "qwen")),
+    ("AI/ML", ("/llm", "extraction_prompts", "knowledge_validator", "reconstruction_worker", "ollama", "qwen", "embedding")),
     ("Integration", ("integrations/", "github_", "jira_", "slack_", "webhook")),
     ("API", ("/api/", "routes/", "endpoints", "schemas/", "openapi")),
     ("Frontend", ("frontend/", "src/app/", "src/components/", ".tsx", ".jsx", ".css", "tailwind")),
     ("Testing", ("tests/", "test_", ".test.", ".spec.", "vitest", "pytest")),
     ("Documentation", ("docs/", "documentation/", "readme", ".md", ".mdx", "specification")),
     ("DevOps", ("dockerfile", "docker-compose", "compose.yaml", ".github/workflows", "render.yaml")),
-    ("Infrastructure", ("infrastructure/", "docker/", ".env", "server")),
+    ("Infrastructure", ("infrastructure/", "docker/", ".env", "k8s/", "terraform/", "deploy/")),
     ("Backend", ("backend/", "services/", "repositories/", "worker.py", ".py")),
 ]
 
 _DOMAIN_KEYWORDS: list[tuple[ContributionCategory, list[str]]] = [
-    (ContributionCategory.DATABASE_ENGINEERING, ["migration", "alembic", "sql", "postgres", "schema", "database", "table", "index", "foreign key"]),
+    (ContributionCategory.DATABASE_ENGINEERING, ["migration", "alembic", "sql", "postgres", "schema", "database", "table", "index", "foreign key", "chroma", "vector_store"]),
     (ContributionCategory.AUTHENTICATION, ["auth", "jwt", "login", "session", "password", "oauth", "token", "rbac", "permission", "credential"]),
     (ContributionCategory.SECURITY, ["security", "encryption", "aes-256", "secret", "ssrf", "sanitize", "vulnerability"]),
-    (ContributionCategory.AI_ML, ["ollama", "qwen", "glm", "llm", "inference", "prompt", "ai/ml"]),
-    (ContributionCategory.RAG_AND_RETRIEVAL, ["rag", "retrieval", "embedding", "nomic", "chroma", "vector", "chunk"]),
+    (ContributionCategory.AI_ML, ["ollama", "qwen", "glm", "llm", "inference", "prompt", "ai/ml", "embedding"]),
     (ContributionCategory.OCR_AND_DOCUMENT_PROCESSING, ["ocr", "pymupdf", "docx", "pdf", "extraction"]),
     (ContributionCategory.DEVOPS, ["ci/cd", "github actions", "pipeline", "dockerfile", "docker-compose", "deploy", "workflow"]),
-    (ContributionCategory.INFRASTRUCTURE, ["infrastructure", "docker", "env", "port", "config", "server"]),
+    (ContributionCategory.INFRASTRUCTURE, ["infrastructure", "docker", "env", "port", "config"]),
     (ContributionCategory.TESTING, ["test", "pytest", "vitest", "unit test", "integration test", "mock", "assert", "coverage"]),
     (ContributionCategory.BUG_FIXING, ["fix", "bug", "patch", "hotfix", "resolve", "error", "crash"]),
     (ContributionCategory.DOCUMENTATION, ["doc", "readme", "specification", "architecture", "handover", "guide", "changelog"]),
@@ -127,6 +140,8 @@ def classify_contribution_domains(
                         _add(area, f"custom_path:{prefix}->{path}")
 
         for path in norm_paths:
+            if is_explicit_rag_evidence(path):
+                _add("RAG", f"path:{path}")
             for area, tokens in _PATH_DOMAIN_RULES:
                 if any(tok in path for tok in tokens):
                     _add(area, f"path:{path}")
@@ -139,10 +154,13 @@ def classify_contribution_domains(
         [title_or_message or "", *(labels or []), *norm_paths]
     ).lower()
 
+    if is_explicit_rag_evidence(combined):
+        _add("RAG", "keyword:rag_explicit")
+
     short_by_enum = {v: k for k, v in _CANONICAL_CATEGORY_MAP.items()}
     for category, keywords in _DOMAIN_KEYWORDS:
         for kw in keywords:
-            if kw in combined:
+            if re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])", combined):
                 area = short_by_enum.get(category.value, category.value)
                 _add(area, f"keyword:{kw}")
                 break
@@ -695,6 +713,14 @@ class ContributionAttributionService:
             .all()
         )
         pm_by_id = {pm.id: pm for pm in memberships}
+        roster_rows = list(
+            self._session.execute(
+                select(TeamRosterMember).where(TeamRosterMember.project_id == project_id)
+            )
+            .scalars()
+            .all()
+        )
+        roster_by_id = {r.id: r for r in roster_rows}
 
         grouped: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -706,6 +732,20 @@ class ContributionAttributionService:
             if entry is None:
                 raw_email = meta.get("git_author_email")
                 matched_pm = pm_by_id.get(row.matched_project_membership_id) if row.matched_project_membership_id else None
+                matched_roster_id = getattr(row, "matched_roster_member_id", None)
+                matched_roster = roster_by_id.get(matched_roster_id) if matched_roster_id else None
+                has_match = matched_pm is not None or matched_roster is not None
+                effective_pm_id = str(matched_pm.id) if matched_pm is not None else None
+                effective_ctype = (
+                    row.contributor_type
+                    if (row.contributor_type != ContributorType.CONFIRMED_MEMBER.value or has_match)
+                    else ContributorType.UNIDENTIFIED.value
+                )
+                effective_rstatus = (
+                    row.review_status
+                    if (row.contributor_type != ContributorType.CONFIRMED_MEMBER.value or has_match)
+                    else ContributorReviewStatus.PENDING.value
+                )
                 suggested_pm_id = meta.get("suggested_project_membership_id")
                 suggested_pm = pm_by_id.get(uuid.UUID(suggested_pm_id)) if suggested_pm_id else None
                 entry = {
@@ -713,19 +753,28 @@ class ContributionAttributionService:
                     "display_name": (
                         matched_pm.user.full_name
                         if matched_pm and matched_pm.user
-                        else (meta.get("git_author_name") or row.contributor_identifier)
+                        else (
+                            matched_roster.display_name
+                            if matched_roster
+                            else (meta.get("git_author_name") or row.contributor_identifier)
+                        )
                     ),
                     "github_login": meta.get("github_author_login"),
                     "github_numeric_id": meta.get("github_author_id"),
                     "git_author_name": meta.get("git_author_name"),
                     "git_author_email": raw_email if has_project_manage else mask_email(raw_email),
-                    "contributor_type": row.contributor_type,
-                    "review_status": row.review_status,
-                    "match_method": row.match_method,
+                    "_raw_git_email": raw_email,
+                    "contributor_type": effective_ctype,
+                    "review_status": effective_rstatus,
+                    "match_method": row.match_method if has_match or row.contributor_type != ContributorType.CONFIRMED_MEMBER.value else "member_removed",
                     "match_confidence": row.match_confidence,
-                    "matched_project_membership_id": str(row.matched_project_membership_id) if row.matched_project_membership_id else None,
-                    "matched_member_name": matched_pm.user.full_name if matched_pm and matched_pm.user else None,
-                    "suggested_project_membership_id": suggested_pm_id,
+                    "matched_project_membership_id": effective_pm_id,
+                    "matched_member_name": (
+                        matched_pm.user.full_name
+                        if matched_pm and matched_pm.user
+                        else (f"{matched_roster.display_name} (Invited)" if matched_roster else None)
+                    ),
+                    "suggested_project_membership_id": str(suggested_pm.id) if suggested_pm else None,
                     "suggested_member_name": suggested_pm.user.full_name if suggested_pm and suggested_pm.user else None,
                     "declared_responsibility": matched_pm.responsibility_description if matched_pm else None,
                     "contribution_count": 0,
@@ -751,7 +800,13 @@ class ContributionAttributionService:
                 entry["repositories"].add(str(meta["repository"]))
             for wa in meta.get("work_areas") or ([row.contribution_category] if row.contribution_category else []):
                 if wa:
-                    entry["work_areas"].add(str(wa))
+                    wa_str = str(wa)
+                    # Filter out historical substring false-positive RAG labels unless explicit RAG evidence exists
+                    if wa_str in ("RAG", ContributionCategory.RAG_AND_RETRIEVAL.value):
+                        ev_title = row.evidence_item.title if row.evidence_item else ""
+                        if not is_explicit_rag_evidence(ev_title) and meta.get("classification_method") in ("deterministic_path", "deterministic_keyword", None):
+                            continue
+                    entry["work_areas"].add(wa_str)
             entry["evidence_ids"].append(str(row.evidence_item_id))
 
             if row.contributor_type == ContributorType.BOT.value or is_bot_identity(
@@ -773,9 +828,6 @@ class ContributionAttributionService:
 
         # Tier A — Confirmed project members must always be represented even with 0 direct commits
         matched_pm_ids: set[uuid.UUID] = set()
-        for row in rows:
-            if row.matched_project_membership_id is not None:
-                matched_pm_ids.add(row.matched_project_membership_id)
         for entry in grouped.values():
             mid = entry.get("matched_project_membership_id")
             if mid:
@@ -798,7 +850,25 @@ class ContributionAttributionService:
         ) if user_ids else []
         user_to_gh = {a.user_id: a.external_username.strip() for a in auth_rows if a.external_username}
 
-        # Collect assisted / directed work for confirmed members
+        # Offer genuine candidate suggestions for unmatched contributors using exact GitHub login or verified email
+        for entry in grouped.values():
+            if entry.get("matched_project_membership_id") or entry.get("suggested_project_membership_id"):
+                continue
+            if entry.get("contributor_type") == ContributorType.BOT.value:
+                continue
+            c_login = (entry.get("github_login") or "").strip().lower()
+            c_email = (entry.get("_raw_git_email") or "").strip().lower()
+            for pm in memberships:
+                pm_gh = (user_to_gh.get(pm.user_id) or "").strip().lower()
+                pm_email = (pm.user.email or "").strip().lower() if pm.user and pm.user.email else ""
+                if (c_login and pm_gh and c_login == pm_gh) or (
+                    c_email and pm_email and "noreply.github.com" not in c_email and c_email == pm_email
+                ):
+                    entry["suggested_project_membership_id"] = str(pm.id)
+                    entry["suggested_member_name"] = pm.user.full_name if pm.user else None
+                    break
+
+        # Collect assisted / directed work for confirmed members ONLY from tool-associated / bot commits
         directed_stats_by_pm: dict[uuid.UUID, dict[str, Any]] = defaultdict(lambda: {
             "assisted_commits": 0,
             "work_areas": set(),
@@ -809,15 +879,14 @@ class ContributionAttributionService:
             if row.evidence_item_id not in accessible_evidence_ids:
                 continue
             meta = row.metadata_json or {}
+            # Only count directed work if the row is from a bot / AI tool
+            is_bot = (
+                row.contributor_type == ContributorType.BOT.value
+                or meta.get("attribution_classification") == "tool_associated"
+            )
+            if not is_bot:
+                continue
             d_pm_id = meta.get("directed_by_pm_id")
-            if not d_pm_id:
-                repo = str(meta.get("repository") or "")
-                repo_owner = repo.split("/")[0].strip().lower() if "/" in repo else None
-                for pm_candidate in memberships:
-                    cand_gh = (user_to_gh.get(pm_candidate.user_id) or "").strip().lower()
-                    if cand_gh and cand_gh == repo_owner:
-                        d_pm_id = str(pm_candidate.id)
-                        break
             if d_pm_id:
                 try:
                     pm_uuid = uuid.UUID(str(d_pm_id))
@@ -834,7 +903,7 @@ class ContributionAttributionService:
         for pm in memberships:
             ckey = f"member:{pm.id}"
             gh_handle = user_to_gh.get(pm.user_id)
-            if pm.id not in matched_pm_ids or ckey not in grouped:
+            if pm.id not in matched_pm_ids:
                 raw_email = pm.user.email if pm.user else None
                 role_name = pm.role.name if getattr(pm, "role", None) else "project_member"
                 role_label = role_name.replace("_", " ").title()
@@ -848,9 +917,9 @@ class ContributionAttributionService:
                         "git_author_name": None,
                         "git_author_email": raw_email if has_project_manage else mask_email(raw_email),
                         "contributor_type": ContributorType.CONFIRMED_MEMBER.value,
-                        "review_status": ContributorReviewStatus.CONFIRMED.value,
-                        "match_method": "direct_membership",
-                        "match_confidence": 1.0,
+                        "review_status": ContributorReviewStatus.CONFIRMED.value if gh_handle else ContributorReviewStatus.PENDING.value,
+                        "match_method": "direct_membership" if gh_handle else "pending_identity",
+                        "match_confidence": 1.0 if gh_handle else 0.0,
                         "matched_project_membership_id": str(pm.id),
                         "matched_member_name": pm.user.full_name if pm.user else None,
                         "suggested_project_membership_id": None,
@@ -868,11 +937,14 @@ class ContributionAttributionService:
                     }
                     grouped[ckey] = entry
 
-            entry = grouped.get(ckey)
+            entry = grouped.get(ckey) or next(
+                (e for e in grouped.values() if e.get("matched_project_membership_id") == str(pm.id)),
+                None,
+            )
             if entry is not None and pm.id in directed_stats_by_pm:
                 d_stats = directed_stats_by_pm[pm.id]
                 entry["assisted_commits_count"] = d_stats["assisted_commits"]
-                entry["contribution_count"] = entry.get("commits_count", 0) + d_stats["assisted_commits"]
+                entry["contribution_count"] = entry.get("contribution_count", 0) + d_stats["assisted_commits"]
                 entry["repositories"] = entry["repositories"] | d_stats["repositories"]
                 entry["work_areas"] = (entry["work_areas"] - {"Unassigned"}) | d_stats["work_areas"]
                 entry["evidence_ids"] = list(set(entry["evidence_ids"] + d_stats["evidence_ids"]))
@@ -884,6 +956,7 @@ class ContributionAttributionService:
 
         results: list[dict[str, Any]] = []
         for entry in grouped.values():
+            entry.pop("_raw_git_email", None)
             if contributor_type_filter and entry["contributor_type"] != contributor_type_filter:
                 continue
             if review_status_filter and entry["review_status"] != review_status_filter:
@@ -895,6 +968,185 @@ class ContributionAttributionService:
         results.sort(key=lambda x: (-x["contribution_count"], x["display_name"].lower()))
         return results
 
+    def list_selectable_members(
+        self,
+        *,
+        project_id: uuid.UUID,
+        has_project_manage: bool,
+    ) -> list[dict[str, Any]]:
+        """Return canonical selectable members for Identity Review across:
+        1. Active project memberships
+        2. Active organisation memberships in the project's organisation
+        3. Pending project/organisation invitations (clearly labelled, not auto-accepted)
+        4. Unreconciled team roster entries (clearly labelled)
+        """
+        project = self._session.get(Project, project_id)
+        if project is None:
+            return []
+
+        memberships = list(
+            self._session.execute(
+                select(ProjectMembership)
+                .options(selectinload(ProjectMembership.user), selectinload(ProjectMembership.role))
+                .where(ProjectMembership.project_id == project_id, ProjectMembership.status == "active")
+            )
+            .scalars()
+            .all()
+        )
+        org_memberships = list(
+            self._session.execute(
+                select(OrganisationMembership)
+                .options(selectinload(OrganisationMembership.user), selectinload(OrganisationMembership.role))
+                .where(
+                    OrganisationMembership.organisation_id == project.organisation_id,
+                    OrganisationMembership.status == "active",
+                )
+            )
+            .scalars()
+            .all()
+        )
+        invitations = list(
+            self._session.execute(
+                select(OrganisationInvitation)
+                .options(selectinload(OrganisationInvitation.role))
+                .where(
+                    OrganisationInvitation.organisation_id == project.organisation_id,
+                    OrganisationInvitation.status == "pending",
+                    (OrganisationInvitation.project_id == project_id) | (OrganisationInvitation.project_id.is_(None)),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        roster_rows = list(
+            self._session.execute(
+                select(TeamRosterMember).where(TeamRosterMember.project_id == project_id)
+            )
+            .scalars()
+            .all()
+        )
+
+        all_user_ids = list({
+            *(pm.user_id for pm in memberships if pm.user_id),
+            *(om.user_id for om in org_memberships if om.user_id),
+        })
+        auth_rows = list(
+            self._session.execute(
+                select(UserSourceAuthorisation).where(
+                    UserSourceAuthorisation.user_id.in_(all_user_ids),
+                    UserSourceAuthorisation.provider == "github",
+                    UserSourceAuthorisation.status == "active",
+                )
+            )
+            .scalars()
+            .all()
+        ) if all_user_ids else []
+        user_to_gh = {a.user_id: a.external_username.strip() for a in auth_rows if a.external_username}
+
+        results: list[dict[str, Any]] = []
+        seen_user_ids: set[uuid.UUID] = set()
+        seen_emails: set[str] = set()
+
+        for pm in memberships:
+            if pm.user_id:
+                seen_user_ids.add(pm.user_id)
+            raw_email = pm.user.email if pm.user else None
+            if raw_email:
+                seen_emails.add(raw_email.strip().lower())
+            gh = user_to_gh.get(pm.user_id)
+            results.append({
+                "selection_key": f"pm:{pm.id}",
+                "member_source": "project_membership",
+                "membership_state": "active",
+                "selectable_for_match": True,
+                "project_membership_id": pm.id,
+                "user_id": pm.user_id,
+                "invitation_id": None,
+                "roster_member_id": None,
+                "display_name": pm.user.full_name if pm.user and pm.user.full_name else (raw_email or "Project Member"),
+                "email": raw_email if has_project_manage else mask_email(raw_email),
+                "role_name": pm.role.name if getattr(pm, "role", None) else "project_member",
+                "github_login": gh,
+                "review_status": "linked" if gh else "pending_identity",
+                "note": f"Active project member · GitHub @{gh}" if gh else "Active project member · Not linked to GitHub",
+            })
+
+        for om in org_memberships:
+            if om.user_id in seen_user_ids:
+                continue
+            seen_user_ids.add(om.user_id)
+            raw_email = om.user.email if om.user else None
+            if raw_email:
+                seen_emails.add(raw_email.strip().lower())
+            gh = user_to_gh.get(om.user_id)
+            results.append({
+                "selection_key": f"org_user:{om.user_id}",
+                "member_source": "organisation_membership",
+                "membership_state": "org_member_unassigned",
+                "selectable_for_match": False,
+                "project_membership_id": None,
+                "user_id": om.user_id,
+                "invitation_id": None,
+                "roster_member_id": None,
+                "display_name": om.user.full_name if om.user and om.user.full_name else (raw_email or "Organisation Member"),
+                "email": raw_email if has_project_manage else mask_email(raw_email),
+                "role_name": om.role.name if getattr(om, "role", None) else "org_member",
+                "github_login": gh,
+                "review_status": "org_member_unassigned",
+                "note": "Organisation member · Not yet a project member (add via Project Team first)",
+            })
+
+        for inv in invitations:
+            inv_email = (inv.email or "").strip().lower()
+            if inv_email and inv_email in seen_emails:
+                continue
+            if inv_email:
+                seen_emails.add(inv_email)
+            local_name = inv.email.split("@", 1)[0] if inv.email and "@" in inv.email else (inv.email or "Invited User")
+            results.append({
+                "selection_key": f"inv:{inv.id}",
+                "member_source": "invitation",
+                "membership_state": "invited",
+                "selectable_for_match": True,
+                "project_membership_id": None,
+                "user_id": None,
+                "invitation_id": inv.id,
+                "roster_member_id": None,
+                "display_name": local_name,
+                "email": inv.email if has_project_manage else mask_email(inv.email),
+                "role_name": inv.role.name if getattr(inv, "role", None) else "invited_member",
+                "github_login": None,
+                "review_status": "invited",
+                "note": "Pending invitation · Match records attribution only (does not grant project access)",
+            })
+
+        for tr in roster_rows:
+            if tr.matched_user_id and tr.matched_user_id in seen_user_ids:
+                continue
+            tr_email = (tr.email or "").strip().lower()
+            if tr_email and tr_email in seen_emails:
+                continue
+            if tr_email:
+                seen_emails.add(tr_email)
+            results.append({
+                "selection_key": f"roster:{tr.id}",
+                "member_source": "team_roster",
+                "membership_state": "roster_only",
+                "selectable_for_match": False,
+                "project_membership_id": None,
+                "user_id": tr.matched_user_id,
+                "invitation_id": None,
+                "roster_member_id": tr.id,
+                "display_name": tr.display_name,
+                "email": tr.email if has_project_manage else mask_email(tr.email),
+                "role_name": tr.role_title or "roster_member",
+                "github_login": tr.github_handle,
+                "review_status": "roster_only",
+                "note": "Roster record · Add as active project member before identity matching",
+            })
+
+        return results
+
     def review_contributor_identity(
         self,
         *,
@@ -904,6 +1156,8 @@ class ContributionAttributionService:
         action: str,
         reviewer_user_id: uuid.UUID,
         project_membership_id: uuid.UUID | None = None,
+        user_id: uuid.UUID | None = None,
+        invitation_id: uuid.UUID | None = None,
         roster_member_id: uuid.UUID | None = None,
         notes: str | None = None,
     ) -> dict[str, Any]:
@@ -948,16 +1202,61 @@ class ContributionAttributionService:
         now = utc_now()
         membership: ProjectMembership | None = None
         if action == "match_member":
-            if project_membership_id is None and roster_member_id is None:
-                from app.core.exceptions import BadRequestError
-
-                raise BadRequestError("project_membership_id or roster_member_id is required.")
             if project_membership_id is not None:
                 membership = self._session.get(ProjectMembership, project_membership_id)
-                if membership is None or membership.project_id != project_id:
+                if membership is None or membership.project_id != project_id or membership.status != "active":
                     from app.core.exceptions import NotFoundError
 
-                    raise NotFoundError("Project membership not found.", code="MEMBERSHIP_NOT_FOUND")
+                    raise NotFoundError("Active project membership not found.", code="MEMBERSHIP_NOT_FOUND")
+            elif invitation_id is not None:
+                inv = self._session.execute(
+                    select(OrganisationInvitation)
+                    .options(selectinload(OrganisationInvitation.role))
+                    .where(
+                        OrganisationInvitation.id == invitation_id,
+                        OrganisationInvitation.organisation_id == organisation_id,
+                        OrganisationInvitation.status == "pending",
+                        (OrganisationInvitation.project_id == project_id) | (OrganisationInvitation.project_id.is_(None)),
+                    )
+                ).scalar_one_or_none()
+                if inv is None:
+                    from app.core.exceptions import NotFoundError
+
+                    raise NotFoundError("Pending invitation not found.", code="INVITATION_NOT_FOUND")
+                # Record identity attribution via a project TeamRosterMember without accepting the invitation
+                # or creating a ProjectMembership (preserves project access boundary).
+                inv_email = (inv.email or "").strip().lower()
+                existing_roster = (
+                    self._session.execute(
+                        select(TeamRosterMember).where(
+                            TeamRosterMember.project_id == project_id,
+                            func.lower(TeamRosterMember.email) == inv_email,
+                        )
+                    ).scalar_one_or_none()
+                    if inv_email
+                    else None
+                )
+                if existing_roster is None:
+                    local_name = inv.email.split("@", 1)[0] if inv.email and "@" in inv.email else (inv.email or "Invited Member")
+                    existing_roster = TeamRosterMember(
+                        id=uuid.uuid4(),
+                        project_id=project_id,
+                        display_name=local_name,
+                        email=inv.email,
+                        role_title=inv.role.name if getattr(inv, "role", None) else "invited_member",
+                        notes="Linked from pending organisation invitation via Identity Review",
+                        created_by_id=reviewer_user_id,
+                    )
+                    self._session.add(existing_roster)
+                    self._session.flush()
+                roster_member_id = existing_roster.id
+                project_membership_id = None
+            else:
+                from app.core.exceptions import BadRequestError
+
+                raise BadRequestError(
+                    "Active project_membership_id or pending invitation_id is required. Identity matching cannot implicitly grant project membership."
+                )
             new_type = ContributorType.CONFIRMED_MEMBER.value
             new_status = ContributorReviewStatus.CONFIRMED.value
             new_method = "human_confirmed"

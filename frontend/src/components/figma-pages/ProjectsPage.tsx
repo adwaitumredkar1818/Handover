@@ -92,6 +92,7 @@ import {
 
 export function ProjectsList() {
   const router = useRouter()
+  const { setIsCreateProjectModalOpen } = useLiveApp()
   const s = useFigmaStore()
   const [view, setView] = useState<'grid' | 'list'>('grid')
   const [q, setQ] = useState('')
@@ -112,7 +113,7 @@ export function ProjectsList() {
       <PageHeader
         title="My Projects"
         subtitle="Projects you belong to. Your role is set per project and determines what you can see and do."
-        actions={<Button icon={Plus} onClick={() => router.push('/projects/new')}>Create project</Button>}
+        actions={<Button icon={Plus} onClick={() => setIsCreateProjectModalOpen(true)}>Create project</Button>}
       />
       <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center">
         <SearchInput placeholder="Search projects" value={q} onChange={(e) => setQ(e.target.value)} className="md:w-72" />

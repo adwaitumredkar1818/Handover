@@ -52,6 +52,7 @@ from app.schemas.relationship import (
     GraphProjectionResponse,
     IdentityCandidateResponse,
     IdentityReviewRequest,
+    IdentitySelectableMemberResponse,
     KnowledgeEntityResponse,
     KnowledgeRelationshipResponse,
     NodeDetailResponse,
@@ -82,6 +83,8 @@ def _invalidate_project_graph_caches(project_id: uuid.UUID) -> None:
     local_response_cache.invalidate_prefix(f"rel_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"contrib_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"rel_contributors:{project_id}:")
+    local_response_cache.invalidate_prefix(f"rel_selectable_members:{project_id}:")
+    local_response_cache.invalidate_prefix(f"project_members:{project_id}:")
     local_response_cache.invalidate_prefix(f"work_clusters:{project_id}:")
 
 
@@ -815,6 +818,41 @@ def get_contributor_detail(
     return ContributorIdentitySummaryResponse.model_validate(match)
 
 
+@router.get(
+    "/projects/{project_id}/relationships/identities/selectable-members",
+    response_model=list[IdentitySelectableMemberResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List canonical project members, org members, invitations, and roster entries for Identity Review",
+)
+def list_identity_selectable_members(
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
+    db_session: Annotated[Session, Depends(get_db_session)],
+) -> list[IdentitySelectableMemberResponse]:
+    """Return canonical selectable members for Identity Review dropdown without auto-accepting invitations."""
+    has_manage = project_ctx.has_permission("project.manage")
+    bind_id = id(db_session.get_bind())
+    cache_key = f"rel_selectable_members:{project_ctx.project.id}:{bind_id}:{int(has_manage)}"
+    cached = local_response_cache.get(cache_key)
+    if isinstance(cached, list):
+        try:
+            return [IdentitySelectableMemberResponse.model_validate(r) for r in cached]
+        except Exception:
+            local_response_cache.delete(cache_key)
+
+    attr_service = ContributionAttributionService(db_session)
+    items = attr_service.list_selectable_members(
+        project_id=project_ctx.project.id,
+        has_project_manage=has_manage,
+    )
+    validated = [IdentitySelectableMemberResponse.model_validate(i) for i in items]
+    local_response_cache.set(
+        cache_key,
+        [v.model_dump(mode="json") for v in validated],
+        ttl_seconds=10,
+    )
+    return validated
+
+
 @router.post(
     "/projects/{project_id}/relationships/contributors/{contributor_key}/review",
     response_model=ContributorIdentityReviewResponse,
@@ -836,6 +874,8 @@ def review_contributor_identity(
         action=payload.action,
         reviewer_user_id=project_ctx.principal.user_id,
         project_membership_id=payload.project_membership_id,
+        user_id=payload.user_id,
+        invitation_id=payload.invitation_id,
         roster_member_id=payload.roster_member_id,
         notes=payload.notes,
     )

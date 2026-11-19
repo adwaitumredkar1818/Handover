@@ -29,7 +29,33 @@ export const viewport: Viewport = {
 
 export const metadata: Metadata = {
   title: "The Handover · Intelligent Project Knowledge Reconstruction & Handover Platform",
-  description: "Prevent Critical Knowledge From Leaving With People.",
+  description:
+    "Prevent Critical Knowledge From Leaving With People. Reconstruct fragmented project context across repositories, issue trackers, discussions, and documents into certified, role-tailored handovers.",
+  keywords: [
+    "knowledge reconstruction",
+    "project handover",
+    "institutional memory",
+    "knowledge management",
+    "developer offboarding",
+    "engineering leadership",
+    "architectural decision records",
+    "provenance",
+    "RAG assistant",
+  ],
+  authors: [{ name: "The Handover Team" }],
+  openGraph: {
+    title: "The Handover · Prevent Critical Knowledge From Leaving With People",
+    description:
+      "Intelligent Project Knowledge Reconstruction & Handover Platform. Reconstruct fragmented project knowledge, surface conflicts, and generate certified handovers.",
+    siteName: "The Handover",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "The Handover · Prevent Critical Knowledge From Leaving With People",
+    description:
+      "Reconstruct fragmented project context across code, issues, discussions, and documents into verified, role-tailored handover packages.",
+  },
   icons: {
     icon: "/favicon.png",
   },

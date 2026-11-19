@@ -1258,12 +1258,34 @@ export const api = {
     async getContributorDetail(projectId: string, contributorKey: string): Promise<Record<string, unknown>> {
       return request(`/projects/${projectId}/relationships/contributors/${encodeURIComponent(contributorKey)}`);
     },
+    async listSelectableMembers(projectId: string): Promise<
+      Array<{
+        selection_key: string;
+        member_source: string;
+        membership_state: string;
+        selectable_for_match: boolean;
+        project_membership_id?: string | null;
+        user_id?: string | null;
+        invitation_id?: string | null;
+        roster_member_id?: string | null;
+        display_name: string;
+        email?: string | null;
+        role_name: string;
+        github_login?: string | null;
+        review_status: string;
+        note?: string | null;
+      }>
+    > {
+      return request(`/projects/${projectId}/relationships/identities/selectable-members`);
+    },
     async reviewContributor(
       projectId: string,
       contributorKey: string,
       payload: {
         action: "match_member" | "mark_external" | "mark_bot" | "leave_unidentified" | "reject_match" | "revert";
         project_membership_id?: string;
+        user_id?: string;
+        invitation_id?: string;
         roster_member_id?: string;
         notes?: string;
       }

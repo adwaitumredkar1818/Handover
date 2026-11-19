@@ -214,6 +214,7 @@ export function ProjectCreationWizard({
   };
 
   const handleCreate = async () => {
+    if (isSubmitting) return;
     setTouched(true);
     setErrorMessage(null);
     if (nameError || dateError) {

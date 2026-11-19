@@ -1,0 +1,386 @@
+"""Tests for RAG grounding accuracy, contributor attribution, and team member identity sync."""
+
+from __future__ import annotations
+
+import uuid
+from types import SimpleNamespace
+
+from app.models.enums import ContributorReviewStatus, ContributorType
+from app.services.contribution_attribution import (
+    ContributionAttributionService,
+    classify_contribution_domains,
+    is_explicit_rag_evidence,
+)
+from app.services.extraction_prompts import ChunkPromptInput
+from app.services.knowledge_validator import _is_technology_grounded
+from app.services.work_grouping import WorkGroupingService
+
+
+class TestStrictRagGrounding:
+    """Verify RAG is never fabricated from unrelated substrings or general AI/storage terms."""
+
+    def test_unrelated_substrings_and_ai_terms_do_not_trigger_rag(self) -> None:
+        assert not is_explicit_rag_evidence("backend/app/services/storage.py")
+        assert not is_explicit_rag_evidence("coverage_report.json")
+        assert not is_explicit_rag_evidence("average_temperature.py")
+        assert not is_explicit_rag_evidence("embeddings_service.py")
+        assert not is_explicit_rag_evidence("vector_store.py")
+
+        areas_storage, _, _ = classify_contribution_domains(
+            "feat: implement local encrypted storage and test coverage",
+            paths=["backend/app/services/storage.py", "tests/coverage_check.py"],
+        )
+        assert "RAG" not in areas_storage
+
+        areas_ai, _, _ = classify_contribution_domains(
+            "feat: add Ollama embeddings and vector search helper",
+            paths=["backend/app/services/embeddings.py", "backend/app/services/vector_store.py"],
+        )
+        assert "RAG" not in areas_ai
+        assert "AI/ML" in areas_ai or "Database" in areas_ai
+
+    def test_explicit_rag_evidence_is_recognized(self) -> None:
+        assert is_explicit_rag_evidence("backend/app/services/rag_pipeline.py")
+        assert is_explicit_rag_evidence("Implement retrieval-augmented generation pipeline")
+
+        areas_rag, _, _ = classify_contribution_domains(
+            "feat: implement retrieval-augmented generation pipeline",
+            paths=["backend/app/services/rag_pipeline.py"],
+        )
+        assert "RAG" in areas_rag
+
+    def test_validator_rejects_ungrounded_rag_technology_on_storage_text(self) -> None:
+        storage_text = "uses local encrypted storage and postgresql database with ollama llm."
+        assert not _is_technology_grounded("RAG", storage_text)
+        assert not _is_technology_grounded("RAG Pipeline", storage_text)
+        assert _is_technology_grounded("PostgreSQL", storage_text)
+        assert _is_technology_grounded("Ollama", storage_text)
+
+    def test_validator_accepts_grounded_rag_technology(self) -> None:
+        rag_text = "implements a hybrid rag pipeline combining chromadb and postgresql fts."
+        assert _is_technology_grounded("RAG", rag_text)
+        assert _is_technology_grounded("RAG Pipeline", rag_text)
+
+
+class TestTeamMemberIdentitySync:
+    """Verify project members appear in Relationship Explorer without false verification or authorship."""
+
+    def test_new_member_without_github_shows_pending_identity_and_zero_contributions(self, monkeypatch) -> None:
+        pm_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        project_id = uuid.uuid4()
+
+        pm = SimpleNamespace(
+            id=pm_id,
+            user_id=user_id,
+            project_id=project_id,
+            status="active",
+            responsibility_description="Backend Lead",
+            user=SimpleNamespace(id=user_id, full_name="Adwait Umredkar", email="adwait@example.com"),
+            role=SimpleNamespace(name="project_contributor"),
+        )
+
+        class _FakeResult:
+            def __init__(self, items):
+                self._items = items
+
+            def scalars(self):
+                return self
+
+            def all(self):
+                return self._items
+
+        calls = {"n": 0}
+
+        class _FakeSession:
+            def execute(self, _stmt):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return _FakeResult([])  # ContributionAttribution rows
+                if calls["n"] == 2:
+                    return _FakeResult([pm])  # ProjectMembership rows
+                return _FakeResult([])  # UserSourceAuthorisation rows
+
+        service = ContributionAttributionService(_FakeSession())  # type: ignore[arg-type]
+        identities = service.list_contributor_identities(
+            project_id=project_id,
+            accessible_evidence_ids=set(),
+            has_project_manage=True,
+        )
+
+        assert len(identities) == 1
+        entry = identities[0]
+        assert entry["display_name"] == "Adwait Umredkar"
+        assert entry["contributor_type"] == ContributorType.CONFIRMED_MEMBER.value
+        assert entry["contribution_count"] == 0
+        assert entry["review_status"] == ContributorReviewStatus.PENDING.value
+        assert entry["match_method"] == "pending_identity"
+
+    def test_two_people_same_display_name_without_email_or_handle_are_not_merged(self) -> None:
+        pm_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        project_id = uuid.uuid4()
+        ev_id = uuid.uuid4()
+
+        pm = SimpleNamespace(
+            id=pm_id,
+            user_id=user_id,
+            project_id=project_id,
+            status="active",
+            responsibility_description=None,
+            user=SimpleNamespace(id=user_id, full_name="Alex Kumar", email="alex.kumar@company.com"),
+            role=SimpleNamespace(name="project_member"),
+        )
+        attr = SimpleNamespace(
+            id=uuid.uuid4(),
+            project_id=project_id,
+            evidence_item_id=ev_id,
+            contributor_identifier="alex-oss",
+            matched_project_membership_id=None,
+            match_method=None,
+            match_confidence=0.0,
+            contribution_category="Backend Development",
+            contributor_type=ContributorType.UNIDENTIFIED.value,
+            review_status=ContributorReviewStatus.PENDING.value,
+            evidence_item=SimpleNamespace(category="commit", title="feat: api handler"),
+            metadata_json={
+                "contributor_key": "gh:alex-oss",
+                "github_author_login": "alex-oss",
+                "git_author_name": "Alex Kumar",
+                "git_author_email": "other.alex@external.org",
+                "work_areas": ["Backend"],
+            },
+        )
+
+        class _FakeResult:
+            def __init__(self, items):
+                self._items = items
+
+            def scalars(self):
+                return self
+
+            def all(self):
+                return self._items
+
+        calls = {"n": 0}
+
+        class _FakeSession:
+            def execute(self, _stmt):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return _FakeResult([attr])
+                if calls["n"] == 2:
+                    return _FakeResult([pm])
+                return _FakeResult([])
+
+        service = ContributionAttributionService(_FakeSession())  # type: ignore[arg-type]
+        identities = service.list_contributor_identities(
+            project_id=project_id,
+            accessible_evidence_ids={ev_id},
+            has_project_manage=True,
+        )
+
+        # Must stay 2 distinct entries and NOT suggest or merge based on display name alone
+        assert len(identities) == 2
+        ext = next(i for i in identities if i["contributor_key"] == "gh:alex-oss")
+        assert ext["matched_project_membership_id"] is None
+        assert ext["suggested_project_membership_id"] is None
+
+    def test_list_selectable_members_includes_active_org_invited_and_roster_with_correct_states(self) -> None:
+        org_id = uuid.uuid4()
+        project_id = uuid.uuid4()
+        pm_id = uuid.uuid4()
+        u1_id = uuid.uuid4()
+        u2_id = uuid.uuid4()
+        inv_id = uuid.uuid4()
+        roster_id = uuid.uuid4()
+
+        project = SimpleNamespace(id=project_id, organisation_id=org_id, name="Test")
+        pm = SimpleNamespace(
+            id=pm_id,
+            project_id=project_id,
+            user_id=u1_id,
+            status="active",
+            user=SimpleNamespace(id=u1_id, full_name="Vernit Garg", email="vernit@example.com"),
+            role=SimpleNamespace(name="project_manager"),
+        )
+        om = SimpleNamespace(
+            id=uuid.uuid4(),
+            organisation_id=org_id,
+            user_id=u2_id,
+            status="active",
+            user=SimpleNamespace(id=u2_id, full_name="Adwait Umredkar", email="adwait@example.com"),
+            role=SimpleNamespace(name="org_member"),
+        )
+        inv = SimpleNamespace(
+            id=inv_id,
+            organisation_id=org_id,
+            project_id=None,
+            email="shubham@example.com",
+            status="pending",
+            role=SimpleNamespace(name="project_contributor"),
+        )
+        roster = SimpleNamespace(
+            id=roster_id,
+            project_id=project_id,
+            matched_user_id=None,
+            display_name="Siddhesh Birewar",
+            email="siddhesh@example.com",
+            role_title="Backend Engineer",
+            github_handle=None,
+        )
+
+        class _FakeResult:
+            def __init__(self, items):
+                self._items = items
+
+            def scalars(self):
+                return self
+
+            def all(self):
+                return self._items
+
+        calls = {"n": 0}
+
+        class _FakeSession:
+            def get(self, _model, _id):
+                return project
+
+            def execute(self, _stmt):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return _FakeResult([pm])
+                if calls["n"] == 2:
+                    return _FakeResult([om])
+                if calls["n"] == 3:
+                    return _FakeResult([inv])
+                if calls["n"] == 4:
+                    return _FakeResult([roster])
+                return _FakeResult([])
+
+        service = ContributionAttributionService(_FakeSession())  # type: ignore[arg-type]
+        members = service.list_selectable_members(project_id=project_id, has_project_manage=True)
+
+        assert len(members) == 4
+        by_key = {m["selection_key"]: m for m in members}
+        assert by_key[f"pm:{pm_id}"]["selectable_for_match"] is True
+        assert by_key[f"pm:{pm_id}"]["membership_state"] == "active"
+        assert by_key[f"org_user:{u2_id}"]["selectable_for_match"] is False
+        assert by_key[f"org_user:{u2_id}"]["membership_state"] == "org_member_unassigned"
+        assert by_key[f"inv:{inv_id}"]["selectable_for_match"] is True
+        assert by_key[f"inv:{inv_id}"]["membership_state"] == "invited"
+        assert by_key[f"roster:{roster_id}"]["selectable_for_match"] is False
+        assert by_key[f"roster:{roster_id}"]["membership_state"] == "roster_only"
+
+    def test_review_contributor_identity_rejects_implicit_org_membership_creation(self):
+        from app.core.exceptions import BadRequestError
+        from app.services.contribution_attribution import ContributionAttributionService
+
+        project_id = uuid.uuid4()
+        org_id = uuid.uuid4()
+        reviewer_id = uuid.uuid4()
+        org_only_user_id = uuid.uuid4()
+
+        attrib = SimpleNamespace(
+            project_id=project_id,
+            contributor_identifier="ext-dev",
+            metadata_json={"contributor_key": "gh:ext-dev"},
+            contributor_type="unidentified",
+            review_status="pending",
+            matched_project_membership_id=None,
+            matched_roster_member_id=None,
+            match_method=None,
+            match_confidence=None,
+            review_history=[],
+        )
+
+        class _FakeResult:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return [attrib]
+
+        added_objects = []
+
+        class _FakeSession:
+            def execute(self, _stmt):
+                return _FakeResult()
+
+            def add(self, obj):
+                added_objects.append(obj)
+
+            def get(self, _model, _id):
+                return None
+
+        service = ContributionAttributionService(_FakeSession())  # type: ignore[arg-type]
+        try:
+            service.review_contributor_identity(
+                organisation_id=org_id,
+                project_id=project_id,
+                contributor_key="gh:ext-dev",
+                action="match_member",
+                reviewer_user_id=reviewer_id,
+                project_membership_id=None,
+                user_id=org_only_user_id,
+            )
+            raise AssertionError("Expected BadRequestError when matching without active project_membership_id")
+        except BadRequestError as exc:
+            assert "cannot implicitly grant project membership" in str(exc)
+        assert added_objects == []
+
+    def test_review_contributor_identity_rejects_cross_project_membership(self):
+        from app.core.exceptions import NotFoundError
+        from app.services.contribution_attribution import ContributionAttributionService
+
+        project_a = uuid.uuid4()
+        project_b = uuid.uuid4()
+        org_id = uuid.uuid4()
+        reviewer_id = uuid.uuid4()
+        foreign_pm_id = uuid.uuid4()
+
+        attrib = SimpleNamespace(
+            project_id=project_a,
+            contributor_identifier="ext-dev",
+            metadata_json={"contributor_key": "gh:ext-dev"},
+            contributor_type="unidentified",
+            review_status="pending",
+            matched_project_membership_id=None,
+            matched_roster_member_id=None,
+            match_method=None,
+            match_confidence=None,
+            review_history=[],
+        )
+        foreign_pm = SimpleNamespace(
+            id=foreign_pm_id,
+            project_id=project_b,
+            status="active",
+        )
+
+        class _FakeResult:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return [attrib]
+
+        class _FakeSession:
+            def execute(self, _stmt):
+                return _FakeResult()
+
+            def get(self, _model, _id):
+                return foreign_pm
+
+        service = ContributionAttributionService(_FakeSession())  # type: ignore[arg-type]
+        try:
+            service.review_contributor_identity(
+                organisation_id=org_id,
+                project_id=project_a,
+                contributor_key="gh:ext-dev",
+                action="match_member",
+                reviewer_user_id=reviewer_id,
+                project_membership_id=foreign_pm_id,
+            )
+            raise AssertionError("Expected NotFoundError for cross-project membership")
+        except NotFoundError as exc:
+            assert "Active project membership not found" in str(exc)
