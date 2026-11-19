@@ -18,7 +18,8 @@ import {
 } from "lucide-react";
 import { Logo } from "../brand";
 import { useLiveApp } from "../../context/LiveAppContext";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
+import Link from "next/link";
 import { useScrollProgress } from "./motion/useScrollProgress";
 
 const PRODUCT_MENU = [
@@ -97,11 +98,23 @@ const scrollToSection = (id: string) => {
 export function LandingNav() {
   const { user } = useLiveApp();
   const router = useRouter();
+  const pathname = usePathname();
   const { isScrolled } = useScrollProgress();
   const [mounted, setMounted] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [productOpen, setProductOpen] = useState(false);
   const [solutionsOpen, setSolutionsOpen] = useState(false);
+
+  const navigateToSection = (id: string) => {
+    if (pathname === "/") {
+      const el = document.getElementById(id);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+    }
+    router.push(`/#${id}`);
+  };
 
   useEffect(() => {
     setMounted(true);
@@ -155,7 +168,13 @@ export function LandingNav() {
       <div className="mx-auto flex h-[76px] w-full max-w-[1240px] items-center px-5 sm:px-8">
         {/* Brand Logo */}
         <button
-          onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+          onClick={() => {
+            if (pathname === "/") {
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            } else {
+              router.push("/");
+            }
+          }}
           className="flex items-center gap-2 cursor-pointer focus:outline-none"
           aria-label="The Handover home"
         >
@@ -198,7 +217,7 @@ export function LandingNav() {
                     key={item.title}
                     onClick={() => {
                       setProductOpen(false);
-                      scrollToSection(item.id);
+                      navigateToSection(item.id);
                     }}
                     className="flex w-full items-start gap-3 rounded-xl p-2.5 text-left transition hover:bg-[#F6F8FC] cursor-pointer"
                   >
@@ -221,7 +240,7 @@ export function LandingNav() {
 
           {/* How It Works Link */}
           <button
-            onClick={() => scrollToSection("how")}
+            onClick={() => navigateToSection("how")}
             className="h-10 rounded-lg px-3.5 text-[14.5px] font-medium text-[#3e5373] transition hover:text-[#203653] cursor-pointer"
           >
             How it works
@@ -258,7 +277,7 @@ export function LandingNav() {
                     key={item.title}
                     onClick={() => {
                       setSolutionsOpen(false);
-                      scrollToSection(item.id);
+                      navigateToSection(item.id);
                     }}
                     className="flex w-full items-start gap-3 rounded-xl p-2.5 text-left transition hover:bg-[#F6F8FC] cursor-pointer"
                   >
@@ -281,15 +300,27 @@ export function LandingNav() {
 
           {/* Trust & Security Link */}
           <button
-            onClick={() => scrollToSection("security")}
+            onClick={() => navigateToSection("security")}
             className="h-10 rounded-lg px-3.5 text-[14.5px] font-medium text-[#3e5373] transition hover:text-[#203653] cursor-pointer"
           >
             Trust & Security
           </button>
 
+          {/* Developers Link */}
+          <Link
+            href="/developers"
+            className={`h-10 rounded-lg px-3.5 text-[14.5px] font-medium transition flex items-center cursor-pointer ${
+              pathname === "/developers"
+                ? "text-[#315FBA] font-semibold"
+                : "text-[#3e5373] hover:text-[#203653]"
+            }`}
+          >
+            Developers
+          </Link>
+
           {/* FAQ Link */}
           <button
-            onClick={() => scrollToSection("faq")}
+            onClick={() => navigateToSection("faq")}
             className="h-10 rounded-lg px-3.5 text-[14.5px] font-medium text-[#3e5373] transition hover:text-[#203653] cursor-pointer"
           >
             FAQ
@@ -365,7 +396,7 @@ export function LandingNav() {
                   key={item.title}
                   onClick={() => {
                     setMobileMenuOpen(false);
-                    setTimeout(() => scrollToSection(item.id), 50);
+                    setTimeout(() => navigateToSection(item.id), 50);
                   }}
                   className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-[14px] font-medium text-[#203653] hover:bg-[#F6F8FC] cursor-pointer"
                 >
@@ -387,13 +418,25 @@ export function LandingNav() {
                   key={id}
                   onClick={() => {
                     setMobileMenuOpen(false);
-                    setTimeout(() => scrollToSection(id), 50);
+                    setTimeout(() => navigateToSection(id), 50);
                   }}
                   className="block w-full rounded-xl px-3 py-2 text-left text-[14px] font-medium text-[#203653] hover:bg-[#F6F8FC] cursor-pointer"
                 >
                   {label}
                 </button>
               ))}
+
+              <Link
+                href="/developers"
+                onClick={() => setMobileMenuOpen(false)}
+                className={`block w-full rounded-xl px-3 py-2 text-left text-[14px] font-medium transition cursor-pointer ${
+                  pathname === "/developers"
+                    ? "text-[#315FBA] font-semibold bg-[#EEF2FA]"
+                    : "text-[#203653] hover:bg-[#F6F8FC]"
+                }`}
+              >
+                Meet the Developers
+              </Link>
             </div>
 
             <div className="mt-6 pt-6 border-t border-[#D9E1F0] space-y-2.5">

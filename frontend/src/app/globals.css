@@ -375,3 +375,348 @@
   .no-print { display: none !important; }
   body { background: white; }
 }
+
+/* ==========================================================================
+   Handover Developer Page — Developer Card (Uiverse.io by Smit-Prajapati)
+   & Cyan Energy Effect (Uiverse.io by alexs_8179)
+   ========================================================================== */
+
+/* Keyframe animations for Cyan Energy Platform (Uiverse.io by Juanes200122 / alexs_8179) */
+@keyframes devEnergyBounce {
+  0%, 100% {
+    transform: translate(0px, 0px) rotate(45deg);
+  }
+  50% {
+    transform: translate(0px, 10px) rotate(45deg);
+  }
+}
+
+@keyframes devEnergyBounce2 {
+  0%, 100% {
+    transform: translate(0px, 0px) rotate(45deg);
+  }
+  50% {
+    transform: translate(0px, 20px) rotate(45deg);
+  }
+}
+
+@keyframes devEnergyUmbral {
+  0% {
+    stop-color: rgba(0, 242, 254, 0);
+  }
+  50% {
+    stop-color: rgba(0, 242, 254, 0.55);
+  }
+  100% {
+    stop-color: rgba(0, 242, 254, 0);
+  }
+}
+
+@keyframes devEnergyParticles {
+  0%, 100% {
+    transform: translate(0px, 0px) rotate(45deg);
+  }
+  50% {
+    transform: translate(0px, -15px) rotate(45deg);
+  }
+}
+
+.dev-energy-animated-stop {
+  animation: devEnergyUmbral 2.5s ease-in-out infinite;
+}
+
+.dev-energy-particles {
+  animation: devEnergyParticles 3.5s ease-in-out infinite;
+  transform-origin: 100px 100px;
+}
+
+.dev-energy-bounce {
+  animation: devEnergyBounce 2s ease-in-out infinite;
+  transform-origin: 100px 100px;
+}
+
+.dev-energy-bounce2 {
+  animation: devEnergyBounce2 2s ease-in-out infinite;
+  animation-delay: 0.35s;
+  transform-origin: 100px 100px;
+}
+
+/* Developer Card Base */
+.dev-card {
+  width: 310px !important;
+  height: 350px !important;
+  background: #ffffff !important;
+  border-radius: 34px !important;
+  padding: 3px !important;
+  position: relative !important;
+  border: 1px solid #d9e1f0;
+  box-shadow: 0 16px 36px -12px rgba(32, 54, 83, 0.14), 0 4px 12px -2px rgba(32, 54, 83, 0.04);
+  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1);
+  overflow: hidden;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.dev-card:hover,
+.dev-card[data-expanded="true"] {
+  border-top-left-radius: 55px !important;
+  box-shadow: 0 24px 48px -12px rgba(49, 95, 186, 0.24), 0 6px 16px -2px rgba(32, 54, 83, 0.08);
+}
+
+/* Developer Card Top-Right Mail Action */
+.dev-card-mail {
+  position: absolute;
+  right: 1.25rem;
+  top: 1.15rem;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(217, 225, 240, 0.9);
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  transition: all 0.25s ease;
+  text-decoration: none;
+}
+
+.dev-card-mail svg {
+  width: 15px;
+  height: 15px;
+  stroke: #7997be;
+  stroke-width: 2.2px;
+  transition: all 0.25s ease;
+}
+
+.dev-card-mail:hover {
+  background: #ffffff;
+  transform: scale(1.08);
+  box-shadow: 0 4px 10px rgba(32, 54, 83, 0.16);
+}
+
+.dev-card-mail:hover svg {
+  stroke: #315fba;
+}
+
+/* Developer Profile Picture Container */
+.dev-card-profile-pic {
+  position: absolute !important;
+  width: calc(100% - 6px) !important;
+  height: calc(100% - 6px) !important;
+  top: 3px !important;
+  left: 3px !important;
+  border-radius: 31px !important;
+  z-index: 1 !important;
+  border: 0px solid #315fba;
+  overflow: hidden !important;
+  background: #f6f8fc;
+  transition: all 0.5s ease-in-out 0.15s, z-index 0.5s ease-in-out 0.15s;
+}
+
+.dev-card-profile-pic img {
+  object-fit: cover !important;
+  width: 100% !important;
+  height: 100% !important;
+  object-position: center top !important;
+  transition: all 0.5s ease-in-out 0s;
+}
+
+/* Expanding Bottom Section */
+.dev-card-bottom {
+  position: absolute !important;
+  bottom: 3px !important;
+  left: 3px !important;
+  right: 3px !important;
+  background: linear-gradient(150deg, #18283f 0%, #203653 50%, #2b4f8c 100%) !important;
+  top: 83% !important;
+  border-radius: 28px !important;
+  z-index: 2 !important;
+  box-shadow: rgba(17, 32, 52, 0.28) 0px 5px 10px 0px inset;
+  overflow: hidden;
+  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1) 0s;
+}
+
+/* Expanded Content */
+.dev-card-content {
+  position: absolute;
+  top: 12px;
+  left: 14px;
+  right: 14px;
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 0.35s ease 0.1s, transform 0.35s ease 0.1s;
+  pointer-events: none;
+}
+
+/* Header block offset to the right of the circular avatar */
+.dev-card-header-block {
+  margin-left: 78px;
+  padding-right: 0.25rem;
+  min-height: 68px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.dev-card-name {
+  display: block;
+  font-size: 1.15rem;
+  color: #ffffff;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+.dev-card-role-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #38bdf8;
+  margin-top: 0.3rem;
+  background: rgba(56, 189, 248, 0.14);
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  width: fit-content;
+}
+
+/* Full description clearly readable without any truncation */
+.dev-card-about {
+  display: block !important;
+  overflow: visible !important;
+  font-size: 0.77rem;
+  line-height: 1.52;
+  color: rgba(255, 255, 255, 0.94);
+  margin-top: 1rem;
+  padding-right: 0.25rem;
+}
+
+/* Bottom Actions Container */
+.dev-card-bottom-bar {
+  position: absolute;
+  bottom: 0.9rem;
+  left: 1.25rem;
+  right: 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 5;
+}
+
+.dev-card-social-links {
+  display: flex;
+  gap: 0.85rem;
+  align-items: center;
+}
+
+.dev-card-social-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  transition: all 0.25s ease;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
+  text-decoration: none;
+}
+
+.dev-card-social-link svg {
+  width: 17px;
+  height: 17px;
+  fill: currentColor;
+  transition: all 0.25s ease;
+}
+
+.dev-card-social-link:hover {
+  color: #38bdf8;
+  transform: scale(1.2);
+}
+
+.dev-card-contact-btn {
+  background: #ffffff;
+  color: #203653;
+  border: none;
+  border-radius: 20px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 0.4rem 0.85rem;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.18);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  text-decoration: none;
+  transition: all 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+  cursor: pointer;
+}
+
+.dev-card-contact-btn:hover {
+  background: #315fba;
+  color: #ffffff;
+  box-shadow: 0 6px 16px rgba(49, 95, 186, 0.35);
+  transform: translateY(-1px);
+}
+
+/* Card Hover & Expanded Transition Behaviors */
+.dev-card:hover .dev-card-bottom,
+.dev-card[data-expanded="true"] .dev-card-bottom {
+  top: 14% !important;
+  border-radius: 76px 28px 28px 28px !important;
+  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1) 0.15s;
+}
+
+.dev-card:hover .dev-card-content,
+.dev-card[data-expanded="true"] .dev-card-content {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+  transition: opacity 0.4s ease 0.25s, transform 0.4s ease 0.25s;
+}
+
+.dev-card:hover .dev-card-profile-pic,
+.dev-card[data-expanded="true"] .dev-card-profile-pic {
+  width: 68px !important;
+  height: 68px !important;
+  aspect-ratio: 1 !important;
+  top: 12px !important;
+  left: 14px !important;
+  border-radius: 50% !important;
+  z-index: 4 !important;
+  border: 3.5px solid #ffffff !important;
+  box-shadow: 0 6px 16px rgba(17, 32, 52, 0.25) !important;
+  transition: all 0.5s ease-in-out, z-index 0.5s ease-in-out 0.1s;
+}
+
+.dev-card:hover .dev-card-profile-pic:hover,
+.dev-card[data-expanded="true"] .dev-card-profile-pic:hover {
+  transform: scale(1.08);
+}
+
+.dev-card:hover .dev-card-profile-pic img,
+.dev-card[data-expanded="true"] .dev-card-profile-pic img {
+  transform: scale(1.12);
+  transition: all 0.5s ease-in-out 0.2s;
+}
+
+/* Reduced Motion Handling */
+@media (prefers-reduced-motion: reduce) {
+  .dev-card,
+  .dev-card-profile-pic,
+  .dev-card-bottom,
+  .dev-card-profile-pic img,
+  .dev-card-content,
+  .dev-card-social-link,
+  .dev-card-contact-btn,
+  .dev-card-mail,
+  .dev-energy-animated-stop,
+  .dev-energy-particles,
+  .dev-energy-bounce,
+  .dev-energy-bounce2 {
+    transition: none !important;
+    animation: none !important;
+  }
+}

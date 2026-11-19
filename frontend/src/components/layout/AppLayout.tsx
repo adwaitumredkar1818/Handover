@@ -82,7 +82,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
     pathname?.startsWith("/invitations/") ||
     pathname?.startsWith("/auth/");
 
-  const isPublicRoute = pathname === "/" || pathname === "/landing" || isAuthPage;
+  const isPublicRoute =
+    pathname === "/" ||
+    pathname === "/landing" ||
+    pathname === "/developers" ||
+    isAuthPage;
 
   // Protect all non-public routes by cleanly redirecting unauthenticated users to /login
   useEffect(() => {
