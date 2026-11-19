@@ -582,6 +582,9 @@ class RelationshipCoordinatorService:
                     for i in (meta.get("exact_identifiers") or [])
                     if isinstance(i, str) and len(i.strip()) > 1
                 ]
+                direct_tech = str(meta.get("technology") or meta.get("dependency_name") or "").strip()
+                if direct_tech and direct_tech not in raw_identifiers:
+                    raw_identifiers.append(direct_tech)
 
                 comp_entities: list[KnowledgeEntity] = []
                 for comp_name in raw_components:
@@ -964,7 +967,26 @@ class RelationshipCoordinatorService:
                     )
 
             # 1E. Dependencies -> Component DEPENDS_ON Component + Technology extraction
-            elif k.category == KnowledgeCategory.DEPENDENCIES.value:
+            elif k.category in {
+                KnowledgeCategory.DEPENDENCIES.value,
+                KnowledgeCategory.DEPENDENCIES_RELATIONSHIPS.value,
+            }:
+                dep_name = str(meta.get("dependency_name") or meta.get("technology") or "").strip()
+                if dep_name:
+                    canon_name, stack_cat, _etype = canonicalize_technology_name(dep_name)
+                    _record_technology(
+                        raw_tech=dep_name,
+                        canon_name=canon_name or dep_name,
+                        stack_cat=stack_cat or "technology",
+                        usage_basis=usage_basis,
+                        summary=summary,
+                        k_item=k,
+                        ev_id=ev_id,
+                        conf=conf,
+                        rel_basis=rel_basis,
+                        first_excerpt=first_excerpt,
+                        version=str(meta.get("version") or "").strip() or None,
+                    )
                 src_label = str(meta.get("source_item") or meta.get("source") or "").strip()
                 tgt_label = str(meta.get("target_item") or meta.get("target") or "").strip()
                 for canon_name, stack_cat, _etype in extract_known_technologies_from_text(
@@ -2020,7 +2042,7 @@ class RelationshipCoordinatorService:
                     evt_title = (
                         f"{matched_ent.entity_type.replace('_', ' ').title()}: "
                         f"{matched_ent.canonical_name}"
-                    )
+                    )[:255]
                     self._timeline_repo.create_event(
                         organisation_id=organisation_id,
                         project_id=project_id,
