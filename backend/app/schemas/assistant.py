@@ -178,6 +178,19 @@ class QuestionRequest(BaseModel):
         description="Optional filter to restrict retrieval to specific Knowledge Intelligence domains",
     )
     max_citations: int = Field(default=8, ge=1, le=25, description="Maximum number of evidence citations to include")
+    handover_case_id: uuid.UUID | None = Field(
+        default=None,
+        description="Optional handover case UUID to ground the answer with approved/published handover sections and evidence",
+    )
+    package_version_id: uuid.UUID | None = Field(
+        default=None,
+        description="Optional handover package version UUID to target a specific snapshot",
+    )
+    current_section: str | None = Field(
+        default=None,
+        max_length=120,
+        description="Optional current handover section key or domain focus",
+    )
 
 
 class AssistantAnswerPayload(BaseModel):

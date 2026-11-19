@@ -46,6 +46,11 @@ from app.services.assistant_llm import AssistantLLMReasoner
 from app.services.assistant_query import AssistantQueryClassifier, ClassifiedQuery
 from app.services.assistant_retrieval import AssistantRetrievalResult, AssistantRetrievalService
 from app.services.assistant_validation import AssistantAnswerValidator, ValidatedAssistantAnswer
+from app.services.handover_case import (
+    HandoverCaseService,
+    is_unapproved_draft_restricted_for_successor,
+)
+from app.services.handover_sections import HandoverSectionReadService, redact_secrets
 from app.services.rbac import ProjectContext
 
 logger = logging.getLogger("app.services.assistant")
@@ -245,6 +250,43 @@ class ProjectKnowledgeAssistantService:
         if conv.created_by_user_id != user.id and not project_ctx.has_permission("assistant.admin"):
             raise ForbiddenError("You cannot post in another user's conversation.", code="FORBIDDEN_CONVERSATION")
 
+        # 1b. Resolve optional handover case context & enforce successor publication gate before DB/LLM work
+        resolved_handover_case_id: uuid.UUID | None = request.handover_case_id
+        if resolved_handover_case_id is None and isinstance(conv.metadata_json, dict):
+            raw_hc = conv.metadata_json.get("handover_case_id")
+            if raw_hc:
+                try:
+                    resolved_handover_case_id = uuid.UUID(str(raw_hc))
+                except (ValueError, TypeError):
+                    resolved_handover_case_id = None
+
+        handover_case = None
+        if resolved_handover_case_id is not None:
+            handover_case = HandoverCaseService(self.session).get_case(
+                resolved_handover_case_id,
+                project_id=project_ctx.project.id,
+                load_relationships=True,
+            )
+            can_review_or_manage = any(
+                project_ctx.has_permission(p)
+                for p in (
+                    "handover.review",
+                    "handover.approve",
+                    "handover.deliver",
+                    "handover.admin",
+                    "project.manage",
+                )
+            )
+            if is_unapproved_draft_restricted_for_successor(
+                handover_case,
+                user.id,
+                can_review_or_manage,
+            ):
+                raise ForbiddenError(
+                    "Incoming successors cannot query an unapproved handover package before publication.",
+                    code="HANDOVER_DRAFT_RESTRICTED",
+                )
+
         # 2. Persist User Message
         user_message = self.message_repo.create(
             conversation_id=conversation_id,
@@ -282,6 +324,17 @@ class ProjectKnowledgeAssistantService:
             max_citations=request.max_citations,
         )
 
+        # 5b. Augment retrieval context with ACL-filtered approved handover package evidence
+        is_handover_access_restricted = False
+        if handover_case is not None:
+            is_handover_access_restricted = self._augment_retrieval_with_handover_context(
+                project_ctx=project_ctx,
+                handover_case=handover_case,
+                package_version_id=request.package_version_id,
+                current_section=request.current_section,
+                retrieval_res=retrieval_res,
+            )
+
         # 6. Record Retrieval Run Telemetry
         retrieval_run = self.retrieval_run_repo.create(
             organisation_id=project_ctx.organisation.id,
@@ -310,6 +363,7 @@ class ProjectKnowledgeAssistantService:
         validated: ValidatedAssistantAnswer = self.validator.validate(
             payload=payload,
             citations_manifest=retrieval_res.citations_manifest,
+            is_access_restricted=is_handover_access_restricted,
         )
 
         total_duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -438,3 +492,215 @@ class ProjectKnowledgeAssistantService:
             raise NotFoundError("Retrieval run does not belong to this project.", code="RUN_NOT_IN_PROJECT")
 
         return RetrievalDiagnosticsResponse.model_validate(run)
+
+    def _augment_retrieval_with_handover_context(
+        self,
+        *,
+        project_ctx: ProjectContext,
+        handover_case: Any,
+        package_version_id: uuid.UUID | None,
+        current_section: str | None,
+        retrieval_res: AssistantRetrievalResult,
+    ) -> bool:
+        """Ground assistant context with ACL-filtered approved handover sections and evidence."""
+        from app.schemas.assistant import AssistantCitationResponse
+
+        versions = list(getattr(handover_case, "versions", None) or [])
+        target_version_id = package_version_id
+        if target_version_id is None:
+            current_v = next((v for v in versions if v.is_current), None)
+            if current_v is not None:
+                target_version_id = current_v.id
+            elif versions:
+                target_version_id = sorted(versions, key=lambda v: v.version_number, reverse=True)[0].id
+
+        handover_type = "developer"
+        if isinstance(handover_case.metadata_json, dict):
+            raw_ht = handover_case.metadata_json.get("handover_type")
+            if isinstance(raw_ht, str) and raw_ht in ("developer", "project_manager", "technical_lead"):
+                handover_type = raw_ht
+
+        due_str = (
+            handover_case.target_handover_date.isoformat()
+            if getattr(handover_case, "target_handover_date", None)
+            else "Unspecified"
+        )
+
+        if target_version_id is None:
+            header_only = (
+                f'<handover_context case_id="{handover_case.id}" title="{redact_secrets(handover_case.title)}" '
+                f'status="{handover_case.status}" handover_type="{handover_type}" '
+                f'target_handover_date="{due_str}">\n'
+                "No assembled package version exists yet for this handover case.\n"
+                "</handover_context>"
+            )
+            retrieval_res.evidence_prompt = (
+                f"{header_only}\n\n{retrieval_res.evidence_prompt}"
+                if retrieval_res.evidence_prompt
+                else header_only
+            )
+            retrieval_res.diagnostics["handover_case_id"] = str(handover_case.id)
+            return False
+
+        sections_resp = HandoverSectionReadService(self.session).get_version_sections(
+            handover_case.id,
+            target_version_id,
+            project_id=project_ctx.project.id,
+            viewer_user_id=project_ctx.principal.user.id,
+            has_project_manage=project_ctx.has_permission("project.manage"),
+        )
+
+        ev_to_label: dict[uuid.UUID, str] = {
+            c.evidence_id: c.citation_label for c in retrieval_res.citations_manifest
+        }
+        added_blocks: list[str] = []
+        restricted_items_skipped = 0
+
+        def _register_provenance(
+            prov: Any,
+            *,
+            knowledge_item_id: uuid.UUID | None,
+            section_title: str,
+            fallback_excerpt: str,
+        ) -> str | None:
+            if prov.acl_restricted:
+                return None
+            if prov.evidence_id in ev_to_label:
+                return ev_to_label[prov.evidence_id]
+            if len(retrieval_res.citations_manifest) >= 16:
+                return None
+            label = f"S{len(retrieval_res.citations_manifest) + 1}"
+            ev_to_label[prov.evidence_id] = label
+            excerpt_text = redact_secrets(prov.supporting_excerpt or fallback_excerpt or "")[:400]
+            cit = AssistantCitationResponse(
+                citation_label=label,
+                evidence_id=prov.evidence_id,
+                chunk_id=None,
+                knowledge_item_id=knowledge_item_id,
+                source_title=prov.source_name or "Handover Evidence",
+                source_provider=prov.source_provider or prov.source_type or "handover",
+                source_url=prov.source_url,
+                source_external_id=prov.source_reference,
+                author=prov.author,
+                source_timestamp=prov.source_timestamp,
+                page_number=None,
+                section_title=section_title,
+                excerpt=excerpt_text,
+                is_verified=True,
+            )
+            retrieval_res.citations_manifest.append(cit)
+            date_str = (
+                cit.source_timestamp.strftime("%Y-%m-%d")
+                if cit.source_timestamp
+                else "Undated"
+            )
+            added_blocks.append(
+                f'<project_evidence id="{label}" provider="{cit.source_provider}" title="{cit.source_title}">\n'
+                f"**Metadata**: Author: {cit.author or 'Unknown'} | Date: {date_str} | Handover Section: {section_title}\n"
+                f"**Content**:\n{excerpt_text}\n"
+                f"</project_evidence>"
+            )
+            return label
+
+        ordered_sections = list(sections_resp.mandatory_sections)
+        if current_section:
+            focus = current_section.strip().lower()
+            ordered_sections.sort(
+                key=lambda s: (
+                    0 if (focus == s.section_key.lower() or focus in s.section_title.lower()) else 1,
+                    s.role_priority_rank,
+                )
+            )
+
+        ctx_lines: list[str] = [
+            f'<handover_context case_id="{handover_case.id}" version_id="{target_version_id}" '
+            f'version_number="v{sections_resp.version.version_number}" '
+            f'title="{redact_secrets(handover_case.title)}" status="{handover_case.status}" '
+            f'handover_type="{sections_resp.handover_type_label}" target_handover_date="{due_str}">',
+            f"Role Focus: {sections_resp.role_focus_summary}",
+        ]
+
+        for ms in ordered_sections:
+            sec_lines: list[str] = [
+                f"\n## Section {ms.section_number}: {ms.section_title} [status={ms.readiness_status}]"
+            ]
+            if ms.insufficient_info_message:
+                sec_lines.append(f"Gaps / Insufficient Information: {ms.insufficient_info_message}")
+            for ki in ms.knowledge_items:
+                allowed_prov = [p for p in ki.provenance if not p.acl_restricted]
+                if ki.provenance and not allowed_prov:
+                    restricted_items_skipped += 1
+                    continue
+                labels = [
+                    lbl
+                    for p in allowed_prov
+                    if (
+                        lbl := _register_provenance(
+                            p,
+                            knowledge_item_id=ki.id,
+                            section_title=ms.section_title,
+                            fallback_excerpt=ki.content,
+                        )
+                    )
+                    is not None
+                ]
+                cit_suffix = f" [{', '.join(labels)}]" if labels else ""
+                sec_lines.append(
+                    f"- Verified Finding ({ki.epistemic_status}): {redact_secrets(ki.title)} — "
+                    f"{redact_secrets(ki.content)[:350]}{cit_suffix}"
+                )
+            for rel in ms.relationships[:6]:
+                allowed_rel_prov = [p for p in rel.provenance if not p.acl_restricted]
+                if rel.provenance and not allowed_rel_prov:
+                    restricted_items_skipped += 1
+                    continue
+                labels = [
+                    lbl
+                    for p in allowed_rel_prov
+                    if (
+                        lbl := _register_provenance(
+                            p,
+                            knowledge_item_id=None,
+                            section_title=ms.section_title,
+                            fallback_excerpt=f"{rel.source_entity_name} --[{rel.relationship_type}]--> {rel.target_entity_name}",
+                        )
+                    )
+                    is not None
+                ]
+                cit_suffix = f" [{', '.join(labels)}]" if labels else ""
+                sec_lines.append(
+                    f"- Verified Relationship: {rel.source_entity_name} --[{rel.relationship_type}]--> "
+                    f"{rel.target_entity_name}{cit_suffix}"
+                )
+            for conflict in ms.unresolved_conflicts[:5]:
+                sec_lines.append(
+                    f"- UNRESOLVED CONFLICT ({conflict.priority} / {conflict.conflict_type}): "
+                    f"{redact_secrets(conflict.explanation)[:220]}"
+                )
+            for step in ms.recommended_steps[:5]:
+                sec_lines.append(
+                    f"- Recommended Step [{step.get('status', 'pending')}]: {redact_secrets(str(step.get('title', '')))}"
+                )
+            for resp in ms.responsibilities_summary[:5]:
+                sec_lines.append(
+                    f"- Responsibility [{resp.get('transfer_status', 'pending')}]: "
+                    f"{redact_secrets(str(resp.get('responsibility_title', '')))} "
+                    f"(Successor confirmed={resp.get('successor_acknowledged', False)})"
+                )
+            if len(sec_lines) > 1:
+                ctx_lines.extend(sec_lines)
+
+        ctx_lines.append("</handover_context>")
+        handover_block = "\n".join(ctx_lines)
+        new_evidence_block = "\n\n".join(added_blocks)
+
+        parts = [p for p in [handover_block, new_evidence_block, retrieval_res.evidence_prompt] if p]
+        retrieval_res.evidence_prompt = "\n\n".join(parts)
+        retrieval_res.candidates_authorized = max(
+            retrieval_res.candidates_authorized,
+            len(retrieval_res.citations_manifest),
+        )
+        retrieval_res.diagnostics["handover_case_id"] = str(handover_case.id)
+        retrieval_res.diagnostics["handover_version_id"] = str(target_version_id)
+        retrieval_res.diagnostics["handover_restricted_items_skipped"] = restricted_items_skipped
+        return restricted_items_skipped > 0 and len(retrieval_res.citations_manifest) == 0

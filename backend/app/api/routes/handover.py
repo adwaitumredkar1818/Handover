@@ -29,6 +29,7 @@ from app.api.deps import (
 )
 from app.core.exceptions import ForbiddenError
 from app.models.enums import RoleName, SignoffType, VerificationTargetType
+from app.models.handover import HandoverCase
 from app.repositories.handover import (
     HandoverCaseRepository,
     HandoverPackageVersionRepository,
@@ -53,6 +54,8 @@ from app.schemas.handover import (
     HandoverChecklistResponse,
     HandoverChecklistWorkspaceResponse,
     HandoverContentLinkResponse,
+    HandoverContextContributionRequest,
+    HandoverContextContributionResponse,
     HandoverDeliveryResponse,
     HandoverEligibilityCheckResponse,
     HandoverOwnershipTransferResponse,
@@ -86,7 +89,10 @@ from app.schemas.handover import (
     SignoffRequest,
 )
 from app.services.handover_assembly import PackageAssemblyService
-from app.services.handover_case import HandoverCaseService
+from app.services.handover_case import (
+    HandoverCaseService,
+    is_unapproved_draft_restricted_for_successor,
+)
 from app.services.handover_checklist import ChecklistService
 from app.services.handover_sections import HandoverSectionReadService
 from app.services.handover_eligibility import HandoverEligibilityService
@@ -102,6 +108,30 @@ router = APIRouter(
     prefix="/projects/{project_id}/handover",
     tags=["Handover Workspace"],
 )
+
+
+def _can_review_or_manage_handover(project_ctx: ProjectContext) -> bool:
+    return any(
+        project_ctx.has_permission(p)
+        for p in (
+            "handover.review",
+            "handover.approve",
+            "handover.deliver",
+            "handover.admin",
+            "project.manage",
+        )
+    )
+
+
+def _enforce_successor_draft_gate(case: HandoverCase, project_ctx: ProjectContext) -> None:
+    if is_unapproved_draft_restricted_for_successor(
+        case,
+        viewer_user_id=project_ctx.user_id,
+        can_review_or_manage=_can_review_or_manage_handover(project_ctx),
+    ):
+        raise ForbiddenError(
+            "Incoming successor cannot access unapproved handover drafts before formal publication."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +165,16 @@ def list_handover_cases(
         offset=offset,
         limit=page_size,
     )
-    total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+    can_bypass = _can_review_or_manage_handover(project_ctx)
+    visible_items = [
+        c
+        for c in items
+        if not is_unapproved_draft_restricted_for_successor(
+            c, viewer_user_id=project_ctx.user_id, can_review_or_manage=can_bypass
+        )
+    ]
+    adjusted_total = max(0, total - (len(items) - len(visible_items)))
+    total_pages = (adjusted_total + page_size - 1) // page_size if adjusted_total > 0 else 0
     return PaginatedHandoverCaseResponse(
         items=[
             HandoverCaseListItem(
@@ -147,12 +186,14 @@ def list_handover_cases(
                 departing_member_id=c.departing_member_id,
                 successor_id=c.successor_id,
                 assigned_reviewer_id=c.assigned_reviewer_id,
+                target_handover_date=c.target_handover_date,
+                metadata_json=c.metadata_json or {},
                 created_at=c.created_at,
                 updated_at=c.updated_at,
             )
-            for c in items
+            for c in visible_items
         ],
-        total=total,
+        total=adjusted_total,
         page=page,
         page_size=page_size,
         total_pages=total_pages,
@@ -197,6 +238,7 @@ def get_handover_case_details(
     """Get comprehensive case details including package versions, signoffs, and history."""
     service = HandoverCaseService(session)
     case = service.get_case(case_id, project_id=project_id, load_relationships=True)
+    _enforce_successor_draft_gate(case, project_ctx)
 
     packages = [HandoverPackageResponse.model_validate(case.package)] if case.package else []
     current_version = next((v for v in case.versions if v.is_current), None)
@@ -236,6 +278,31 @@ def update_handover_case(
     )
     session.commit()
     return HandoverCaseResponse.model_validate(updated)
+
+
+@router.post(
+    "/cases/{case_id}/context",
+    response_model=HandoverContextContributionResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Contribute missing handover context or undocumented decision as candidate knowledge",
+)
+def contribute_handover_context(
+    project_id: uuid.UUID,
+    case_id: uuid.UUID,
+    request: HandoverContextContributionRequest,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.edit"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> HandoverContextContributionResponse:
+    """Persist departing or team member context as attributable candidate knowledge pending Verification Center review."""
+    service = HandoverCaseService(session)
+    result = service.contribute_context(
+        case_id=case_id,
+        project_id=project_id,
+        user_id=project_ctx.user_id,
+        request=request,
+    )
+    session.commit()
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +353,7 @@ def list_package_versions(
     case = case_repo.get_by_id(case_id, load_relationships=False)
     if not case or case.project_id != project_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
+    _enforce_successor_draft_gate(case, project_ctx)
 
     version_repo = HandoverPackageVersionRepository(session)
     if case.package:
@@ -312,6 +380,9 @@ def get_package_version_details(
     version = version_repo.get_by_id(version_id, load_sections=True)
     if not version or version.project_id != project_id or version.case_id != case_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found.")
+    case = HandoverCaseRepository(session).get_by_id(case_id, load_relationships=False)
+    if case is not None:
+        _enforce_successor_draft_gate(case, project_ctx)
 
     readiness_repo = HandoverReadinessRepository(session)
     readiness_summary = None
@@ -370,7 +441,7 @@ def get_package_version_details(
 @router.get(
     "/cases/{case_id}/versions/{version_id}/sections",
     response_model=HandoverVersionSectionsResponse,
-    summary="Get canonical eight-domain sections with hydrated provenance for a package version",
+    summary="Get canonical eight-domain and ten-mandatory handover sections with provenance",
 )
 def get_package_version_sections(
     project_id: uuid.UUID,
@@ -378,11 +449,19 @@ def get_package_version_sections(
     version_id: uuid.UUID,
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.read"))],
     session: Annotated[Session, Depends(get_db_session)],
+    role: str | None = Query(
+        None,
+        description="Optional handover presentation role: 'developer', 'project_manager', or 'technical_lead'",
+    ),
 ) -> HandoverVersionSectionsResponse:
-    """Retrieve canonical persisted sections, content links, ACL-checked provenance,
+    """Retrieve canonical persisted sections, ten mandatory sections, ACL-checked provenance,
     and epistemic/conflict separation for a specific handover case and package version.
     Read-only: never mutates the package or historical versions.
     """
+    case = HandoverCaseRepository(session).get_by_id(case_id, load_relationships=False)
+    if case is not None and case.project_id == project_id:
+        _enforce_successor_draft_gate(case, project_ctx)
+
     service = HandoverSectionReadService(session)
     return service.get_version_sections(
         case_id=case_id,
@@ -390,6 +469,7 @@ def get_package_version_sections(
         project_id=project_id,
         viewer_user_id=project_ctx.user_id,
         has_project_manage=project_ctx.has_permission("project.manage"),
+        role_override=role,
     )
 
 
@@ -450,6 +530,10 @@ def get_readiness_assessment(
     Verification Center, Conflict Management, Checklist, Evidence Quality, and
     authoritative Approval Eligibility intelligence. Strictly scoped to project & case.
     """
+    case = HandoverCaseRepository(session).get_by_id(case_id, load_relationships=False)
+    if case is not None and case.project_id == project_id:
+        _enforce_successor_draft_gate(case, project_ctx)
+
     engine = HandoverReadinessEngine(session)
     return engine.get_readiness_intelligence(
         case_id=case_id,
@@ -1369,11 +1453,16 @@ def export_handover_package(
     session: Annotated[Session, Depends(get_db_session)],
     format: str = Query("markdown", description="Export format: 'markdown', 'json', or 'pdf'"),
     version_id: uuid.UUID | None = Query(None, description="Optional specific package version UUID"),
+    role: str | None = Query(
+        None,
+        description="Optional handover presentation role: 'developer', 'project_manager', or 'technical_lead'",
+    ),
 ) -> Any:
     """Export a viewer-authorized handover package with strict per-request source ACL filtering and secret redaction."""
     service = HandoverExportService(session)
     fmt = format.lower().strip()
     has_manage = project_ctx.has_permission("project.manage")
+    can_bypass = _can_review_or_manage_handover(project_ctx)
 
     try:
         if fmt == "markdown":
@@ -1383,6 +1472,8 @@ def export_handover_package(
                 user_id=project_ctx.user_id,
                 version_id=version_id,
                 has_project_manage=has_manage,
+                can_review_or_manage=can_bypass,
+                role_override=role,
             )
             session.commit()
             return PlainTextResponse(
@@ -1399,6 +1490,8 @@ def export_handover_package(
                 user_id=project_ctx.user_id,
                 version_id=version_id,
                 has_project_manage=has_manage,
+                can_review_or_manage=can_bypass,
+                role_override=role,
             )
             session.commit()
             return json_data
@@ -1409,6 +1502,8 @@ def export_handover_package(
                 user_id=project_ctx.user_id,
                 version_id=version_id,
                 has_project_manage=has_manage,
+                can_review_or_manage=can_bypass,
+                role_override=role,
             )
             session.commit()
             return Response(

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -25,6 +25,11 @@ class HandoverCaseCreateRequest(BaseModel):
     description: str | None = Field(None, max_length=5000)
     departing_member_id: uuid.UUID
     successor_id: uuid.UUID | None = None
+    handover_type: str = Field(
+        default="developer",
+        pattern="^(developer|project_manager|technical_lead)$",
+    )
+    target_handover_date: date | None = None
     metadata_json: dict[str, Any] | None = None
 
 
@@ -34,7 +39,21 @@ class HandoverCaseUpdateRequest(BaseModel):
     title: str | None = Field(None, min_length=3, max_length=300)
     description: str | None = Field(None, max_length=5000)
     successor_id: uuid.UUID | None = None
+    handover_type: str | None = Field(
+        default=None,
+        pattern="^(developer|project_manager|technical_lead)$",
+    )
+    target_handover_date: date | None = None
     metadata_json: dict[str, Any] | None = None
+
+
+class HandoverContextContributionRequest(BaseModel):
+    """Departing member or team member contributes missing context as unverified candidate evidence."""
+
+    title: str = Field(..., min_length=3, max_length=300)
+    content: str = Field(..., min_length=5, max_length=10000)
+    category: str = Field(default="decisions_rationale", max_length=64)
+    rationale: str | None = Field(None, max_length=4000)
 
 
 class PackageAssemblyRequest(BaseModel):
@@ -277,10 +296,20 @@ class HandoverCaseResponse(BaseModel):
     departing_member_id: uuid.UUID
     successor_id: uuid.UUID | None = None
     assigned_reviewer_id: uuid.UUID | None = None
+    target_handover_date: date | None = None
+    handover_type: str = "developer"
     created_by_user_id: uuid.UUID
     metadata_json: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def _derive_handover_type(self) -> Self:
+        if self.metadata_json and isinstance(self.metadata_json, dict):
+            ht = self.metadata_json.get("handover_type")
+            if isinstance(ht, str) and ht in ("developer", "project_manager", "technical_lead"):
+                self.handover_type = ht
+        return self
 
 
 class HandoverCaseListItem(BaseModel):
@@ -296,8 +325,32 @@ class HandoverCaseListItem(BaseModel):
     departing_member_id: uuid.UUID
     successor_id: uuid.UUID | None = None
     assigned_reviewer_id: uuid.UUID | None = None
+    target_handover_date: date | None = None
+    handover_type: str = "developer"
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def _derive_handover_type(self) -> Self:
+        if self.metadata_json and isinstance(self.metadata_json, dict):
+            ht = self.metadata_json.get("handover_type")
+            if isinstance(ht, str) and ht in ("developer", "project_manager", "technical_lead"):
+                self.handover_type = ht
+        return self
+
+
+class HandoverContextContributionResponse(BaseModel):
+    """Result of contributing missing handover context as an unverified candidate record."""
+
+    evidence_id: uuid.UUID
+    knowledge_item_id: uuid.UUID
+    verification_case_id: uuid.UUID
+    epistemic_status: str
+    review_status: str
+    category: str
+    title: str
+    created_at: datetime
 
 
 class HandoverPackageResponse(BaseModel):
@@ -484,6 +537,28 @@ class HandoverSectionDetailResponse(HandoverSectionResponse):
     domain_context: dict[str, Any] = Field(default_factory=dict)
 
 
+class HandoverMandatorySectionResponse(BaseModel):
+    """Canonical 10-section role-prioritised handover structure derived from approved evidence."""
+
+    section_number: int
+    section_key: str
+    section_title: str
+    source_domains: list[str] = Field(default_factory=list)
+    role_priority_rank: int
+    is_role_priority: bool = False
+    role_emphasis_note: str = ""
+    readiness_status: str = "ready"
+    insufficient_info_message: str | None = None
+    content_markdown: str = ""
+    knowledge_items: list[HandoverSectionKnowledgeItemResponse] = Field(default_factory=list)
+    relationships: list[HandoverSectionRelationshipResponse] = Field(default_factory=list)
+    unresolved_conflicts: list[HandoverSectionConflictItemResponse] = Field(default_factory=list)
+    evidence_references: list[HandoverEvidenceProvenanceResponse] = Field(default_factory=list)
+    recommended_steps: list[dict[str, Any]] = Field(default_factory=list)
+    responsibilities_summary: list[dict[str, Any]] = Field(default_factory=list)
+    pending_verification_count: int = 0
+
+
 class HandoverVersionSectionsResponse(BaseModel):
     """Canonical response for GET /cases/{case_id}/versions/{version_id}/sections."""
 
@@ -495,6 +570,10 @@ class HandoverVersionSectionsResponse(BaseModel):
     epistemic_summary: HandoverDomainEpistemicBreakdown = Field(
         default_factory=HandoverDomainEpistemicBreakdown
     )
+    handover_type: str = "developer"
+    handover_type_label: str = "Developer Handover"
+    role_focus_summary: str = ""
+    mandatory_sections: list[HandoverMandatorySectionResponse] = Field(default_factory=list)
 
 
 class HandoverReadinessAssessmentResponse(BaseModel):

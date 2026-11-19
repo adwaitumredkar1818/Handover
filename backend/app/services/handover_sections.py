@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.exceptions import NotFoundError
 from app.models.enums import (
+    ChecklistItemStatus,
     ConflictResolutionState,
     EpistemicStatus,
     HandoverLinkType,
@@ -35,6 +36,7 @@ from app.models.enums import (
 from app.models.evidence import EvidenceItem
 from app.models.handover import (
     HandoverCase,
+    HandoverChecklist,
     HandoverContentLink,
     HandoverPackageSection,
     HandoverPackageVersion,
@@ -59,6 +61,7 @@ from app.schemas.handover import (
     HandoverContentLinkResponse,
     HandoverDomainEpistemicBreakdown,
     HandoverEvidenceProvenanceResponse,
+    HandoverMandatorySectionResponse,
     HandoverPackageVersionResponse,
     HandoverSectionConflictItemResponse,
     HandoverSectionDetailResponse,
@@ -129,6 +132,656 @@ def _map_category_to_section(category: str) -> str:
     return HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value
 
 
+HANDOVER_ROLE_CONFIG: dict[str, dict[str, Any]] = {
+    "developer": {
+        "label": "Developer Handover",
+        "focus_summary": (
+            "Prioritises technical architecture, implementation decisions, pending engineering tasks, "
+            "component dependencies, bugs/blockers, and practical next steps."
+        ),
+        "priority_order": [2, 5, 4, 6, 7, 9, 3, 8, 1, 10],
+        "top_sections": {2, 5, 4, 6, 7, 9},
+    },
+    "project_manager": {
+        "label": "Project Manager Handover",
+        "focus_summary": (
+            "Prioritises project status, completed and pending deliverables, active risks, dependencies, "
+            "team responsibilities, and milestone decisions."
+        ),
+        "priority_order": [1, 3, 4, 7, 6, 8, 5, 9, 2, 10],
+        "top_sections": {1, 3, 4, 7, 6, 8},
+    },
+    "technical_lead": {
+        "label": "Technical Lead Handover",
+        "focus_summary": (
+            "Prioritises architectural decisions and trade-offs, system dependencies, component ownership, "
+            "technical debt/risks, and strategic continuation steps."
+        ),
+        "priority_order": [5, 2, 6, 8, 7, 4, 9, 3, 1, 10],
+        "top_sections": {5, 2, 6, 8, 7},
+    },
+}
+
+_COMPLETED_STATUS_TOKENS: frozenset[str] = frozenset(
+    {"completed", "done", "merged", "closed", "resolved", "delivered", "shipped", "finished"}
+)
+_PENDING_STATUS_TOKENS: frozenset[str] = frozenset(
+    {"pending", "open", "in_progress", "in-progress", "todo", "blocked", "wip", "draft", "planned"}
+)
+
+
+def normalize_handover_type(handover_type: str | None) -> str:
+    """Normalize role presentation key to one of developer | project_manager | technical_lead."""
+    val = (handover_type or "developer").strip().lower()
+    return val if val in HANDOVER_ROLE_CONFIG else "developer"
+
+
+def _is_completed_work_item(item: HandoverSectionKnowledgeItemResponse) -> bool:
+    """Classify an approved work_progress finding as completed vs pending strictly from evidence fields."""
+    norm = (item.normalised_status or "").strip().lower()
+    if norm in _COMPLETED_STATUS_TOKENS:
+        return True
+    if norm in _PENDING_STATUS_TOKENS:
+        return False
+
+    payload_status = str((item.structured_payload or {}).get("status") or "").strip().lower()
+    if payload_status in _COMPLETED_STATUS_TOKENS:
+        return True
+    if payload_status in _PENDING_STATUS_TOKENS:
+        return False
+
+    combined = f"{item.title} {item.content}".lower()
+    has_pending_marker = any(
+        tok in combined for tok in ("pending", "todo", "to-do", "unfinished", "in progress", "blocked", "remaining", "next task", "open issue")
+    )
+    has_completed_marker = any(
+        tok in combined for tok in ("completed", "delivered", "merged", "shipped", "finalized", "implemented and verified", "finished")
+    )
+    return has_completed_marker and not has_pending_marker
+
+
+def _format_item_bullets(
+    items: list[HandoverSectionKnowledgeItemResponse],
+    *,
+    note_pr_runtime: bool = False,
+    note_decision_rationale: bool = False,
+) -> str:
+    """Deterministically format verified findings with full source attribution."""
+    lines: list[str] = []
+    for ki in items:
+        lines.append(f"### {ki.title}")
+        if ki.content:
+            lines.append(ki.content)
+        if ki.owner_label:
+            lines.append(f"- **Owner / Actor**: {ki.owner_label}")
+        if ki.normalised_status:
+            lines.append(f"- **Recorded State**: {ki.normalised_status}")
+        if note_pr_runtime and any(tok in f"{ki.title} {ki.content}".lower() for tok in ("pull request", "pr ", "merged")):
+            lines.append(
+                "- *Verification Scope Note*: Confirmed merged/delivered in repository evidence; verify runtime production deployment separately."
+            )
+        if note_decision_rationale and not any(
+            tok in (ki.content or "").lower() for tok in ("because", "rationale", "reason", "trade-off", "alternative", "chosen")
+        ) and not (ki.structured_payload or {}).get("rationale"):
+            lines.append(
+                "- *Rationale Note*: Documented decision is verified; underlying rationale or rejected alternatives were not explicitly recorded in linked evidence."
+            )
+        sources = ", ".join(
+            p.source_name if not p.acl_restricted else "Restricted Source (Source ACL Protected)"
+            for p in ki.provenance
+        )
+        if sources:
+            lines.append(f"- **Sources**: {sources}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def build_mandatory_ten_sections(
+    *,
+    hydrated_sections: list[HandoverSectionDetailResponse],
+    handover_type: str,
+    unresolved_conflicts: list[HandoverSectionConflictItemResponse],
+    resolved_conflicts: list[HandoverSectionConflictItemResponse],
+    team_members_ctx: list[dict[str, Any]],
+    transfers_ctx: list[dict[str, Any]],
+    checklists: list[HandoverChecklist],
+    domain_context_overview: dict[str, Any],
+    omit_restricted_items: bool = False,
+) -> list[HandoverMandatorySectionResponse]:
+    """Assemble the canonical 10 mandatory handover sections deterministically from approved content."""
+    role_key = normalize_handover_type(handover_type)
+    role_cfg = HANDOVER_ROLE_CONFIG[role_key]
+    priority_order: list[int] = role_cfg["priority_order"]
+    top_sections: set[int] = role_cfg["top_sections"]
+    rank_by_section_num = {sec_num: idx + 1 for idx, sec_num in enumerate(priority_order)}
+
+    sec_map = {sec.section_type: sec for sec in hydrated_sections}
+
+    def _permitted_kis(section_type: str) -> list[HandoverSectionKnowledgeItemResponse]:
+        sec = sec_map.get(section_type)
+        if not sec:
+            return []
+        if not omit_restricted_items:
+            return list(sec.knowledge_items)
+        return [
+            ki for ki in sec.knowledge_items if not any(p.acl_restricted for p in ki.provenance)
+        ]
+
+    def _permitted_rels(section_type: str) -> list[HandoverSectionRelationshipResponse]:
+        sec = sec_map.get(section_type)
+        if not sec:
+            return []
+        if not omit_restricted_items:
+            return list(sec.relationships)
+        return [
+            rel for rel in sec.relationships if not any(p.acl_restricted for p in rel.provenance)
+        ]
+
+    def _pending_count(section_types: list[str]) -> int:
+        return sum(
+            sec_map[st].epistemic_breakdown.pending_verification
+            for st in section_types
+            if st in sec_map
+        )
+
+    def _collect_provenance(
+        items: list[HandoverSectionKnowledgeItemResponse],
+        rels: list[HandoverSectionRelationshipResponse],
+    ) -> list[HandoverEvidenceProvenanceResponse]:
+        by_id: dict[uuid.UUID, HandoverEvidenceProvenanceResponse] = {}
+        for ki in items:
+            for p in ki.provenance:
+                if omit_restricted_items and p.acl_restricted:
+                    continue
+                by_id.setdefault(p.evidence_id, p)
+        for rel in rels:
+            for p in rel.provenance:
+                if omit_restricted_items and p.acl_restricted:
+                    continue
+                by_id.setdefault(p.evidence_id, p)
+        return list(by_id.values())
+
+    # 1. Project Overview
+    overview_kis = _permitted_kis(HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value)
+    overview_pending = _pending_count([HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value])
+    overview_lines: list[str] = []
+    if domain_context_overview.get("project_name"):
+        overview_lines.append(
+            f"**Project**: {redact_secrets(str(domain_context_overview.get('project_name')))}"
+        )
+    if domain_context_overview.get("project_description"):
+        overview_lines.append(redact_secrets(str(domain_context_overview.get("project_description"))))
+    if overview_kis:
+        overview_lines.append("")
+        overview_lines.append(_format_item_bullets(overview_kis))
+    overview_ready = "ready" if overview_kis else "insufficient_information"
+    overview_gap = (
+        None
+        if overview_kis
+        else "Insufficient approved project overview findings. Verify project overview claims in Verification Center instead of relying on unreviewed summaries."
+    )
+
+    # 2. Architecture and Technical Context
+    arch_kis = _permitted_kis(HandoverPackageSectionType.TECHNICAL_ARCHITECTURE.value)
+    ops_kis = _permitted_kis(HandoverPackageSectionType.OPERATIONAL_HISTORICAL.value)
+    arch_combined = arch_kis + ops_kis
+    arch_pending = _pending_count([
+        HandoverPackageSectionType.TECHNICAL_ARCHITECTURE.value,
+        HandoverPackageSectionType.OPERATIONAL_HISTORICAL.value,
+    ])
+    arch_parts: list[str] = []
+    if arch_kis:
+        arch_parts.append(_format_item_bullets(arch_kis))
+    if ops_kis:
+        arch_parts.append("## Operational Procedures & Runbooks\n\n" + _format_item_bullets(ops_kis))
+    arch_ready = "ready" if arch_combined else "insufficient_information"
+    arch_gap = (
+        None
+        if arch_combined
+        else "No human-verified system architecture, API, deployment, or operational procedure findings exist in this version."
+    )
+
+    # 3 & 4. Completed Work vs Pending Work
+    work_kis = _permitted_kis(HandoverPackageSectionType.WORK_PROGRESS.value)
+    work_pending_count = _pending_count([HandoverPackageSectionType.WORK_PROGRESS.value])
+    completed_kis = [ki for ki in work_kis if _is_completed_work_item(ki)]
+    pending_kis = [ki for ki in work_kis if not _is_completed_work_item(ki)]
+
+    all_checklist_items = [item for chk in checklists for item in (chk.items or [])]
+    completed_checklist = [
+        it for it in all_checklist_items if it.status == ChecklistItemStatus.COMPLETED.value
+    ]
+    open_checklist = [
+        it
+        for it in all_checklist_items
+        if it.status not in (ChecklistItemStatus.COMPLETED.value, ChecklistItemStatus.SKIPPED.value)
+    ]
+
+    comp_lines: list[str] = []
+    if completed_kis:
+        comp_lines.append(_format_item_bullets(completed_kis, note_pr_runtime=True))
+    if completed_checklist:
+        comp_lines.append("### Completed Handover Checklist Items")
+        for it in completed_checklist:
+            comp_lines.append(f"- [x] {redact_secrets(it.item_text)}")
+    comp_ready = "ready" if (completed_kis or completed_checklist) else "insufficient_information"
+    comp_gap = (
+        None
+        if (completed_kis or completed_checklist)
+        else "No human-verified completed deliverables or merged milestones are recorded in this version."
+    )
+
+    pend_lines: list[str] = []
+    if pending_kis:
+        pend_lines.append(_format_item_bullets(pending_kis))
+    if open_checklist:
+        pend_lines.append("### Open Transition Checklist Tasks")
+        for it in open_checklist:
+            blocking_tag = " *(BLOCKING)*" if it.blocking else ""
+            pend_lines.append(f"- [ ] {redact_secrets(it.item_text)}{blocking_tag}")
+    pend_ready = "ready" if (pending_kis or open_checklist) else "insufficient_information"
+    pend_gap = (
+        None
+        if (pending_kis or open_checklist)
+        else "No human-verified pending work items or open checklist tasks are recorded."
+    )
+
+    # 5. Important Decisions and Rationale
+    dec_kis = _permitted_kis(HandoverPackageSectionType.DECISIONS_RATIONALE.value)
+    dec_pending = _pending_count([HandoverPackageSectionType.DECISIONS_RATIONALE.value])
+    dec_md = _format_item_bullets(dec_kis, note_decision_rationale=True) if dec_kis else ""
+    dec_ready = "ready" if dec_kis else "insufficient_information"
+    dec_gap = (
+        None
+        if dec_kis
+        else "No human-verified technical or project decisions with rationale have been approved yet."
+    )
+
+    # 6. Dependencies
+    dep_kis = _permitted_kis(HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value)
+    dep_rels = _permitted_rels(HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value)
+    dep_pending = _pending_count([HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value])
+    dep_lines: list[str] = []
+    if dep_rels:
+        dep_lines.append("### Evidence-Supported Component & Task Relationships")
+        for rel in dep_rels:
+            dep_lines.append(
+                f"- **{redact_secrets(rel.source_entity_name)}** (`{rel.relationship_type}`) -> **{redact_secrets(rel.target_entity_name)}**"
+            )
+        dep_lines.append("")
+    if dep_kis:
+        dep_lines.append(_format_item_bullets(dep_kis))
+    dep_ready = "ready" if (dep_kis or dep_rels) else "insufficient_information"
+    dep_gap = (
+        None
+        if (dep_kis or dep_rels)
+        else "No evidence-supported component, service, or task dependencies have been verified yet."
+    )
+
+    # 7. Risks and Blockers
+    risk_kis = _permitted_kis(HandoverPackageSectionType.BUGS_BLOCKERS_RISKS.value)
+    risk_pending = _pending_count([HandoverPackageSectionType.BUGS_BLOCKERS_RISKS.value])
+    risk_lines: list[str] = []
+    if risk_kis:
+        active_risks = [ki for ki in risk_kis if (ki.normalised_status or "").lower() not in _COMPLETED_STATUS_TOKENS]
+        historical_risks = [ki for ki in risk_kis if (ki.normalised_status or "").lower() in _COMPLETED_STATUS_TOKENS]
+        if active_risks:
+            risk_lines.append("### Active Risks & Technical Blockers")
+            risk_lines.append(_format_item_bullets(active_risks))
+        if historical_risks:
+            risk_lines.append("### Resolved Historical Issues")
+            risk_lines.append(_format_item_bullets(historical_risks))
+    if unresolved_conflicts:
+        risk_lines.append(
+            f"### Unresolved Cross-Source Conflicts ({len(unresolved_conflicts)} — Excluded from Verified Facts)"
+        )
+        for cf in unresolved_conflicts:
+            risk_lines.append(f"- **{cf.conflict_type}**: {cf.explanation}")
+    if resolved_conflicts:
+        risk_lines.append(f"### Resolved Conflicts ({len(resolved_conflicts)})")
+        for cf in resolved_conflicts:
+            risk_lines.append(
+                f"- **{cf.conflict_type}**: {cf.authoritative_claim_text or cf.explanation}"
+            )
+
+    if unresolved_conflicts:
+        risk_ready = "blocked_by_conflict"
+        risk_gap = (
+            f"{len(unresolved_conflicts)} unresolved cross-source contradiction(s) require reviewer investigation in Conflict Management."
+        )
+    elif risk_kis or resolved_conflicts:
+        risk_ready = "ready"
+        risk_gap = None
+    else:
+        risk_ready = "insufficient_information"
+        risk_gap = "No human-verified bugs, blockers, or risks are recorded in this version."
+
+    # 8. Responsibilities
+    resp_kis = _permitted_kis(HandoverPackageSectionType.RESPONSIBILITIES_OWNERSHIP.value)
+    resp_pending = _pending_count([HandoverPackageSectionType.RESPONSIBILITIES_OWNERSHIP.value])
+    unassigned_transfers = [t for t in transfers_ctx if not t.get("proposed_successor_id")]
+    unassigned_checklist = [it for it in open_checklist if not it.assigned_to_user_id]
+
+    resp_lines: list[str] = []
+    if resp_kis:
+        resp_lines.append("### Verified Ownership & Responsibility Findings")
+        resp_lines.append(_format_item_bullets(resp_kis))
+    if transfers_ctx:
+        resp_lines.append("### Explicit Handover Responsibility Transfers")
+        for tr in transfers_ctx:
+            owner_name = tr.get("current_owner_name") or "Outgoing Member"
+            succ_name = tr.get("proposed_successor_name") or "Unassigned (Requires Clarification)"
+            resp_lines.append(
+                f"- **{redact_secrets(tr.get('responsibility_description', ''))}** — {owner_name} -> {succ_name} (`{tr.get('transfer_status')}`)"
+            )
+    elif team_members_ctx:
+        resp_lines.append("### Project Roster Reference (Membership != Technical Ownership)")
+        for tm in team_members_ctx:
+            role_note = f" ({tm.get('responsibility_description')})" if tm.get("responsibility_description") else ""
+            resp_lines.append(
+                f"- {tm.get('full_name') or tm.get('email') or 'Member'} — Role: `{tm.get('role_name')}`{role_note}"
+            )
+    if unassigned_transfers or unassigned_checklist:
+        resp_lines.append("### Unassigned Duties Requiring Clarification")
+        for tr in unassigned_transfers:
+            resp_lines.append(f"- Transfer lacking proposed successor: {redact_secrets(tr.get('responsibility_description', ''))}")
+        for it in unassigned_checklist:
+            resp_lines.append(f"- Unassigned checklist task: {redact_secrets(it.item_text)}")
+
+    resp_has_content = bool(resp_kis or transfers_ctx)
+    resp_ready = (
+        "needs_attention"
+        if resp_has_content and unassigned_transfers
+        else "ready"
+        if resp_has_content
+        else "insufficient_information"
+    )
+    resp_gap = (
+        None
+        if resp_ready == "ready"
+        else "Some responsibilities lack an assigned successor."
+        if resp_ready == "needs_attention"
+        else "No verified ownership records or responsibility transfers are defined yet. Project membership alone does not establish component ownership."
+    )
+
+    # 9. Recommended Next Steps (strictly derived from verified pending work, blockers, dependencies, and runbooks)
+    steps: list[dict[str, Any]] = []
+    for cf in unresolved_conflicts:
+        steps.append(
+            {
+                "priority": "urgent",
+                "source_section": "Risks and Blockers",
+                "title": f"Resolve verification conflict ({cf.conflict_type})",
+                "detail": cf.explanation,
+                "action_target": "conflicts",
+            }
+        )
+    for ki in pending_kis:
+        steps.append(
+            {
+                "priority": "high",
+                "source_section": "Pending Work",
+                "title": ki.title,
+                "detail": ki.content,
+                "owner": ki.owner_label,
+                "action_target": "tasks",
+            }
+        )
+    for rel in dep_rels:
+        steps.append(
+            {
+                "priority": "medium",
+                "source_section": "Dependencies",
+                "title": f"Verify dependency: {redact_secrets(rel.source_entity_name)} -> {redact_secrets(rel.target_entity_name)}",
+                "detail": f"Relationship type: {rel.relationship_type}",
+                "action_target": "dependencies",
+            }
+        )
+    for it in open_checklist:
+        steps.append(
+            {
+                "priority": "high" if it.blocking else "medium",
+                "source_section": "Transition Checklist",
+                "title": redact_secrets(it.item_text),
+                "detail": redact_secrets(it.description or ""),
+                "action_target": "checklists",
+            }
+        )
+    for ki in ops_kis[:3]:
+        steps.append(
+            {
+                "priority": "normal",
+                "source_section": "Operational Context",
+                "title": f"Review operational runbook: {ki.title}",
+                "detail": ki.content,
+                "action_target": "operations",
+            }
+        )
+
+    steps_lines: list[str] = []
+    if steps:
+        for idx, st in enumerate(steps, start=1):
+            owner_suffix = f" (Owner: {st['owner']})" if st.get("owner") else ""
+            steps_lines.append(
+                f"{idx}. **[{st['priority'].upper()}] {st['title']}**{owner_suffix} — *From {st['source_section']}*"
+            )
+            if st.get("detail"):
+                steps_lines.append(f"   {st['detail']}")
+    steps_ready = "ready" if steps else "insufficient_information"
+    steps_gap = (
+        None
+        if steps
+        else "Insufficient approved pending work, dependencies, or open checklist tasks to derive continuation steps. Steps are never invented without evidence."
+    )
+
+    # 10. Evidence References (deduplicated across all permitted items and relationships)
+    all_section_items = (
+        overview_kis + arch_combined + completed_kis + pending_kis + dec_kis + dep_kis + risk_kis + resp_kis
+    )
+    all_evidence_refs = _collect_provenance(all_section_items, dep_rels)
+    ref_lines: list[str] = []
+    for ref in all_evidence_refs:
+        if ref.acl_restricted:
+            ref_lines.append(
+                f"- `[{str(ref.evidence_id)[:8]}]` **Restricted Source (Source ACL Protected)** — Access restricted by external source ACL."
+            )
+        else:
+            author_part = f" · Author: {ref.author}" if ref.author else ""
+            url_part = f" · URL: {ref.source_url}" if ref.source_url else ""
+            ref_lines.append(
+                f"- `[{str(ref.evidence_id)[:8]}]` **{ref.source_name}** (`{ref.source_type}`){author_part}{url_part}"
+            )
+    ref_ready = "ready" if all_evidence_refs else "insufficient_information"
+    ref_gap = (
+        None
+        if all_evidence_refs
+        else "No supporting original evidence references are linked to approved findings in this version."
+    )
+
+    def _emphasis(num: int, default_note: str) -> str:
+        if num in top_sections:
+            return f"Primary focus for {role_cfg['label']}. {default_note}"
+        return f"Contextual reference for {role_cfg['label']}. {default_note}"
+
+    specs: list[dict[str, Any]] = [
+        {
+            "section_number": 1,
+            "section_key": "project_overview",
+            "section_title": "Project Overview",
+            "source_domains": ["project_overview_context"],
+            "emphasis": "Purpose, scope, project background, and verified current state.",
+            "readiness_status": overview_ready,
+            "insufficient_info_message": overview_gap,
+            "content_markdown": "\n".join(overview_lines).strip(),
+            "knowledge_items": overview_kis,
+            "relationships": [],
+            "unresolved_conflicts": [],
+            "evidence_references": _collect_provenance(overview_kis, []),
+            "pending_verification_count": overview_pending,
+        },
+        {
+            "section_number": 2,
+            "section_key": "architecture_technical_context",
+            "section_title": "Architecture and Technical Context",
+            "source_domains": ["technical_architecture", "operational_historical"],
+            "emphasis": "System architecture, services, stack, APIs, constraints, and operational runbooks.",
+            "readiness_status": arch_ready,
+            "insufficient_info_message": arch_gap,
+            "content_markdown": "\n\n".join(arch_parts).strip(),
+            "knowledge_items": arch_combined,
+            "relationships": [],
+            "unresolved_conflicts": [],
+            "evidence_references": _collect_provenance(arch_combined, []),
+            "pending_verification_count": arch_pending,
+        },
+        {
+            "section_number": 3,
+            "section_key": "completed_work",
+            "section_title": "Completed Work",
+            "source_domains": ["work_progress"],
+            "emphasis": "Delivered features, merged work, and completed handover milestones.",
+            "readiness_status": comp_ready,
+            "insufficient_info_message": comp_gap,
+            "content_markdown": "\n\n".join(comp_lines).strip(),
+            "knowledge_items": completed_kis,
+            "relationships": [],
+            "unresolved_conflicts": [],
+            "evidence_references": _collect_provenance(completed_kis, []),
+            "pending_verification_count": 0,
+        },
+        {
+            "section_number": 4,
+            "section_key": "pending_work",
+            "section_title": "Pending Work",
+            "source_domains": ["work_progress"],
+            "emphasis": "In-progress tasks, open backlog, blocked deliverables, and remaining handover actions.",
+            "readiness_status": pend_ready,
+            "insufficient_info_message": pend_gap,
+            "content_markdown": "\n\n".join(pend_lines).strip(),
+            "knowledge_items": pending_kis,
+            "relationships": [],
+            "unresolved_conflicts": [],
+            "evidence_references": _collect_provenance(pending_kis, []),
+            "pending_verification_count": work_pending_count,
+        },
+        {
+            "section_number": 5,
+            "section_key": "important_decisions_rationale",
+            "section_title": "Important Decisions and Rationale",
+            "source_domains": ["decisions_rationale"],
+            "emphasis": "Key engineering/product choices, why they were made, and trade-offs.",
+            "readiness_status": dec_ready,
+            "insufficient_info_message": dec_gap,
+            "content_markdown": dec_md,
+            "knowledge_items": dec_kis,
+            "relationships": [],
+            "unresolved_conflicts": [],
+            "evidence_references": _collect_provenance(dec_kis, []),
+            "pending_verification_count": dec_pending,
+        },
+        {
+            "section_number": 6,
+            "section_key": "dependencies",
+            "section_title": "Dependencies",
+            "source_domains": ["dependencies_relationships"],
+            "emphasis": "Evidence-backed component, service, integration, and task dependencies.",
+            "readiness_status": dep_ready,
+            "insufficient_info_message": dep_gap,
+            "content_markdown": "\n\n".join(dep_lines).strip(),
+            "knowledge_items": dep_kis,
+            "relationships": dep_rels,
+            "unresolved_conflicts": [],
+            "evidence_references": _collect_provenance(dep_kis, dep_rels),
+            "pending_verification_count": dep_pending,
+        },
+        {
+            "section_number": 7,
+            "section_key": "risks_and_blockers",
+            "section_title": "Risks and Blockers",
+            "source_domains": ["bugs_blockers_risks"],
+            "emphasis": "Confirmed open risks, active technical blockers, and separated unresolved conflicts.",
+            "readiness_status": risk_ready,
+            "insufficient_info_message": risk_gap,
+            "content_markdown": "\n\n".join(risk_lines).strip(),
+            "knowledge_items": risk_kis,
+            "relationships": [],
+            "unresolved_conflicts": unresolved_conflicts,
+            "evidence_references": _collect_provenance(risk_kis, []),
+            "pending_verification_count": risk_pending,
+        },
+        {
+            "section_number": 8,
+            "section_key": "responsibilities",
+            "section_title": "Responsibilities",
+            "source_domains": ["responsibilities_ownership"],
+            "emphasis": "Verified ownership mappings, formal transfers, and duties needing clarification.",
+            "readiness_status": resp_ready,
+            "insufficient_info_message": resp_gap,
+            "content_markdown": "\n\n".join(resp_lines).strip(),
+            "knowledge_items": resp_kis,
+            "relationships": [],
+            "unresolved_conflicts": [],
+            "evidence_references": _collect_provenance(resp_kis, []),
+            "responsibilities_summary": transfers_ctx,
+            "pending_verification_count": resp_pending,
+        },
+        {
+            "section_number": 9,
+            "section_key": "recommended_next_steps",
+            "section_title": "Recommended Next Steps",
+            "source_domains": ["work_progress", "dependencies_relationships", "bugs_blockers_risks", "operational_historical"],
+            "emphasis": "Evidence-backed continuation order derived strictly from verified open work and blockers.",
+            "readiness_status": steps_ready,
+            "insufficient_info_message": steps_gap,
+            "content_markdown": "\n".join(steps_lines).strip(),
+            "knowledge_items": [],
+            "relationships": [],
+            "unresolved_conflicts": [],
+            "evidence_references": _collect_provenance(pending_kis + ops_kis, dep_rels),
+            "recommended_steps": steps,
+            "pending_verification_count": 0,
+        },
+        {
+            "section_number": 10,
+            "section_key": "evidence_references",
+            "section_title": "Evidence References",
+            "source_domains": list(SECTION_ORDER),
+            "emphasis": "Complete ACL-verified provenance index linking claims back to original sources.",
+            "readiness_status": ref_ready,
+            "insufficient_info_message": ref_gap,
+            "content_markdown": "\n".join(ref_lines).strip(),
+            "knowledge_items": [],
+            "relationships": [],
+            "unresolved_conflicts": [],
+            "evidence_references": all_evidence_refs,
+            "pending_verification_count": 0,
+        },
+    ]
+
+    return [
+        HandoverMandatorySectionResponse(
+            section_number=s["section_number"],
+            section_key=s["section_key"],
+            section_title=s["section_title"],
+            source_domains=s["source_domains"],
+            role_priority_rank=rank_by_section_num[s["section_number"]],
+            is_role_priority=s["section_number"] in top_sections,
+            role_emphasis_note=_emphasis(s["section_number"], s["emphasis"]),
+            readiness_status=s["readiness_status"],
+            insufficient_info_message=s["insufficient_info_message"],
+            content_markdown=s["content_markdown"],
+            knowledge_items=s["knowledge_items"],
+            relationships=s["relationships"],
+            unresolved_conflicts=s["unresolved_conflicts"],
+            evidence_references=s["evidence_references"],
+            recommended_steps=s.get("recommended_steps", []),
+            responsibilities_summary=s.get("responsibilities_summary", []),
+            pending_verification_count=s["pending_verification_count"],
+        )
+        for s in specs
+    ]
+
+
 class HandoverSectionReadService:
     """Pure read-only service hydrating canonical handover sections with provenance and ACL checks."""
 
@@ -144,6 +797,7 @@ class HandoverSectionReadService:
         project_id: uuid.UUID,
         viewer_user_id: uuid.UUID,
         has_project_manage: bool = False,
+        role_override: str | None = None,
     ) -> HandoverVersionSectionsResponse:
         """Retrieve all persisted canonical sections for a specific case and package version."""
         version = self.version_repo.get_by_id(version_id, load_sections=True)
@@ -408,6 +1062,37 @@ class HandoverSectionReadService:
             for t in resp_transfers
         ]
 
+        checklists_stmt = (
+            select(HandoverChecklist)
+            .where(
+                HandoverChecklist.case_id == case_id,
+                HandoverChecklist.project_id == project_id,
+            )
+            .options(selectinload(HandoverChecklist.items))
+            .order_by(HandoverChecklist.created_at.asc())
+        )
+        case_checklists = list(self.session.execute(checklists_stmt).scalars().all())
+
+        overview_ctx: dict[str, Any] = {
+            "project_name": project.name if project else None,
+            "project_description": project.description if project else None,
+            "project_status": project.status if project else None,
+            "start_date": (
+                project.start_date.isoformat()
+                if project and project.start_date
+                else None
+            ),
+            "target_completion_date": (
+                project.target_completion_date.isoformat()
+                if project and project.target_completion_date
+                else None
+            ),
+            "case_title": case.title if case else None,
+            "case_description": case.description if case else None,
+            "case_status": case.status if case else None,
+            "case_metadata": (case.metadata_json or {}) if case else {},
+        }
+
         # Build hydrated sections
         hydrated_sections: list[HandoverSectionDetailResponse] = []
         for sec in sections_sorted:
@@ -493,25 +1178,7 @@ class HandoverSectionReadService:
 
             domain_context: dict[str, Any] = {}
             if sec.section_type == HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value:
-                domain_context = {
-                    "project_name": project.name if project else None,
-                    "project_description": project.description if project else None,
-                    "project_status": project.status if project else None,
-                    "start_date": (
-                        project.start_date.isoformat()
-                        if project and project.start_date
-                        else None
-                    ),
-                    "target_completion_date": (
-                        project.target_completion_date.isoformat()
-                        if project and project.target_completion_date
-                        else None
-                    ),
-                    "case_title": case.title if case else None,
-                    "case_description": case.description if case else None,
-                    "case_status": case.status if case else None,
-                    "case_metadata": (case.metadata_json or {}) if case else {},
-                }
+                domain_context = overview_ctx
             elif sec.section_type == HandoverPackageSectionType.RESPONSIBILITIES_OWNERSHIP.value:
                 domain_context = {
                     "team_members": team_members_ctx,
@@ -589,6 +1256,21 @@ class HandoverSectionReadService:
             created_at=version.created_at,
         )
 
+        raw_type = role_override or ((case.metadata_json or {}).get("handover_type") if case else None)
+        handover_type = normalize_handover_type(raw_type)
+        role_cfg = HANDOVER_ROLE_CONFIG[handover_type]
+        mandatory_sections = build_mandatory_ten_sections(
+            hydrated_sections=hydrated_sections,
+            handover_type=handover_type,
+            unresolved_conflicts=unresolved_conflict_items,
+            resolved_conflicts=resolved_conflict_items,
+            team_members_ctx=team_members_ctx,
+            transfers_ctx=transfers_ctx,
+            checklists=case_checklists,
+            domain_context_overview=overview_ctx,
+            omit_restricted_items=False,
+        )
+
         return HandoverVersionSectionsResponse(
             case_id=case_id,
             project_id=project_id,
@@ -596,6 +1278,10 @@ class HandoverSectionReadService:
             sections=hydrated_sections,
             missing_section_types=missing_types,
             epistemic_summary=summary,
+            handover_type=handover_type,
+            handover_type_label=role_cfg["label"],
+            role_focus_summary=role_cfg["focus_summary"],
+            mandatory_sections=mandatory_sections,
         )
 
     def _build_ki_provenance(
