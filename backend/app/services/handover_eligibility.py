@@ -160,10 +160,15 @@ class HandoverEligibilityService:
         *,
         viewer_user_id: uuid.UUID,
         has_project_manage: bool = False,
+        project_id: uuid.UUID | None = None,
     ) -> HandoverEligibilityResult:
         """Check whether a KnowledgeItem is eligible for handover export."""
         item = self.session.get(KnowledgeItem, knowledge_item_id)
-        if item is None or getattr(item, "is_deleted", False):
+        if (
+            item is None
+            or getattr(item, "is_deleted", False)
+            or (project_id is not None and item.project_id != project_id)
+        ):
             return HandoverEligibilityResult(
                 is_eligible=False,
                 target_type=VerificationTargetType.KNOWLEDGE_ITEM,
@@ -210,11 +215,9 @@ class HandoverEligibilityService:
 
         # 4. Verification Case status
         case = self.case_repo.get_by_target(
-            item.project_id,
-            VerificationTargetType.KNOWLEDGE_ITEM,
-            item.id,
-            active_only=True,
-            load_relationships=False,
+            project_id=item.project_id,
+            target_type=VerificationTargetType.KNOWLEDGE_ITEM,
+            target_id=item.id,
         )
         if case is None:
             blockers.append("No active verification case found for this knowledge item.")
@@ -283,10 +286,11 @@ class HandoverEligibilityService:
         *,
         viewer_user_id: uuid.UUID,
         has_project_manage: bool = False,
+        project_id: uuid.UUID | None = None,
     ) -> HandoverEligibilityResult:
         """Check whether a KnowledgeRelationship is eligible for handover graph export."""
         rel = self.session.get(KnowledgeRelationship, relationship_id)
-        if rel is None:
+        if rel is None or (project_id is not None and rel.project_id != project_id):
             return HandoverEligibilityResult(
                 is_eligible=False,
                 target_type=VerificationTargetType.RELATIONSHIP,
@@ -318,11 +322,9 @@ class HandoverEligibilityService:
             )
 
         case = self.case_repo.get_by_target(
-            rel.project_id,
-            VerificationTargetType.RELATIONSHIP,
-            rel.id,
-            active_only=True,
-            load_relationships=False,
+            project_id=rel.project_id,
+            target_type=VerificationTargetType.RELATIONSHIP,
+            target_id=rel.id,
         )
         if case is None:
             blockers.append("No active verification case found for this relationship.")

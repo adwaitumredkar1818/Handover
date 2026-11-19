@@ -46,6 +46,8 @@ from app.models.verification import (
     VerificationCase,
     VerificationConflict,
     VerificationContextRequest,
+    VerificationEvidenceRef,
+    VerificationFindingRevision,
     VerificationIssue,
     VerificationReviewEvent,
 )
@@ -139,6 +141,8 @@ __all__ = [
     "VerificationCase",
     "VerificationConflict",
     "VerificationContextRequest",
+    "VerificationEvidenceRef",
+    "VerificationFindingRevision",
     "VerificationIssue",
     "VerificationReviewEvent",
 ]

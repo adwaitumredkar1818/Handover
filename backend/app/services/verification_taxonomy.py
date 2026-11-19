@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.models.enums import VerificationIssueType, VerificationSeverity
+from app.models.enums import EvidenceSourceType, VerificationIssueType, VerificationSeverity
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,16 +138,66 @@ TAXONOMY_CATALOG: dict[VerificationIssueType, IssueTaxonomyEntry] = {
     ),
 }
 
+SOURCE_AUTHORITY_WEIGHTS: dict[str, float] = {
+    EvidenceSourceType.GITHUB.value: 0.95,
+    EvidenceSourceType.DOCUMENT_UPLOAD.value: 0.90,
+    EvidenceSourceType.JIRA.value: 0.80,
+    EvidenceSourceType.SLACK.value: 0.65,
+    EvidenceSourceType.MANUAL_NOTE.value: 0.50,
+}
 
-def get_taxonomy_entry(issue_type: VerificationIssueType) -> IssueTaxonomyEntry:
+SEVERITY_PENALTIES: dict[str, float] = {
+    VerificationSeverity.CRITICAL.value: 0.30,
+    VerificationSeverity.HIGH.value: 0.15,
+    VerificationSeverity.MEDIUM.value: 0.08,
+    VerificationSeverity.LOW.value: 0.03,
+    VerificationSeverity.INFO.value: 0.01,
+}
+
+
+def get_taxonomy_entry(issue_type: VerificationIssueType | str) -> IssueTaxonomyEntry:
     """Retrieve taxonomy entry for an issue type, falling back to safe default if unknown."""
+    if isinstance(issue_type, str):
+        try:
+            issue_type = VerificationIssueType(issue_type.lower())
+        except ValueError:
+            pass
+
     if issue_type in TAXONOMY_CATALOG:
         return TAXONOMY_CATALOG[issue_type]
     return IssueTaxonomyEntry(
-        issue_type=issue_type,
+        issue_type=issue_type,  # type: ignore[arg-type]
         category="General",
         default_severity=VerificationSeverity.MEDIUM,
-        description_template=f"Verification issue detected: {issue_type.value}.",
+        description_template=f"Verification issue detected: {getattr(issue_type, 'value', issue_type)}.",
         recommended_action="Inspect evidence and verify with project lead.",
         blocks_handover=False,
     )
+
+
+def get_severity_penalty(severity: VerificationSeverity | str) -> float:
+    """Get confidence score deduction penalty for an issue severity level."""
+    val = getattr(severity, "value", str(severity)).lower()
+    return SEVERITY_PENALTIES.get(val, 0.05)
+
+
+def get_source_authority_weight(source_type: str | EvidenceSourceType | None) -> float:
+    """Get the authority weighting factor for a primary source type."""
+    if source_type is None:
+        return 0.50
+    val = getattr(source_type, "value", str(source_type)).lower()
+    return SOURCE_AUTHORITY_WEIGHTS.get(val, 0.50)
+
+
+def is_handover_blocking_issue(issue_type: VerificationIssueType | str) -> bool:
+    """Check if an issue type is configured to block downstream handover package compilation."""
+    return get_taxonomy_entry(issue_type).blocks_handover
+
+
+def get_taxonomy_by_category(category: str) -> list[IssueTaxonomyEntry]:
+    """Retrieve all catalog entries belonging to a given taxonomy category."""
+    norm_cat = category.strip().lower()
+    return [
+        entry for entry in TAXONOMY_CATALOG.values()
+        if entry.category.strip().lower() == norm_cat
+    ]

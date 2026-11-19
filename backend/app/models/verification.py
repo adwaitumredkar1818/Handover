@@ -15,7 +15,9 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -37,6 +39,7 @@ from app.models.enums import (
     ReviewActionType,
     TemporalComparison,
     VerificationCaseStatus,
+    VerificationCategory,
     VerificationIssueType,
     VerificationPriority,
     VerificationSeverity,
@@ -67,6 +70,16 @@ class VerificationCase(Base):
 
     target_type: Mapped[VerificationTargetType] = mapped_column(String(32), nullable=False)
     target_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
+
+    domain: Mapped[str] = mapped_column(String(64), default="general", nullable=False)
+    title: Mapped[str] = mapped_column(String(512), default="", nullable=False)
+    original_ai_claim: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    current_claim: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    person_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    uncertainty_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_completeness: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     case_status: Mapped[VerificationCaseStatus] = mapped_column(
         String(32), default=VerificationCaseStatus.CANDIDATE, nullable=False
@@ -110,6 +123,7 @@ class VerificationCase(Base):
     )
     conflicts: Mapped[list[VerificationConflict]] = relationship(
         "VerificationConflict",
+        foreign_keys="[VerificationConflict.case_id]",
         back_populates="case",
         cascade="all, delete-orphan",
         order_by="VerificationConflict.created_at.asc()",
@@ -125,6 +139,18 @@ class VerificationCase(Base):
         back_populates="case",
         cascade="all, delete-orphan",
         order_by="VerificationContextRequest.created_at.desc()",
+    )
+    evidence_refs: Mapped[list[VerificationEvidenceRef]] = relationship(
+        "VerificationEvidenceRef",
+        back_populates="case",
+        cascade="all, delete-orphan",
+        order_by="VerificationEvidenceRef.created_at.asc()",
+    )
+    revisions: Mapped[list[VerificationFindingRevision]] = relationship(
+        "VerificationFindingRevision",
+        back_populates="case",
+        cascade="all, delete-orphan",
+        order_by="VerificationFindingRevision.revision_number.desc()",
     )
     assigned_reviewer: Mapped[Any] = relationship("User", foreign_keys=[assigned_reviewer_id])
     project: Mapped[Any] = relationship("Project")
@@ -152,6 +178,11 @@ class VerificationIssue(Base):
         ForeignKey("verification_cases.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
+    verification_category: Mapped[str] = mapped_column(
+        String(64),
+        default=VerificationCategory.EXTRACTED_FINDING_VERIFICATION.value,
+        nullable=False,
+    )
     issue_type: Mapped[VerificationIssueType] = mapped_column(String(64), nullable=False)
     severity: Mapped[VerificationSeverity] = mapped_column(
         String(16), default=VerificationSeverity.MEDIUM, nullable=False
@@ -220,8 +251,8 @@ class VerificationConflict(Base):
 
     conflict_type: Mapped[ConflictType] = mapped_column(String(32), nullable=False)
     claim_a_text: Mapped[str] = mapped_column(Text, nullable=False)
-    claim_a_source_evidence_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("evidence_items.id", ondelete="CASCADE"), nullable=False, index=True
+    claim_a_source_evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("evidence_items.id", ondelete="CASCADE"), nullable=True, index=True
     )
     claim_a_chunk_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("evidence_chunks.id", ondelete="SET NULL"), nullable=True, index=True
@@ -231,8 +262,8 @@ class VerificationConflict(Base):
     )
 
     claim_b_text: Mapped[str] = mapped_column(Text, nullable=False)
-    claim_b_source_evidence_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("evidence_items.id", ondelete="CASCADE"), nullable=False, index=True
+    claim_b_source_evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("evidence_items.id", ondelete="CASCADE"), nullable=True, index=True
     )
     claim_b_chunk_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("evidence_chunks.id", ondelete="SET NULL"), nullable=True, index=True
@@ -254,12 +285,32 @@ class VerificationConflict(Base):
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    assigned_reviewer_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    priority: Mapped[str] = mapped_column(
+        String(32), server_default="medium", default="medium", nullable=False
+    )
+    investigation_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    related_finding_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("verification_cases.id", ondelete="SET NULL"), nullable=True
+    )
+    side_a_source_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    side_a_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    side_b_source_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    side_b_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resolution_strategy: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    authoritative_claim_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     # Relationships
-    case: Mapped[VerificationCase] = relationship("VerificationCase", back_populates="conflicts")
+    case: Mapped[VerificationCase] = relationship("VerificationCase", foreign_keys=[case_id], back_populates="conflicts")
     claim_a_evidence: Mapped[Any] = relationship(
         "EvidenceItem", foreign_keys=[claim_a_source_evidence_id]
     )
@@ -267,6 +318,8 @@ class VerificationConflict(Base):
         "EvidenceItem", foreign_keys=[claim_b_source_evidence_id]
     )
     resolved_by_user: Mapped[Any] = relationship("User", foreign_keys=[resolved_by_user_id])
+    assigned_reviewer: Mapped[Any] = relationship("User", foreign_keys=[assigned_reviewer_id])
+    related_finding: Mapped[Any] = relationship("VerificationCase", foreign_keys=[related_finding_id])
 
 
 class VerificationReviewEvent(Base):
@@ -295,6 +348,8 @@ class VerificationReviewEvent(Base):
     action: Mapped[ReviewActionType] = mapped_column(String(32), nullable=False)
     previous_status: Mapped[str] = mapped_column(String(32), nullable=False)
     new_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    case_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     finding_patch_json: Mapped[dict[str, Any] | None] = mapped_column(
@@ -375,3 +430,108 @@ class VerificationContextRequest(Base):
     response_evidence: Mapped[Any] = relationship(
         "EvidenceItem", foreign_keys=[response_evidence_id]
     )
+
+
+class VerificationEvidenceRef(Base):
+    """Canonical evidence reference linking a verification finding to source evidence."""
+
+    __tablename__ = "verification_evidence_refs"
+    __table_args__ = (
+        Index("ix_ver_case_evidence", "case_id", "evidence_item_id"),
+        Index("ix_ver_project_rel", "project_id", "relationship_to_finding"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    organisation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organisations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    case_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("verification_cases.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    evidence_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("evidence_items.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    evidence_chunk_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("evidence_chunks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    relationship_to_finding: Mapped[str] = mapped_column(
+        String(32), default="supports", nullable=False
+    )
+    excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    location_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_timestamp: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    case: Mapped[VerificationCase] = relationship("VerificationCase", back_populates="evidence_refs")
+    evidence_item: Mapped[Any] = relationship("EvidenceItem", foreign_keys=[evidence_item_id])
+    evidence_chunk: Mapped[Any] = relationship("EvidenceChunk", foreign_keys=[evidence_chunk_id])
+
+    @property
+    def chunk_id(self) -> uuid.UUID | None:
+        return self.evidence_chunk_id
+
+    @property
+    def original_title(self) -> str:
+        return self.evidence_item.title if self.evidence_item is not None else "Untitled Evidence"
+
+    @property
+    def source_provider(self) -> str:
+        return self.evidence_item.source_type if self.evidence_item is not None else "source"
+
+    @property
+    def author(self) -> str | None:
+        return self.evidence_item.source_author_identity if self.evidence_item is not None else None
+
+    @property
+    def original_source_url(self) -> str | None:
+        return self.evidence_item.source_url if self.evidence_item is not None else None
+
+    @property
+    def acl_scope(self) -> str:
+        return self.evidence_item.acl_scope if self.evidence_item is not None else "project_members"
+
+
+class VerificationFindingRevision(Base):
+    """Immutable revision history for finding claims, preserving original AI output and edits."""
+
+    __tablename__ = "verification_finding_revisions"
+    __table_args__ = (
+        Index("ix_vfr_case_rev", "case_id", "revision_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    organisation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organisations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    case_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("verification_cases.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    claim_text: Mapped[str] = mapped_column(Text, nullable=False)
+    domain: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_ai_original: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    edited_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    edit_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_snapshot_json: Mapped[dict[str, Any]] = mapped_column(
+        _JSON_VARIANT, default=dict, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    case: Mapped[VerificationCase] = relationship("VerificationCase", back_populates="revisions")
+    edited_by_user: Mapped[Any] = relationship("User", foreign_keys=[edited_by_user_id])

@@ -23,10 +23,35 @@ import type {
   InvitationPreviewResponse,
   AcceptInvitationResponse,
   RegisterWithInvitationResponse,
+  ProjectProcessingStatus,
   VerifyEmailResponse,
   RequestEmailVerificationResponse,
-  ProjectProcessingStatus,
+  HandoverPackageVersionSummary,
+  HandoverVersionSectionsResponse,
+  HandoverReadinessIntelligenceResponse,
+  HandoverChecklistGroupDetail,
+  HandoverChecklistItemDetail,
+  HandoverChecklistWorkspaceResponse,
+  HandoverResponsibilityTransferDetail,
+  HandoverResponsibilityWorkspaceResponse,
+  HandoverSignoffRecord,
+  HandoverSignoffWorkspaceResponse,
+  HandoverDeliveryRecord,
+  HandoverAcknowledgementRecord,
 } from "./types";
+import type {
+  VerificationSummaryResponse,
+  VerificationQueueResponse,
+  VerificationCaseDetail,
+  CaseEvidenceResponse,
+  HandoverEligibilityResponse,
+  VerificationContextRequest,
+  ConflictSummaryResponse,
+  ConflictListResponse,
+  VerificationConflictItem,
+  DetectConflictsResponse,
+  QueueFilterParams,
+} from "../types/verification";
 
 export function getApiBaseUrl(): string {
   const configured = process.env.NEXT_PUBLIC_API_BASE_URL;
@@ -223,22 +248,22 @@ export function clearApiCache(pathPrefix?: string) {
   }
 }
 
-async function request<T>(
+export async function request<T>(
   path: string,
   options: RequestInit = {},
   isRetry = false
 ): Promise<T> {
-  const method = (options.method || "GET").toUpperCase();
+  const method = (options.method || 'GET').toUpperCase();
   const token = getToken();
 
   // If modifying data, invalidate cached GET endpoints for this project/resource
-  if (method !== "GET") {
-    const segments = path.split("/").filter(Boolean);
-    const scopePrefix = segments.length >= 2 ? `/${segments[0]}/${segments[1]}` : "";
+  if (method !== 'GET') {
+    const segments = path.split('/').filter(Boolean);
+    const scopePrefix = segments.length >= 2 ? `/${segments[0]}/${segments[1]}` : '';
     if (scopePrefix) clearApiCache(scopePrefix);
     else getCache.clear();
   } else if (!isRetry && !options.body) {
-    const cacheKey = `${path}:${token || ""}`;
+    const cacheKey = `${path}:${token || ''}`;
     const cached = getCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
       return cached.data as T;
@@ -283,19 +308,11 @@ async function requestInternal<T>(
     headers["Content-Type"] = "application/json";
   }
 
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      ...options,
-      credentials: options.credentials || "include",
-      headers,
-    });
-  } catch (err: unknown) {
-    if (err instanceof ApiError) throw err;
-    throw new ApiError("Network unavailable or server restarting", 0, {
-      originalError: err instanceof Error ? err.message : String(err),
-    });
-  }
+  const res = await fetch(url, {
+    ...options,
+    credentials: options.credentials || "include",
+    headers,
+  });
 
   if (
     res.status === 401 &&
@@ -714,7 +731,7 @@ export const api = {
         }
       );
     },
-    async getProcessingStatus(projectId: string): Promise<ProjectProcessingStatus> {
+      async getProcessingStatus(projectId: string): Promise<ProjectProcessingStatus> {
       return request<ProjectProcessingStatus>(`/projects/${projectId}/processing-status`);
     },
     async retryProcessing(projectId: string): Promise<ProjectProcessingStatus> {
@@ -915,7 +932,7 @@ export const api = {
         method: "POST",
       });
     },
-    async extract(projectId: string, evidenceId: string): Promise<unknown> {
+      async extract(projectId: string, evidenceId: string): Promise<unknown> {
       return request<unknown>(`/projects/${projectId}/evidence/${evidenceId}/extract`, {
         method: "POST",
       });
@@ -1005,607 +1022,1077 @@ export const api = {
     },
   },
   relationships: {
+
     async getGraph(
+
       projectId: string,
+
       limit: number = 250,
+
       options?: { center_node_id?: string; depth?: number; entity_type?: string }
+
     ): Promise<{
+
       nodes: Array<{
+
         id: string;
+
         label: string;
+
         type?: string;
+
         entity_type?: string;
+
         canonical_name?: string;
+
         description?: string | null;
+
         confidence?: number;
+
         resolution_status?: string;
+
         status?: string;
+
         verification_status?: string;
+
         source_provider?: string | null;
+
       }>;
+
       edges: Array<{
+
         id: string;
+
         source: string;
+
         target: string;
+
         type?: string;
+
         relationship_type?: string;
+
         label?: string;
+
         verification_status?: string;
+
         confidence?: number;
+
         evidence_count?: number;
+
       }>;
+
       total_nodes?: number;
+
       total_edges?: number;
+
     }> {
+
       const qs = new URLSearchParams({
+
         limit_nodes: String(limit),
+
         limit_edges: String(limit * 2),
+
       });
+
       if (options?.center_node_id) qs.set("center_node_id", options.center_node_id);
+
       if (options?.depth) qs.set("depth", String(options.depth));
+
       if (options?.entity_type) qs.set("entity_type", options.entity_type);
+
       return request(`/projects/${projectId}/relationships/graph?${qs.toString()}`);
+
     },
+
     async listEntities(projectId: string, type?: string, page: number = 1, pageSize: number = 50): Promise<{
+
       items: Array<{
+
         id: string;
+
         canonical_name: string;
+
         entity_type: string;
+
         confidence_score: number;
+
         resolution_status: string;
+
         description?: string;
+
         created_at: string;
+
       }>;
+
       total: number;
+
     }> {
+
       const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+
       if (type) qs.append("type", type);
+
       return request(`/projects/${projectId}/relationships/entities?${qs.toString()}`);
+
     },
+
     async getEntityDetails(projectId: string, entityId: string): Promise<Record<string, unknown>> {
+
       return request(`/projects/${projectId}/relationships/entities/${entityId}`);
+
     },
+
     async getTraceability(projectId: string): Promise<{
+
       items?: Array<{
+
         id: string;
+
         decision_entity_id: string;
+
         decision_name?: string;
+
         completeness_status: string;
+
         work_item_count?: number;
+
         pr_count?: number;
+
         commit_count?: number;
+
         component_count?: number;
+
         work_item_ids?: string[];
+
         pull_request_ids?: string[];
+
         commit_ids?: string[];
+
         component_ids?: string[];
+
         missing_links: string[];
+
       }>;
+
       chains?: Array<{
+
         id: string;
+
         decision_entity_id: string;
+
         decision_name: string;
+
         completeness_status: string;
+
         work_item_count: number;
+
         pr_count: number;
+
         commit_count: number;
+
         component_count: number;
+
         missing_links: string[];
+
       }>;
+
     }> {
+
       return request(`/projects/${projectId}/relationships/traceability`);
+
     },
+
     async getDependencies(projectId: string, rootId?: string): Promise<{
+
       nodes: Array<{ id: string; label: string; entity_type: string; is_root_blocker: boolean; in_degree: number; out_degree: number }>;
+
       edges: Array<{ source: string; target: string; relationship_type: string }>;
+
       cycles: string[][];
+
       detected_cycles?: string[][];
+
       root_blockers: string[];
+
     }> {
+
       const qs = rootId ? `?root_entity_id=${rootId}` : "";
+
       return request(`/projects/${projectId}/relationships/dependencies${qs}`);
+
     },
+
     async getTimeline(projectId: string): Promise<{
+
       items: Array<{
+
         id: string;
+
         event_type: string;
+
         title: string;
+
         summary?: string;
+
         occurred_at: string;
+
         timestamp_precision: string;
+
         timestamp_origin: string;
+
       }>;
+
       total_events: number;
+
     }> {
+
       return request(`/projects/${projectId}/relationships/timeline`);
+
     },
+
     async listIdentityCandidates(projectId: string): Promise<Record<string, unknown>[]> {
+
       return request(`/projects/${projectId}/relationships/identities/candidates`);
+
     },
+
     async reviewCandidate(projectId: string, candidateId: string, decision: "accept" | "reject", rationale?: string): Promise<Record<string, unknown>> {
+
       return request(`/projects/${projectId}/relationships/identities/candidates/${candidateId}/review`, {
+
         method: "POST",
+
         body: JSON.stringify({ action: decision, rationale }),
+
       });
+
     },
+
     async triggerReconstruction(projectId: string): Promise<{
+
       id: string;
+
       status: string;
+
       entities_discovered: number;
+
       relationships_discovered: number;
+
     }> {
+
       return request(`/projects/${projectId}/relationships/reconstruct`, {
+
         method: "POST",
+
       });
+
     },
+
     async submitRelationshipReview(
+
       projectId: string,
+
       relationshipId: string,
+
       payload: { action: "verify" | "reject" | "dispute" | "request_evidence"; note?: string }
+
     ): Promise<Record<string, unknown>> {
+
       return request(`/projects/${projectId}/relationships/${relationshipId}/submit-for-review`, {
+
         method: "POST",
+
         body: JSON.stringify(payload),
+
       });
+
     },
+
     async getContributorsGraph(
+
       projectId: string,
+
       params?: {
+
         contributor_type?: string;
+
         work_cluster?: string;
+
         repository?: string;
+
         verification_state?: string;
+
         search?: string;
+
         include_external?: boolean;
+
         include_bots?: boolean;
+
         expand_contributor_key?: string;
+
         expand_cluster_name?: string;
+
         limit?: number;
+
       }
+
     ): Promise<{
+
       project_id: string;
+
       nodes: Array<{
+
         id: string;
+
         node_kind: string;
+
         label: string;
+
         contributor_key?: string | null;
+
         contributor_type: string;
+
         review_status: string;
+
         verification_status: string;
+
         contribution_count: number;
+
         metadata: Record<string, unknown>;
+
       }>;
+
       edges: Array<{
+
         id: string;
+
         source: string;
+
         target: string;
+
         relationship_type: string;
+
         label: string;
+
         evidence_basis: string;
+
       }>;
+
       summary: Record<string, number>;
+
     }> {
+
       const qs = new URLSearchParams();
+
       if (params) {
+
         Object.entries(params).forEach(([k, v]) => {
+
           if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+
         });
+
       }
+
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
+
       return request(`/projects/${projectId}/relationships/contributors/graph${suffix}`);
+
     },
+
     async listContributors(
+
       projectId: string,
+
       params?: { contributor_type?: string; review_status?: string }
+
     ): Promise<
+
       Array<{
+
         contributor_key: string;
+
         display_name: string;
+
         github_login?: string | null;
+
         github_numeric_id?: string | null;
+
         git_author_name?: string | null;
+
         git_author_email?: string | null;
+
         contributor_type: string;
+
         review_status: string;
+
         match_method?: string | null;
+
         match_confidence?: number | null;
+
         matched_project_membership_id?: string | null;
+
         matched_member_name?: string | null;
+
         suggested_project_membership_id?: string | null;
+
         suggested_member_name?: string | null;
+
         declared_responsibility?: string | null;
+
         contribution_count: number;
+
         commits_count: number;
+
         prs_count: number;
+
         issues_count: number;
+
         repositories: string[];
+
         work_areas: string[];
+
         evidence_ids: string[];
+
         review_history: Array<Record<string, unknown>>;
+
       }>
+
     > {
+
       const qs = new URLSearchParams();
+
       if (params?.contributor_type) qs.set("contributor_type", params.contributor_type);
+
       if (params?.review_status) qs.set("review_status", params.review_status);
+
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
+
       return request(`/projects/${projectId}/relationships/contributors${suffix}`);
+
     },
+
     async getContributorDetail(projectId: string, contributorKey: string): Promise<Record<string, unknown>> {
+
       return request(`/projects/${projectId}/relationships/contributors/${encodeURIComponent(contributorKey)}`);
+
     },
+
     async listSelectableMembers(projectId: string): Promise<
+
       Array<{
+
         selection_key: string;
+
         member_source: string;
+
         membership_state: string;
+
         selectable_for_match: boolean;
+
         project_membership_id?: string | null;
+
         user_id?: string | null;
+
         invitation_id?: string | null;
+
         roster_member_id?: string | null;
+
         display_name: string;
+
         email?: string | null;
+
         role_name: string;
+
         github_login?: string | null;
+
         review_status: string;
+
         note?: string | null;
+
       }>
+
     > {
+
       return request(`/projects/${projectId}/relationships/identities/selectable-members`);
+
     },
+
     async reviewContributor(
+
       projectId: string,
+
       contributorKey: string,
+
       payload: {
+
         action: "match_member" | "mark_external" | "mark_bot" | "leave_unidentified" | "reject_match" | "revert";
+
         project_membership_id?: string;
+
         user_id?: string;
+
         invitation_id?: string;
+
         roster_member_id?: string;
+
         notes?: string;
+
       }
+
     ): Promise<{ contributor_key: string; contributor_type: string; review_status: string; updated_records: number }> {
+
       return request(`/projects/${projectId}/relationships/contributors/${encodeURIComponent(contributorKey)}/review`, {
+
         method: "POST",
+
         body: JSON.stringify(payload),
+
       });
+
     },
+
     async listWorkClusters(projectId: string): Promise<
+
       Array<{
+
         cluster_id: string;
+
         name: string;
+
         classification_method: string;
+
         contribution_count: number;
+
         contributor_count: number;
+
         contributors: Array<{ contributor_key: string; display_name: string; contributor_type: string; count: number }>;
+
         contributions: Array<{
+
           evidence_id: string;
+
           title: string;
+
           category: string;
+
           contributor_key: string;
+
           contributor_name: string;
+
           contributor_type: string;
+
           alignment?: string | null;
+
         }>;
+
         changed_paths: string[];
+
         evidence_ids: string[];
+
       }>
+
     > {
+
       return request(`/projects/${projectId}/relationships/work-clusters`);
+
     },
+
     async rebuildWorkClusters(projectId: string): Promise<{
+
       run_id: string;
+
       algorithm_version: string;
+
       clusters_count: number;
+
       relationships_created: number;
+
       completed_at: string;
+
     }> {
+
       return request(`/projects/${projectId}/relationships/work-clusters/rebuild`, {
+
         method: "POST",
+
       });
+
     },
+
   },
   knowledgeIntelligence: {
+
     async getGraph(
+
       projectId: string,
+
       graphType: "technology-stack" | "system-architecture" | "features-workflows",
+
       params?: {
+
         search?: string;
+
         status?: string;
+
         source_type?: string;
+
         verification_state?: string;
+
         limit?: number;
+
         cursor?: string;
+
         include_suggested?: boolean;
+
       }
+
     ): Promise<{
+
       graph_type: "technology-stack" | "system-architecture" | "features-workflows";
+
       project_id: string;
+
       nodes: Array<{
+
         id: string;
+
         entity_type: string;
+
         label: string;
+
         description?: string | null;
+
         category?: string | null;
+
         status: string;
+
         verification_status: string;
+
         evidence_count: number;
+
         evidence_ids: string[];
+
         aliases: string[];
+
         last_observed_at?: string | null;
+
         metadata: Record<string, unknown>;
+
       }>;
+
       edges: Array<{
+
         id: string;
+
         source: string;
+
         target: string;
+
         relationship_type: string;
+
         label: string;
+
         evidence_basis: string;
+
         verification_status: string;
+
         confidence_score: number;
+
         evidence_ids: string[];
+
       }>;
+
       summary: { node_count: number; edge_count: number; categories: Record<string, number> };
+
       next_cursor?: string | null;
+
     }> {
+
       const qs = new URLSearchParams();
+
       if (params) {
+
         Object.entries(params).forEach(([k, v]) => {
+
           if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+
         });
+
       }
+
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
+
       return request(`/projects/${projectId}/knowledge-intelligence/graphs/${graphType}${suffix}`);
+
     },
+
     async getGraphNodeDetail(
+
       projectId: string,
+
       graphType: "technology-stack" | "system-architecture" | "features-workflows",
+
       nodeId: string
+
     ): Promise<{
+
       graph_type: string;
+
       project_id: string;
+
       node: Record<string, unknown>;
+
       adjacent_edges: Array<Record<string, unknown>>;
+
       related_nodes: Array<Record<string, unknown>>;
+
       evidence_refs: Array<{
+
         evidence_id: string;
+
         title: string;
+
         source_type: string;
+
         source_url?: string | null;
+
         supporting_excerpt?: string | null;
+
       }>;
+
     }> {
+
       return request(`/projects/${projectId}/knowledge-intelligence/graphs/${graphType}/nodes/${nodeId}`);
+
     },
+
     async getSummary(projectId: string): Promise<{
+
       total_findings: number;
+
       by_category: Record<string, number>;
+
       by_domain: Record<string, number>;
+
       verified_count: number;
+
       candidate_count: number;
+
     }> {
+
       return request(`/projects/${projectId}/knowledge-intelligence/summary`);
+
     },
+
     async getDomains(projectId: string): Promise<{
+
       domains: Array<{
+
         domain_id: string;
+
         display_name: string;
+
         description: string;
+
         item_count: number;
+
         verified_count: number;
+
         pending_review_count: number;
+
         completeness_score: number;
+
       }>;
+
       total_domains: number;
+
       active_domains_count: number;
+
     }> {
+
       return request(`/projects/${projectId}/knowledge-intelligence/domains`);
+
     },
+
     async triggerExtraction(projectId: string, options?: { domains?: string[]; evidence_ids?: string[]; force_rerun?: boolean }): Promise<{
+
       run: Record<string, unknown>;
+
       job?: Record<string, unknown>;
+
       already_active: boolean;
+
     }> {
+
       return request(`/projects/${projectId}/knowledge-intelligence/extract`, {
+
         method: "POST",
+
         body: JSON.stringify(options || {}),
+
       });
+
     },
+
     async listFindings(
+
       projectId: string,
+
       domain?: string,
+
       limit: number = 100,
+
       offset: number = 0
+
     ): Promise<{
+
       items: Record<string, unknown>[];
+
       total: number;
+
       limit: number;
+
       offset: number;
+
     }> {
+
       const qs = new URLSearchParams({
+
         limit: String(Math.min(limit, 100)),
+
         offset: String(offset),
+
       });
+
       if (domain) qs.append("domain", domain);
+
       return request(`/projects/${projectId}/knowledge-intelligence/findings?${qs.toString()}`);
+
     },
+
   },
-  knowledge: {
+
+    knowledge: {
+
     async triggerEvidenceExtraction(
+
       projectId: string,
+
       evidenceId: string,
+
       payload?: { categories?: string[]; force_rerun?: boolean }
+
     ): Promise<{
+
       run: Record<string, unknown>;
+
       job?: Record<string, unknown>;
+
       already_active: boolean;
+
     }> {
+
       return request(`/projects/${projectId}/evidence/${evidenceId}/extractions`, {
+
         method: "POST",
+
         body: JSON.stringify(payload || {}),
+
       });
+
     },
+
     async listEvidenceExtractions(
+
       projectId: string,
+
       evidenceId: string,
+
       status?: string
+
     ): Promise<{
+
       items: Record<string, unknown>[];
+
       total: number;
+
     }> {
+
       const qs = new URLSearchParams();
+
       if (status) qs.append("status", status);
+
       const qStr = qs.toString() ? `?${qs.toString()}` : "";
+
       return request(`/projects/${projectId}/evidence/${evidenceId}/extractions${qStr}`);
+
     },
+
     async getEvidenceExtraction(
+
       projectId: string,
+
       evidenceId: string,
+
       runId: string
+
     ): Promise<Record<string, unknown>> {
+
       return request(`/projects/${projectId}/evidence/${evidenceId}/extractions/${runId}`);
+
     },
+
     async getEvidenceFacts(
+
       projectId: string,
+
       evidenceId: string
+
     ): Promise<{
+
       evidence_id: string;
+
       project_id: string;
+
       total_facts: number;
+
       ai_extracted_count: number;
+
       raw_chunk_count: number;
+
       latest_run_id?: string | null;
+
       latest_run_status?: string | null;
+
       facts: Array<{
+
         id: string;
+
         evidence_id: string;
+
         knowledge_item_id?: string | null;
+
         chunk_id?: string | null;
+
         title: string;
+
         description: string;
+
         category: string;
+
         primary_domain?: string | null;
+
         confidence_level: string;
+
         grounding_score: number;
+
         confidence_explanation?: string | null;
+
         original_excerpt: string;
+
         page_or_section?: string | null;
+
         validation_state: string;
+
         is_ai_extracted: boolean;
+
         created_at: string;
+
       }>;
+
       raw_chunks: Array<{
+
         id: string;
+
         chunk_index: number;
+
         page_number?: number | null;
+
         chunk_type: string;
+
         char_count: number;
+
         token_estimate: number;
+
         chunk_text: string;
+
         text_content?: string;
+
         indexing_status: string;
+
       }>;
+
     }> {
+
       return request(`/projects/${projectId}/evidence/${evidenceId}/facts`);
+
     },
+
     async getEvidenceFindings(
+
       projectId: string,
+
       evidenceId: string,
+
       category?: string
+
     ): Promise<{
+
       items: Record<string, unknown>[];
+
       total: number;
+
     }> {
+
       const qs = new URLSearchParams();
+
       if (category) qs.append("category", category);
+
       const qStr = qs.toString() ? `?${qs.toString()}` : "";
+
       return request(`/projects/${projectId}/evidence/${evidenceId}/findings${qStr}`);
+
     },
+
   },
   verification: {
-    async getSummary(projectId: string): Promise<{
-      total_cases: number;
-      pending_review: number;
-      approved: number;
-      rejected: number;
-      unresolved: number;
-      conflicts_count: number;
-      stale_count: number;
-      handover_eligible_count: number;
-    }> {
-      return request(`/projects/${projectId}/verification/summary`);
+    async getSummary(projectId: string): Promise<VerificationSummaryResponse> {
+      return request<VerificationSummaryResponse>(`/projects/${projectId}/verification/summary`);
     },
-    async getQueue(projectId: string, status?: string, page: number = 1): Promise<{
-      items: Array<{
-        id: string;
-        target_type: string;
-        target_id: string;
-        status: string;
-        risk_level: string;
-        confidence_score: number;
-        created_at: string;
-        issue_count: number;
-        assigned_to_user_id?: string;
-        finding?: {
-          title: string;
-          summary: string;
-          domain: string;
-          category?: string;
-        };
-      }>;
-      total: number;
-    }> {
-      const qs = new URLSearchParams({ page: String(page) });
-      if (status) qs.append("status", status);
-      return request(`/projects/${projectId}/verification/queue?${qs.toString()}`);
+    async getQueue(
+      projectId: string,
+      filtersOrStatus?: string | QueueFilterParams,
+      page: number = 1
+    ): Promise<VerificationQueueResponse> {
+      const qs = new URLSearchParams();
+
+      if (typeof filtersOrStatus === "string") {
+        if (filtersOrStatus && filtersOrStatus !== "all") qs.append("status", filtersOrStatus);
+        qs.append("page", String(page));
+      } else if (filtersOrStatus) {
+        if (filtersOrStatus.status && filtersOrStatus.status !== "all") qs.append("status", filtersOrStatus.status);
+        if (filtersOrStatus.case_status && filtersOrStatus.case_status !== "all") qs.append("case_status", filtersOrStatus.case_status);
+        if (filtersOrStatus.priority && filtersOrStatus.priority !== "all") qs.append("priority", filtersOrStatus.priority);
+        if (filtersOrStatus.target_type && filtersOrStatus.target_type !== "all") qs.append("target_type", filtersOrStatus.target_type);
+        if (filtersOrStatus.assigned_reviewer_id) qs.append("assigned_reviewer_id", filtersOrStatus.assigned_reviewer_id);
+        if (filtersOrStatus.unassigned_only) qs.append("unassigned_only", "true");
+        if (filtersOrStatus.search) qs.append("search", filtersOrStatus.search);
+        if (filtersOrStatus.limit !== undefined) qs.append("limit", String(filtersOrStatus.limit));
+        if (filtersOrStatus.offset !== undefined) qs.append("offset", String(filtersOrStatus.offset));
+        if (filtersOrStatus.page !== undefined) qs.append("page", String(filtersOrStatus.page));
+      } else {
+        qs.append("page", String(page));
+      }
+
+      return request<VerificationQueueResponse>(`/projects/${projectId}/verification/queue?${qs.toString()}`);
     },
-    async getCaseDetail(projectId: string, caseId: string): Promise<{
-      id: string;
-      project_id: string;
-      target_type: string;
-      target_id: string;
-      status: string;
-      risk_level: string;
-      confidence_score: number;
-      issues: Array<{
-        id: string;
-        issue_type: string;
-        severity: string;
-        description: string;
-      }>;
-      events: Array<{
-        id: string;
-        event_type: string;
-        actor_user_id: string;
-        created_at: string;
-        payload: Record<string, unknown>;
-      }>;
-    }> {
-      return request(`/projects/${projectId}/verification/cases/${caseId}`);
+    async getCaseDetail(projectId: string, caseId: string): Promise<VerificationCaseDetail> {
+      return request<VerificationCaseDetail>(`/projects/${projectId}/verification/cases/${caseId}`);
     },
-    async getCaseEvidence(projectId: string, caseId: string): Promise<{
-      case_id: string;
-      target_type?: string;
-      target_id?: string;
-      supporting_evidence: Array<{
-        evidence_id: string;
-        title: string;
-        source_type: string;
-        source_url?: string | null;
-        author?: string | null;
-        support_type?: string;
-        supporting_excerpt?: string | null;
-        excerpt_verified?: boolean;
-        source_location?: Record<string, unknown>;
-        chunk_id?: string | null;
-        chunk_text?: string | null;
-        confidence_score?: number | null;
-        restricted?: boolean;
-      }>;
-      conflicts: Array<Record<string, unknown>>;
-    }> {
-      return request(`/projects/${projectId}/verification/cases/${caseId}/evidence`);
+    async getCaseEvidence(projectId: string, caseId: string): Promise<CaseEvidenceResponse> {
+      return request<CaseEvidenceResponse>(`/projects/${projectId}/verification/cases/${caseId}/evidence`);
     },
     async requestContext(
       projectId: string,
@@ -1616,37 +2103,60 @@ export const api = {
         requested_information_type?: string;
         expected_version?: number;
       }
-    ): Promise<Record<string, unknown>> {
-      return request(`/projects/${projectId}/verification/cases/${caseId}/request-context`, {
+    ): Promise<VerificationContextRequest> {
+      return request<VerificationContextRequest>(`/projects/${projectId}/verification/cases/${caseId}/request-context`, {
         method: "POST",
         body: JSON.stringify(payload),
       });
     },
+    async listUserContextRequests(projectId: string, status?: string): Promise<VerificationContextRequest[]> {
+      const q = status ? `?status_filter=${encodeURIComponent(status)}` : "";
+      return request<VerificationContextRequest[]>(`/projects/${projectId}/verification/context-requests${q}`);
+    },
+    async respondContextRequest(
+      projectId: string,
+      requestId: string,
+      payload: { response_text: string; response_evidence_id?: string }
+    ): Promise<VerificationContextRequest> {
+      return request<VerificationContextRequest>(
+        `/projects/${projectId}/verification/context-requests/${requestId}/respond`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      );
+    },
     async approveCase(
       projectId: string,
       caseId: string,
-      notesOrVersion?: string | number,
+      optionsOrVersion?: number | { expected_version?: number; review_notes?: string; notes?: string } | string,
       maybeNotes?: string
-    ): Promise<Record<string, unknown>> {
-      let expectedVersion: number | undefined;
-      let reviewNotes: string | undefined;
+    ): Promise<VerificationCaseDetail> {
+      let body: { expected_version?: number; review_notes: string; notes: string };
 
-      if (typeof notesOrVersion === "number") {
-        expectedVersion = notesOrVersion;
-        reviewNotes = maybeNotes;
-      } else if (typeof notesOrVersion === "string") {
-        reviewNotes = notesOrVersion;
+      if (typeof optionsOrVersion === "object" && optionsOrVersion !== null) {
+        const revNotes = optionsOrVersion.review_notes || optionsOrVersion.notes || "Approved in Verification Center review";
+        body = {
+          expected_version: optionsOrVersion.expected_version,
+          review_notes: revNotes,
+          notes: revNotes,
+        };
+      } else if (typeof optionsOrVersion === "number") {
+        const revNotes = maybeNotes || "Approved in Verification Center review";
+        body = {
+          expected_version: optionsOrVersion,
+          review_notes: revNotes,
+          notes: revNotes,
+        };
+      } else {
+        const revNotes = optionsOrVersion || maybeNotes || "Approved in Verification Center review";
+        body = {
+          review_notes: revNotes,
+          notes: revNotes,
+        };
       }
 
-      const body: Record<string, unknown> = {
-        review_notes: reviewNotes || "Approved in Verification Center review",
-        notes: reviewNotes || "Approved in Verification Center review",
-      };
-      if (expectedVersion !== undefined) {
-        body.expected_version = expectedVersion;
-      }
-
-      return request(`/projects/${projectId}/verification/cases/${caseId}/approve`, {
+      return request<VerificationCaseDetail>(`/projects/${projectId}/verification/cases/${caseId}/approve`, {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -1654,62 +2164,83 @@ export const api = {
     async rejectCase(
       projectId: string,
       caseId: string,
-      reasonOrVersion?: string | number,
+      optionsOrVersion?: number | { expected_version?: number; reason: string; review_notes?: string; notes?: string } | string,
       maybeReason?: string,
       maybeNotes?: string
-    ): Promise<Record<string, unknown>> {
-      let expectedVersion: number | undefined;
-      let reason: string = "Rejected by reviewer";
-      let reviewNotes: string | undefined;
+    ): Promise<VerificationCaseDetail> {
+      let body: { expected_version?: number; reason: string; review_notes?: string; notes?: string };
 
-      if (typeof reasonOrVersion === "number") {
-        expectedVersion = reasonOrVersion;
-        reason = maybeReason || "Rejected by reviewer";
-        reviewNotes = maybeNotes;
-      } else if (typeof reasonOrVersion === "string") {
-        reason = reasonOrVersion;
-        reviewNotes = maybeReason;
+      if (typeof optionsOrVersion === "object" && optionsOrVersion !== null) {
+        const revNotes = optionsOrVersion.review_notes || optionsOrVersion.notes;
+        body = {
+          expected_version: optionsOrVersion.expected_version,
+          reason: optionsOrVersion.reason || "Rejected by reviewer",
+          review_notes: revNotes,
+          notes: revNotes,
+        };
+      } else if (typeof optionsOrVersion === "number") {
+        body = {
+          expected_version: optionsOrVersion,
+          reason: maybeReason || "Rejected by reviewer",
+          review_notes: maybeNotes,
+          notes: maybeNotes,
+        };
+      } else {
+        body = {
+          reason: optionsOrVersion || maybeReason || "Rejected by reviewer",
+          review_notes: maybeReason && maybeNotes ? maybeNotes : (maybeReason || undefined),
+          notes: maybeReason && maybeNotes ? maybeNotes : (maybeReason || undefined),
+        };
       }
 
-      const body: Record<string, unknown> = {
-        reason,
-        review_notes: reviewNotes,
-        notes: reviewNotes,
-      };
-      if (expectedVersion !== undefined) {
-        body.expected_version = expectedVersion;
-      }
-
-      return request(`/projects/${projectId}/verification/cases/${caseId}/reject`, {
+      return request<VerificationCaseDetail>(`/projects/${projectId}/verification/cases/${caseId}/reject`, {
         method: "POST",
         body: JSON.stringify(body),
       });
     },
-    async markUnresolved(projectId: string, caseId: string, reason: string): Promise<Record<string, unknown>> {
-      return request(`/projects/${projectId}/verification/cases/${caseId}/mark-unresolved`, {
+    async markUnresolved(
+      projectId: string,
+      caseId: string,
+      optionsOrReason: string | { expected_version?: number; explanation?: string; reason?: string },
+      expectedVersion?: number
+    ): Promise<VerificationCaseDetail> {
+      let body: { expected_version?: number; explanation: string; reason?: string };
+
+      if (typeof optionsOrReason === "object" && optionsOrReason !== null) {
+        body = {
+          expected_version: optionsOrReason.expected_version,
+          explanation: optionsOrReason.explanation || optionsOrReason.reason || "Unresolved - consensus not established",
+          reason: optionsOrReason.reason,
+        };
+      } else {
+        body = {
+          expected_version: expectedVersion,
+          explanation: optionsOrReason || "Unresolved - consensus not established",
+          reason: optionsOrReason,
+        };
+      }
+
+      return request<VerificationCaseDetail>(`/projects/${projectId}/verification/cases/${caseId}/mark-unresolved`, {
         method: "POST",
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify(body),
       });
     },
-    async reviewFinding(
+    async editFinding(
       projectId: string,
-      findingId: string,
-      payload: { action: "approve" | "flag" | "reject"; notes?: string }
-    ): Promise<Record<string, unknown>> {
-      return request(
-        `/projects/${projectId}/verification/findings/${findingId}/review`,
-        {
-          method: "POST",
-          body: JSON.stringify(payload),
-        }
-      );
-    },
-    async editFinding(projectId: string, caseId: string, payload: { title?: string; summary?: string; expected_version: number; reason?: string }): Promise<Record<string, unknown>> {
-      return request(`/projects/${projectId}/verification/cases/${caseId}/finding`, {
+      caseId: string,
+      payload: {
+        expected_version: number;
+        title?: string;
+        summary?: string;
+        patch_data?: Record<string, unknown>;
+        reason?: string;
+      }
+    ): Promise<VerificationCaseDetail> {
+      return request<VerificationCaseDetail>(`/projects/${projectId}/verification/cases/${caseId}/finding`, {
         method: "PATCH",
         body: JSON.stringify({
           expected_version: payload.expected_version,
-          patch_data: {
+          patch_data: payload.patch_data || {
             title: payload.title,
             summary: payload.summary,
           },
@@ -1719,41 +2250,56 @@ export const api = {
         }),
       });
     },
-    async assignReviewer(projectId: string, caseId: string, userId: string): Promise<Record<string, unknown>> {
-      return request(`/projects/${projectId}/verification/cases/${caseId}/assign`, {
+    async assignReviewer(
+      projectId: string,
+      caseId: string,
+      assigneeOrPayload: string | null | { expected_version: number; assignee_user_id: string | null },
+      expectedVersion?: number
+    ): Promise<VerificationCaseDetail> {
+      let body: { expected_version: number; assignee_user_id: string | null };
+
+      if (typeof assigneeOrPayload === "object" && assigneeOrPayload !== null) {
+        body = assigneeOrPayload;
+      } else {
+        body = {
+          expected_version: expectedVersion ?? 1,
+          assignee_user_id: assigneeOrPayload,
+        };
+      }
+
+      return request<VerificationCaseDetail>(`/projects/${projectId}/verification/cases/${caseId}/assign`, {
         method: "POST",
-        body: JSON.stringify({ user_id: userId }),
+        body: JSON.stringify(body),
       });
     },
-    async getHandoverEligibility(projectId: string, caseId: string): Promise<{ is_eligible: boolean; reason?: string }> {
-      return request(`/projects/${projectId}/verification/cases/${caseId}/eligibility`);
+    async getHandoverEligibility(projectId: string, caseId: string): Promise<HandoverEligibilityResponse> {
+      return request<HandoverEligibilityResponse>(`/projects/${projectId}/verification/cases/${caseId}/eligibility`);
     },
-    async assessAll(projectId: string): Promise<Record<string, unknown>> {
-      return request(`/projects/${projectId}/verification/assess-all`, {
-        method: "POST",
-      });
+    async assess(projectId: string, targetType: "knowledge_item" | "relationship", targetId: string): Promise<VerificationCaseDetail> {
+      return request<VerificationCaseDetail>(
+        `/projects/${projectId}/verification/assess?target_type=${targetType}&target_id=${targetId}`,
+        { method: "POST" }
+      );
     },
     async assessTarget(
       projectId: string,
       targetType: "knowledge_item" | "relationship",
       targetId: string
-    ): Promise<Record<string, unknown>> {
-      return request(
+    ): Promise<VerificationCaseDetail> {
+      return request<VerificationCaseDetail>(
         `/projects/${projectId}/verification/assess?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`,
         { method: "POST" }
       );
     },
+    async assessAll(projectId: string): Promise<VerificationSummaryResponse> {
+      return request<VerificationSummaryResponse>(`/projects/${projectId}/verification/assess-all`, {
+        method: "POST",
+      });
+    },
   },
   conflicts: {
-    async getSummary(projectId: string): Promise<{
-      total_conflicts: number;
-      unresolved_count: number;
-      reconciled_count: number;
-      superseded_count: number;
-      dismissed_count: number;
-      by_type: Record<string, number>;
-    }> {
-      return request(`/projects/${projectId}/conflicts/summary`);
+    async getSummary(projectId: string): Promise<ConflictSummaryResponse> {
+      return request<ConflictSummaryResponse>(`/projects/${projectId}/conflicts/summary`);
     },
     async list(
       projectId: string,
@@ -1761,47 +2307,13 @@ export const api = {
       conflictType?: string,
       limit: number = 50,
       offset: number = 0
-    ): Promise<{
-      items: Array<{
-        id: string;
-        case_id: string;
-        conflict_type: string;
-        claim_a_text: string;
-        claim_a_source_evidence_id: string;
-        claim_a_chunk_id?: string | null;
-        claim_a_source_timestamp?: string | null;
-        claim_a_source_title?: string | null;
-        claim_a_source_type?: string | null;
-        claim_b_text: string;
-        claim_b_source_evidence_id: string;
-        claim_b_chunk_id?: string | null;
-        claim_b_source_timestamp?: string | null;
-        claim_b_source_title?: string | null;
-        claim_b_source_type?: string | null;
-        explanation: string;
-        temporal_comparison: string;
-        resolution_state: string;
-        resolution_notes?: string | null;
-        resolved_by_user_id?: string | null;
-        resolved_at?: string | null;
-        created_at: string;
-        target_id?: string | null;
-        target_type?: string | null;
-        target_title?: string | null;
-        target_category?: string | null;
-      }>;
-      total: number;
-      unresolved_count: number;
-      reconciled_count: number;
-      superseded_count: number;
-      dismissed_count: number;
-    }> {
+    ): Promise<ConflictListResponse> {
       const qs = new URLSearchParams();
       if (resolutionState && resolutionState !== "all") qs.append("resolution_state", resolutionState);
       if (conflictType && conflictType !== "all") qs.append("conflict_type", conflictType);
       qs.append("limit", limit.toString());
       qs.append("offset", offset.toString());
-      return request(`/projects/${projectId}/conflicts?${qs.toString()}`);
+      return request<ConflictListResponse>(`/projects/${projectId}/conflicts?${qs.toString()}`);
     },
     async resolve(
       projectId: string,
@@ -1811,18 +2323,14 @@ export const api = {
         resolution_notes: string;
         preferred_claim?: string;
       }
-    ): Promise<Record<string, unknown>> {
-      return request(`/projects/${projectId}/conflicts/${conflictId}/resolve`, {
+    ): Promise<VerificationConflictItem> {
+      return request<VerificationConflictItem>(`/projects/${projectId}/conflicts/${conflictId}/resolve`, {
         method: "POST",
         body: JSON.stringify(payload),
       });
     },
-    async detect(projectId: string): Promise<{
-      detected_count: number;
-      new_conflicts_count: number;
-      message: string;
-    }> {
-      return request(`/projects/${projectId}/conflicts/detect`, {
+    async detect(projectId: string): Promise<DetectConflictsResponse> {
+      return request<DetectConflictsResponse>(`/projects/${projectId}/conflicts/detect`, {
         method: "POST",
       });
     },
@@ -1902,15 +2410,15 @@ export const api = {
         body: JSON.stringify(data || {}),
       });
     },
-    async getVersions(projectId: string, caseId: string): Promise<Array<{
-      id: string;
-      package_id: string;
-      version_number: number;
-      assembly_notes?: string;
-      is_current: boolean;
-      created_at: string;
-    }>> {
+    async getVersions(projectId: string, caseId: string): Promise<HandoverPackageVersionSummary[]> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/versions`);
+    },
+    async getVersionSections(
+      projectId: string,
+      caseId: string,
+      versionId: string
+    ): Promise<HandoverVersionSectionsResponse> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/versions/${versionId}/sections`);
     },
     async getVersionDetail(projectId: string, caseId: string, versionId: string): Promise<{
       version: any;
@@ -1945,97 +2453,327 @@ export const api = {
     }> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/versions/${versionId}`);
     },
-    async assessReadiness(projectId: string, caseId: string, versionId: string, notes?: string): Promise<any> {
+    async assessReadiness(
+      projectId: string,
+      caseId: string,
+      versionId: string,
+      notes?: string,
+    ): Promise<HandoverReadinessIntelligenceResponse> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/readiness`, {
         method: "POST",
         body: JSON.stringify({ version_id: versionId, notes: notes || "Readiness assessment" }),
       });
     },
-    async getReadiness(projectId: string, caseId: string, versionId: string): Promise<any> {
+    async getReadiness(
+      projectId: string,
+      caseId: string,
+      versionId: string,
+    ): Promise<HandoverReadinessIntelligenceResponse> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/readiness/${versionId}`);
     },
-    async generateChecklists(projectId: string, caseId: string, versionId?: string): Promise<Array<any>> {
+    async generateChecklists(
+      projectId: string,
+      caseId: string,
+      versionId?: string,
+    ): Promise<HandoverChecklistGroupDetail[]> {
       const q = versionId ? `?version_id=${versionId}` : "";
       return request(`/projects/${projectId}/handover/cases/${caseId}/checklists/generate${q}`, {
         method: "POST",
       });
     },
-    async getChecklists(projectId: string, caseId: string): Promise<Array<{
-      id: string;
-      case_id: string;
-      checklist_type: string;
-      items: Array<{
-        id: string;
-        title: string;
-        description?: string;
-        item_type: string;
-        status: string;
-        is_mandatory: boolean;
-      }>;
-    }>> {
+    async getChecklists(
+      projectId: string,
+      caseId: string,
+    ): Promise<HandoverChecklistGroupDetail[]> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/checklists`);
     },
-    async updateChecklistItem(projectId: string, itemId: string, data: { status: string; notes?: string }): Promise<any> {
+    async getChecklistWorkspace(
+      projectId: string,
+      caseId: string,
+    ): Promise<HandoverChecklistWorkspaceResponse> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/checklists/workspace`);
+    },
+    async createChecklistItem(
+      projectId: string,
+      caseId: string,
+      checklistId: string,
+      data: {
+        item_text: string;
+        description?: string;
+        completion_criteria?: string;
+        category?: string;
+        blocking?: boolean;
+        assigned_to_user_id?: string | null;
+        due_date?: string | null;
+        evidence_item_id?: string | null;
+      },
+    ): Promise<HandoverChecklistItemDetail> {
+      return request(
+        `/projects/${projectId}/handover/cases/${caseId}/checklists/${checklistId}/items`,
+        {
+          method: "POST",
+          body: JSON.stringify(data),
+        },
+      );
+    },
+    async updateChecklistItem(
+      projectId: string,
+      itemId: string,
+      data: {
+        status?: string;
+        notes?: string;
+        description?: string;
+        completion_criteria?: string;
+        assigned_to_user_id?: string | null;
+        clear_assignee?: boolean;
+        due_date?: string | null;
+        clear_due_date?: boolean;
+        evidence_item_id?: string | null;
+        clear_evidence?: boolean;
+        blocking?: boolean;
+        reopen_reason?: string;
+        expected_version?: number;
+      },
+    ): Promise<HandoverChecklistItemDetail> {
       return request(`/projects/${projectId}/handover/checklists/items/${itemId}`, {
         method: "PATCH",
         body: JSON.stringify(data),
       });
     },
-    async getResponsibilities(projectId: string, caseId: string): Promise<Array<any>> {
+    async reviewChecklistItem(
+      projectId: string,
+      itemId: string,
+      data: {
+        approved: boolean;
+        review_notes?: string;
+        expected_version?: number;
+      },
+    ): Promise<HandoverChecklistItemDetail> {
+      return request(`/projects/${projectId}/handover/checklists/items/${itemId}/review`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async getResponsibilities(
+      projectId: string,
+      caseId: string,
+    ): Promise<HandoverResponsibilityTransferDetail[]> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/responsibilities`);
     },
-    async createResponsibilities(projectId: string, caseId: string, transfers: Array<any>): Promise<any> {
+    async getResponsibilityWorkspace(
+      projectId: string,
+      caseId: string,
+    ): Promise<HandoverResponsibilityWorkspaceResponse> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/responsibilities/workspace`);
+    },
+    async createResponsibilities(
+      projectId: string,
+      caseId: string,
+      transfers: Array<{
+        title?: string;
+        responsibility_description: string;
+        knowledge_domain?: string;
+        component_name?: string;
+        priority?: string;
+        ownership_certainty?: string;
+        operational_context?: string;
+        required_access?: string;
+        effective_transfer_date?: string | null;
+        current_owner_id?: string | null;
+        proposed_successor_id?: string | null;
+        transfer_notes?: string;
+        related_entity_id?: string | null;
+        related_knowledge_item_id?: string | null;
+      }>,
+    ): Promise<HandoverResponsibilityTransferDetail[]> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/responsibilities`, {
         method: "POST",
         body: JSON.stringify({ transfers }),
       });
     },
-    async updateResponsibility(projectId: string, transferId: string, status: string, notes?: string): Promise<any> {
-      const q = notes ? `?status=${encodeURIComponent(status)}&notes=${encodeURIComponent(notes)}` : `?status=${encodeURIComponent(status)}`;
-      return request(`/projects/${projectId}/handover/responsibilities/${transferId}${q}`, {
+    async updateResponsibility(
+      projectId: string,
+      transferId: string,
+      statusOrBody:
+        | string
+        | {
+            title?: string;
+            responsibility_description?: string;
+            knowledge_domain?: string;
+            component_name?: string;
+            priority?: string;
+            ownership_certainty?: string;
+            operational_context?: string;
+            required_access?: string;
+            effective_transfer_date?: string | null;
+            clear_effective_date?: boolean;
+            proposed_successor_id?: string | null;
+            clear_successor?: boolean;
+            transfer_status?: string;
+            transfer_notes?: string;
+            blocker_reason?: string;
+            expected_version?: number;
+          },
+      notes?: string,
+    ): Promise<HandoverResponsibilityTransferDetail> {
+      if (typeof statusOrBody === "string") {
+        const q = notes
+          ? `?status=${encodeURIComponent(statusOrBody)}&notes=${encodeURIComponent(notes)}`
+          : `?status=${encodeURIComponent(statusOrBody)}`;
+        return request(`/projects/${projectId}/handover/responsibilities/${transferId}${q}`, {
+          method: "PATCH",
+        });
+      }
+      return request(`/projects/${projectId}/handover/responsibilities/${transferId}`, {
         method: "PATCH",
+        body: JSON.stringify(statusOrBody),
       });
     },
-    async getSignoffs(projectId: string, caseId: string): Promise<Array<{
-      id: string;
-      case_id: string;
-      version_id: string;
-      signoff_type: string;
-      signer_user_id: string;
-      decision: string;
-      comments?: string;
-      signed_at: string;
-    }>> {
+    async confirmResponsibilityOutgoing(
+      projectId: string,
+      transferId: string,
+      data: { confirmation_notes?: string; expected_version?: number } = {},
+    ): Promise<HandoverResponsibilityTransferDetail> {
+      return request(
+        `/projects/${projectId}/handover/responsibilities/${transferId}/confirm-outgoing`,
+        {
+          method: "POST",
+          body: JSON.stringify(data),
+        },
+      );
+    },
+    async acknowledgeResponsibilitySuccessor(
+      projectId: string,
+      transferId: string,
+      data: { acknowledgement_notes?: string; expected_version?: number } = {},
+    ): Promise<HandoverResponsibilityTransferDetail> {
+      return request(
+        `/projects/${projectId}/handover/responsibilities/${transferId}/acknowledge`,
+        {
+          method: "POST",
+          body: JSON.stringify(data),
+        },
+      );
+    },
+    async clarifyResponsibility(
+      projectId: string,
+      transferId: string,
+      data: { notes: string; mode: "request" | "response"; expected_version?: number },
+    ): Promise<HandoverResponsibilityTransferDetail> {
+      return request(`/projects/${projectId}/handover/responsibilities/${transferId}/clarify`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async reopenResponsibility(
+      projectId: string,
+      transferId: string,
+      data: { reason: string; expected_version?: number },
+    ): Promise<HandoverResponsibilityTransferDetail> {
+      return request(`/projects/${projectId}/handover/responsibilities/${transferId}/reopen`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async getSignoffs(projectId: string, caseId: string): Promise<HandoverSignoffRecord[]> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/signoffs`);
     },
-    async submitSignoff(projectId: string, caseId: string, data: {
-      version_id: string;
-      signoff_type: string;
-      decision: string;
-      comments?: string;
-    }): Promise<any> {
+    async getSignoffWorkspace(
+      projectId: string,
+      caseId: string,
+      versionId?: string | null,
+    ): Promise<HandoverSignoffWorkspaceResponse> {
+      const q = versionId ? `?version_id=${encodeURIComponent(versionId)}` : "";
+      return request(`/projects/${projectId}/handover/cases/${caseId}/signoffs/workspace${q}`);
+    },
+    async submitSignoff(
+      projectId: string,
+      caseId: string,
+      data: {
+        version_id: string;
+        signoff_type: string;
+        decision: string;
+        comments?: string;
+        conditions?: string;
+        affected_sections?: string[];
+        expected_content_hash?: string | null;
+        expected_case_version?: number;
+      },
+    ): Promise<HandoverSignoffRecord> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/signoffs`, {
         method: "POST",
         body: JSON.stringify(data),
       });
     },
-    async deliverPackage(projectId: string, caseId: string, data: {
-      version_id: string;
-      deliver_to_user_ids: string[];
-      delivery_method?: string;
-      message?: string;
-    }): Promise<any> {
+    async assignReviewer(
+      projectId: string,
+      caseId: string,
+      data: {
+        reviewer_user_id: string;
+        reason?: string;
+        expected_case_version?: number;
+      },
+    ): Promise<HandoverSignoffWorkspaceResponse> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/signoffs/reviewer`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async reopenSignoffPhase(
+      projectId: string,
+      caseId: string,
+      data: {
+        signoff_type: string;
+        reason: string;
+        expected_case_version?: number;
+      },
+    ): Promise<HandoverSignoffWorkspaceResponse> {
+      return request(`/projects/${projectId}/handover/cases/${caseId}/signoffs/reopen`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async deliverPackage(
+      projectId: string,
+      caseId: string,
+      data: {
+        version_id: string;
+        deliver_to_user_ids: string[];
+        delivery_method?: string;
+        message?: string;
+        expires_in_days?: number;
+        expected_content_hash?: string | null;
+        expected_case_version?: number;
+      },
+    ): Promise<HandoverDeliveryRecord[]> {
       return request(`/projects/${projectId}/handover/cases/${caseId}/deliver`, {
         method: "POST",
         body: JSON.stringify(data),
       });
     },
-    async acknowledgeDelivery(projectId: string, deliveryId: string, data: {
-      acknowledgement_statement: string;
-      clarification_notes?: string;
-      confidence_level?: string;
-    }): Promise<any> {
+    async acknowledgeDelivery(
+      projectId: string,
+      deliveryId: string,
+      data: {
+        acknowledgement_notes?: string;
+        confirmations?: Record<string, boolean>;
+        expected_content_hash?: string | null;
+      },
+    ): Promise<HandoverAcknowledgementRecord> {
       return request(`/projects/${projectId}/handover/deliveries/${deliveryId}/acknowledge`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async clarifyDelivery(
+      projectId: string,
+      deliveryId: string,
+      data: {
+        notes: string;
+        mode: "request" | "response";
+      },
+    ): Promise<HandoverDeliveryRecord> {
+      return request(`/projects/${projectId}/handover/deliveries/${deliveryId}/clarify`, {
         method: "POST",
         body: JSON.stringify(data),
       });
@@ -2108,7 +2846,28 @@ export const api = {
       const detail = await this.getConversation(projectId, conversationId);
       return detail.messages || [];
     },
-    async startInvestigation(
+    async deleteConversation(projectId: string, conversationId: string): Promise<void> {
+      return request(`/projects/${projectId}/assistant/conversations/${conversationId}`, {
+        method: "DELETE",
+      });
+    },
+    async submitFeedback(
+      projectId: string,
+      messageId: string,
+      data: {
+        feedback_type: "helpful" | "unhelpful" | "incorrect_fact" | "missing_citation" | "unauthorized_source";
+        comment?: string;
+      }
+    ): Promise<{ id: string; message_id: string; user_id: string; feedback_type: string; comment?: string }> {
+      return request(`/projects/${projectId}/assistant/messages/${messageId}/feedback`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async getDiagnostics(projectId: string, runId: string): Promise<unknown> {
+      return request(`/projects/${projectId}/assistant/diagnostics/retrieval/${runId}`);
+    },
+      async startInvestigation(
       projectId: string,
       conversationId: string,
       data: {
@@ -2158,27 +2917,6 @@ export const api = {
       }>;
     }> {
       return request(`/projects/${projectId}/assistant/investigations/${investigationId}`);
-    },
-    async deleteConversation(projectId: string, conversationId: string): Promise<void> {
-      return request(`/projects/${projectId}/assistant/conversations/${conversationId}`, {
-        method: "DELETE",
-      });
-    },
-    async submitFeedback(
-      projectId: string,
-      messageId: string,
-      data: {
-        feedback_type: "helpful" | "unhelpful" | "incorrect_fact" | "missing_citation" | "unauthorized_source";
-        comment?: string;
-      }
-    ): Promise<{ id: string; message_id: string; user_id: string; feedback_type: string; comment?: string }> {
-      return request(`/projects/${projectId}/assistant/messages/${messageId}/feedback`, {
-        method: "POST",
-        body: JSON.stringify(data),
-      });
-    },
-    async getDiagnostics(projectId: string, runId: string): Promise<unknown> {
-      return request(`/projects/${projectId}/assistant/diagnostics/retrieval/${runId}`);
     },
   },
   audit: {

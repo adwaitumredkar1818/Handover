@@ -91,6 +91,9 @@ class HandoverCase(Base):
     successor_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    assigned_reviewer_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     target_handover_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -153,6 +156,7 @@ class HandoverCase(Base):
     )
     departing_member: Mapped[Any] = relationship("User", foreign_keys=[departing_member_id])
     successor: Mapped[Any] = relationship("User", foreign_keys=[successor_id])
+    assigned_reviewer: Mapped[Any] = relationship("User", foreign_keys=[assigned_reviewer_id])
     created_by_user: Mapped[Any] = relationship("User", foreign_keys=[created_by_user_id])
     project: Mapped[Any] = relationship("Project")
     organisation: Mapped[Any] = relationship("Organisation")
@@ -502,6 +506,8 @@ class HandoverChecklistItem(Base):
     )
 
     item_text: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completion_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str] = mapped_column(String(64), default="general", nullable=False)
     status: Mapped[str] = mapped_column(
         String(32), default=ChecklistItemStatus.PENDING.value, nullable=False
@@ -509,13 +515,29 @@ class HandoverChecklistItem(Base):
     assigned_to_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    evidence_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("evidence_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     completed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reopened_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reopened_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    reopened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reopened_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     blocking: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -530,6 +552,9 @@ class HandoverChecklistItem(Base):
     )
     assigned_to_user: Mapped[Any] = relationship("User", foreign_keys=[assigned_to_user_id])
     completed_by_user: Mapped[Any] = relationship("User", foreign_keys=[completed_by_user_id])
+    reviewed_by_user: Mapped[Any] = relationship("User", foreign_keys=[reviewed_by_user_id])
+    reopened_by_user: Mapped[Any] = relationship("User", foreign_keys=[reopened_by_user_id])
+    evidence_item: Mapped[Any] = relationship("EvidenceItem", foreign_keys=[evidence_item_id])
 
 
 class HandoverResponsibilityTransfer(Base):
@@ -556,10 +581,17 @@ class HandoverResponsibilityTransfer(Base):
         ForeignKey("handover_package_versions.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     responsibility_description: Mapped[str] = mapped_column(Text, nullable=False)
     knowledge_domain: Mapped[str] = mapped_column(
         String(64), default="responsibilities_ownership", nullable=False
     )
+    component_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    priority: Mapped[str] = mapped_column(String(16), default="medium", nullable=False)
+    ownership_certainty: Mapped[str] = mapped_column(String(32), default="proposed", nullable=False)
+    operational_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    required_access: Mapped[str | None] = mapped_column(Text, nullable=True)
+    effective_transfer_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     current_owner_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -570,9 +602,38 @@ class HandoverResponsibilityTransfer(Base):
         String(32), default=TransferStatus.PENDING.value, nullable=False
     )
     transfer_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    blocker_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     related_entity_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("knowledge_entities.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    related_knowledge_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("knowledge_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    outgoing_confirmed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    outgoing_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    outgoing_confirmation_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    successor_acknowledged_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    successor_acknowledged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    successor_acknowledgement_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    clarification_requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    clarification_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    clarification_request_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    clarification_response_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reopened_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reopened_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     transferred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -589,6 +650,18 @@ class HandoverResponsibilityTransfer(Base):
     current_owner: Mapped[Any] = relationship("User", foreign_keys=[current_owner_id])
     proposed_successor: Mapped[Any] = relationship("User", foreign_keys=[proposed_successor_id])
     related_entity: Mapped[Any] = relationship("KnowledgeEntity", foreign_keys=[related_entity_id])
+    related_knowledge_item: Mapped[Any] = relationship(
+        "KnowledgeItem", foreign_keys=[related_knowledge_item_id]
+    )
+    outgoing_confirmed_by_user: Mapped[Any] = relationship(
+        "User", foreign_keys=[outgoing_confirmed_by_user_id]
+    )
+    successor_acknowledged_by_user: Mapped[Any] = relationship(
+        "User", foreign_keys=[successor_acknowledged_by_user_id]
+    )
+    clarification_requested_by_user: Mapped[Any] = relationship(
+        "User", foreign_keys=[clarification_requested_by_user_id]
+    )
 
 
 class HandoverSignoff(Base):
@@ -621,6 +694,11 @@ class HandoverSignoff(Base):
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     comments: Mapped[str | None] = mapped_column(Text, nullable=True)
     conditions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    package_content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    affected_sections_json: Mapped[list[str]] = mapped_column(
+        _JSON_VARIANT, default=list, nullable=False
+    )
+    is_superseded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     signed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -670,8 +748,12 @@ class HandoverDelivery(Base):
     delivery_method: Mapped[str] = mapped_column(
         String(32), default=HandoverDeliveryMethod.INTERNAL_DOWNLOAD.value, nullable=False
     )
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_storage_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     artifact_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    clarifications_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        _JSON_VARIANT, default=list, nullable=False
+    )
     delivered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

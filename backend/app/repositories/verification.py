@@ -1,293 +1,381 @@
-"""Data-access repository for Verification Center (Module 3 / Validation Area).
-
-Manages:
-- Verification cases (polymorphic tracking of knowledge items and relationships)
-- Verification issues (provenance, grounding, freshness, and consistency flaws)
-- Verification conflicts (side-by-side contradiction records)
-- Verification review events (immutable human review actions)
-- Verification context requests (in-platform clarification requests)
-"""
+"""SQLAlchemy 2.x repository for Verification Center Phase 1 Rebuild."""
 
 from __future__ import annotations
 
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.security import utc_now
 from app.models.enums import (
     ConflictResolutionState,
     ContextRequestStatus,
     IssueResolutionState,
     VerificationCaseStatus,
-    VerificationPriority,
-    VerificationTargetType,
 )
 from app.models.verification import (
     VerificationCase,
     VerificationConflict,
     VerificationContextRequest,
+    VerificationEvidenceRef,
+    VerificationFindingRevision,
     VerificationIssue,
     VerificationReviewEvent,
 )
 
 
-class VerificationCaseRepository:
-    """Repository for managing VerificationCase records."""
+class VerificationRepository:
+    """Canonical data-access layer for Verification Center persistence."""
 
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def create(self, case: VerificationCase) -> VerificationCase:
-        self.session.add(case)
-        self.session.flush()
-        return case
-
-    def get_by_id(
-        self, case_id: uuid.UUID, *, load_relationships: bool = True
+    def get_case(
+        self,
+        case_id: uuid.UUID,
+        *,
+        project_id: uuid.UUID,
+        load_details: bool = True,
     ) -> VerificationCase | None:
-        stmt = select(VerificationCase).where(VerificationCase.id == case_id)
-        if load_relationships:
+        stmt = select(VerificationCase).where(
+            VerificationCase.id == case_id,
+            VerificationCase.project_id == project_id,
+        )
+        if load_details:
             stmt = stmt.options(
                 selectinload(VerificationCase.issues),
                 selectinload(VerificationCase.conflicts),
+                selectinload(VerificationCase.evidence_refs),
+                selectinload(VerificationCase.revisions),
                 selectinload(VerificationCase.review_events),
                 selectinload(VerificationCase.context_requests),
                 selectinload(VerificationCase.assigned_reviewer),
             )
         return self.session.execute(stmt).scalar_one_or_none()
+
+    def get_case_by_target(
+        self,
+        *,
+        project_id: uuid.UUID,
+        target_type: str,
+        target_id: uuid.UUID,
+    ) -> VerificationCase | None:
+        stmt = (
+            select(VerificationCase)
+            .where(
+                VerificationCase.project_id == project_id,
+                VerificationCase.target_type == target_type,
+                VerificationCase.target_id == target_id,
+            )
+            .options(
+                selectinload(VerificationCase.evidence_refs),
+                selectinload(VerificationCase.issues),
+                selectinload(VerificationCase.conflicts),
+                selectinload(VerificationCase.revisions),
+            )
+        )
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    def list_project_cases(
+        self,
+        project_id: uuid.UUID,
+        *,
+        status: str | None = None,
+        domain: str | None = None,
+        person: str | None = None,
+        source: str | None = None,
+        reviewer_id: uuid.UUID | None = None,
+        category: str | None = None,
+        search: str | None = None,
+        sort_by: str = "updated_at",
+        sort_dir: str = "desc",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[VerificationCase], int]:
+        stmt = (
+            select(VerificationCase)
+            .where(
+                VerificationCase.project_id == project_id,
+                VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+            )
+            .options(
+                selectinload(VerificationCase.issues),
+                selectinload(VerificationCase.evidence_refs),
+                selectinload(VerificationCase.assigned_reviewer),
+            )
+        )
+        count_stmt = select(func.count(func.distinct(VerificationCase.id))).where(
+            VerificationCase.project_id == project_id,
+            VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+        )
+
+        filters: list[Any] = []
+        if status:
+            filters.append(VerificationCase.case_status == status)
+        if domain:
+            filters.append(VerificationCase.domain == domain)
+        if person:
+            filters.append(VerificationCase.person_name.ilike(f"%{person.strip()}%"))
+        if source:
+            filters.append(VerificationCase.source_provider == source)
+        if reviewer_id:
+            filters.append(VerificationCase.assigned_reviewer_id == reviewer_id)
+        if search:
+            q = f"%{search.strip()}%"
+            filters.append(
+                or_(
+                    VerificationCase.title.ilike(q),
+                    VerificationCase.current_claim.ilike(q),
+                    VerificationCase.original_ai_claim.ilike(q),
+                    VerificationCase.domain.ilike(q),
+                )
+            )
+        if category:
+            issue_case_ids = select(VerificationIssue.case_id).where(
+                VerificationIssue.project_id == project_id,
+                VerificationIssue.verification_category == category,
+                VerificationIssue.resolution_state == IssueResolutionState.OPEN.value,
+            )
+            filters.append(VerificationCase.id.in_(issue_case_ids))
+
+        if filters:
+            stmt = stmt.where(*filters)
+            count_stmt = count_stmt.where(*filters)
+
+        sort_column = {
+            "updated_at": VerificationCase.updated_at,
+            "created_at": VerificationCase.created_at,
+            "priority": VerificationCase.priority,
+            "status": VerificationCase.case_status,
+            "domain": VerificationCase.domain,
+        }.get(sort_by, VerificationCase.updated_at)
+
+        order_expr = sort_column.asc() if sort_dir.lower() == "asc" else sort_column.desc()
+        stmt = stmt.order_by(order_expr, VerificationCase.id.asc()).limit(limit).offset(offset)
+
+        items = list(self.session.execute(stmt).scalars().all())
+        total = int(self.session.execute(count_stmt).scalar_one())
+        return items, total
+
+    def list_project_cases_for_acl(
+        self,
+        project_id: uuid.UUID,
+        *,
+        status: str | None = None,
+        domain: str | None = None,
+        source: str | None = None,
+        reviewer_id: uuid.UUID | None = None,
+        sort_by: str = "updated_at",
+        sort_dir: str = "desc",
+    ) -> list[VerificationCase]:
+        """Fetch non-archived project cases matching structural filters for viewer ACL filtering.
+
+        Text search, person, and category filters are applied post-ACL in the service
+        layer so restricted claims, authors, and categories cannot leak via SQL queries.
+        """
+        stmt = (
+            select(VerificationCase)
+            .where(
+                VerificationCase.project_id == project_id,
+                VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+            )
+            .options(
+                selectinload(VerificationCase.issues),
+                selectinload(VerificationCase.evidence_refs),
+                selectinload(VerificationCase.conflicts),
+                selectinload(VerificationCase.context_requests),
+                selectinload(VerificationCase.assigned_reviewer),
+            )
+        )
+        if status:
+            stmt = stmt.where(VerificationCase.case_status == status)
+        if domain:
+            stmt = stmt.where(VerificationCase.domain == domain)
+        if source:
+            stmt = stmt.where(VerificationCase.source_provider == source)
+        if reviewer_id:
+            stmt = stmt.where(VerificationCase.assigned_reviewer_id == reviewer_id)
+
+        sort_column = {
+            "updated_at": VerificationCase.updated_at,
+            "created_at": VerificationCase.created_at,
+            "priority": VerificationCase.priority,
+            "status": VerificationCase.case_status,
+            "domain": VerificationCase.domain,
+        }.get(sort_by, VerificationCase.updated_at)
+
+        order_expr = sort_column.asc() if sort_dir.lower() == "asc" else sort_column.desc()
+        stmt = stmt.order_by(order_expr, VerificationCase.id.asc())
+        return list(self.session.execute(stmt).scalars().all())
+
+    def get_summary_counts(self, project_id: uuid.UUID) -> dict[str, int]:
+        rows = self.session.execute(
+            select(VerificationCase.case_status, func.count(VerificationCase.id))
+            .where(
+                VerificationCase.project_id == project_id,
+                VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+            )
+            .group_by(VerificationCase.case_status)
+        ).all()
+
+        counts = {str(status): int(cnt) for status, cnt in rows}
+
+        open_issues = int(
+            self.session.execute(
+                select(func.count(VerificationIssue.id)).where(
+                    VerificationIssue.project_id == project_id,
+                    VerificationIssue.resolution_state == IssueResolutionState.OPEN.value,
+                )
+            ).scalar_one()
+        )
+        open_conflicts = int(
+            self.session.execute(
+                select(func.count(VerificationConflict.id)).where(
+                    VerificationConflict.project_id == project_id,
+                    VerificationConflict.resolution_state
+                    == ConflictResolutionState.UNRESOLVED.value,
+                )
+            ).scalar_one()
+        )
+        pending_ctx = int(
+            self.session.execute(
+                select(func.count(VerificationContextRequest.id)).where(
+                    VerificationContextRequest.project_id == project_id,
+                    VerificationContextRequest.status == ContextRequestStatus.PENDING.value,
+                )
+            ).scalar_one()
+        )
+
+        return {
+            "total_cases": sum(counts.values()),
+            "candidate_count": counts.get(VerificationCaseStatus.CANDIDATE.value, 0),
+            "pending_review_count": counts.get(VerificationCaseStatus.PENDING_REVIEW.value, 0),
+            "conflicted_count": counts.get(VerificationCaseStatus.CONFLICTED.value, 0),
+            "unresolved_count": counts.get(VerificationCaseStatus.UNRESOLVED.value, 0),
+            "verified_count": counts.get(VerificationCaseStatus.VERIFIED.value, 0),
+            "rejected_count": counts.get(VerificationCaseStatus.REJECTED.value, 0),
+            "open_issues_count": open_issues,
+            "open_conflicts_count": open_conflicts,
+            "pending_context_requests_count": pending_ctx,
+        }
+
+    def list_filter_facets(self, project_id: uuid.UUID) -> dict[str, list[str]]:
+        base_filter = (
+            VerificationCase.project_id == project_id,
+            VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+        )
+        domains = [
+            d
+            for (d,) in self.session.execute(
+                select(VerificationCase.domain).where(*base_filter).distinct()
+            ).all()
+            if d
+        ]
+        sources = [
+            s
+            for (s,) in self.session.execute(
+                select(VerificationCase.source_provider).where(*base_filter).distinct()
+            ).all()
+            if s
+        ]
+        people = [
+            p
+            for (p,) in self.session.execute(
+                select(VerificationCase.person_name).where(*base_filter).distinct()
+            ).all()
+            if p
+        ]
+        return {
+            "domains": sorted(domains),
+            "sources": sorted(sources),
+            "people": sorted(people),
+        }
+
+    def list_context_requests(
+        self,
+        project_id: uuid.UUID,
+        *,
+        case_id: uuid.UUID | None = None,
+        status: str | None = None,
+    ) -> list[VerificationContextRequest]:
+        stmt = (
+            select(VerificationContextRequest)
+            .where(VerificationContextRequest.project_id == project_id)
+            .options(
+                selectinload(VerificationContextRequest.requested_by),
+                selectinload(VerificationContextRequest.requested_from),
+            )
+            .order_by(VerificationContextRequest.created_at.desc())
+        )
+        if case_id:
+            stmt = stmt.where(VerificationContextRequest.case_id == case_id)
+        if status:
+            stmt = stmt.where(VerificationContextRequest.status == status)
+        return list(self.session.execute(stmt).scalars().all())
+
+    def get_context_request(
+        self, request_id: uuid.UUID, *, project_id: uuid.UUID
+    ) -> VerificationContextRequest | None:
+        stmt = (
+            select(VerificationContextRequest)
+            .where(
+                VerificationContextRequest.id == request_id,
+                VerificationContextRequest.project_id == project_id,
+            )
+            .options(
+                selectinload(VerificationContextRequest.requested_by),
+                selectinload(VerificationContextRequest.requested_from),
+            )
+        )
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    def add(self, entity: Any) -> Any:
+        self.session.add(entity)
+        return entity
+
+    def flush(self) -> None:
+        self.session.flush()
+
+
+class VerificationCaseRepository(VerificationRepository):
+    """Integration adapter for HandoverEligibilityService."""
 
     def get_by_target(
         self,
+        *,
         project_id: uuid.UUID,
-        target_type: VerificationTargetType,
+        target_type: Any,
         target_id: uuid.UUID,
-        *,
-        active_only: bool = True,
-        load_relationships: bool = True,
     ) -> VerificationCase | None:
-        stmt = select(VerificationCase).where(
-            VerificationCase.project_id == project_id,
-            VerificationCase.target_type == target_type,
-            VerificationCase.target_id == target_id,
+        tt = target_type.value if hasattr(target_type, "value") else str(target_type)
+        return self.get_case_by_target(
+            project_id=project_id, target_type=tt, target_id=target_id
         )
-        if active_only:
-            stmt = stmt.where(VerificationCase.case_status != VerificationCaseStatus.ARCHIVED)
-        if load_relationships:
-            stmt = stmt.options(
-                selectinload(VerificationCase.issues),
-                selectinload(VerificationCase.conflicts),
-                selectinload(VerificationCase.review_events),
-                selectinload(VerificationCase.context_requests),
-                selectinload(VerificationCase.assigned_reviewer),
-            )
-        return self.session.execute(stmt).scalar_one_or_none()
-
-    def list_queue(
-        self,
-        project_id: uuid.UUID,
-        *,
-        case_status: VerificationCaseStatus | None = None,
-        priority: VerificationPriority | None = None,
-        target_type: VerificationTargetType | None = None,
-        assigned_reviewer_id: uuid.UUID | None = None,
-        unassigned_only: bool = False,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> list[VerificationCase]:
-        stmt = (
-            select(VerificationCase)
-            .where(VerificationCase.project_id == project_id)
-            .options(
-                selectinload(VerificationCase.issues),
-                selectinload(VerificationCase.conflicts),
-                selectinload(VerificationCase.assigned_reviewer),
-            )
-        )
-        if case_status is not None:
-            stmt = stmt.where(VerificationCase.case_status == case_status)
-        else:
-            stmt = stmt.where(VerificationCase.case_status != VerificationCaseStatus.ARCHIVED)
-
-        if priority is not None:
-            stmt = stmt.where(VerificationCase.priority == priority)
-        if target_type is not None:
-            stmt = stmt.where(VerificationCase.target_type == target_type)
-        if unassigned_only:
-            stmt = stmt.where(VerificationCase.assigned_reviewer_id.is_(None))
-        elif assigned_reviewer_id is not None:
-            stmt = stmt.where(VerificationCase.assigned_reviewer_id == assigned_reviewer_id)
-
-        # Order by: priority (critical > high > medium > low), then updated_at desc
-        stmt = stmt.order_by(VerificationCase.created_at.desc()).limit(limit).offset(offset)
-
-        return list(self.session.execute(stmt).scalars().all())
-
-    def count_queue(
-        self,
-        project_id: uuid.UUID,
-        *,
-        case_status: VerificationCaseStatus | None = None,
-        priority: VerificationPriority | None = None,
-        target_type: VerificationTargetType | None = None,
-        assigned_reviewer_id: uuid.UUID | None = None,
-        unassigned_only: bool = False,
-    ) -> int:
-        stmt = select(func.count(VerificationCase.id)).where(
-            VerificationCase.project_id == project_id
-        )
-        if case_status is not None:
-            stmt = stmt.where(VerificationCase.case_status == case_status)
-        else:
-            stmt = stmt.where(VerificationCase.case_status != VerificationCaseStatus.ARCHIVED)
-
-        if priority is not None:
-            stmt = stmt.where(VerificationCase.priority == priority)
-        if target_type is not None:
-            stmt = stmt.where(VerificationCase.target_type == target_type)
-        if unassigned_only:
-            stmt = stmt.where(VerificationCase.assigned_reviewer_id.is_(None))
-        elif assigned_reviewer_id is not None:
-            stmt = stmt.where(VerificationCase.assigned_reviewer_id == assigned_reviewer_id)
-
-        return self.session.execute(stmt).scalar_one() or 0
-
-    def get_summary(self, project_id: uuid.UUID) -> dict[str, Any]:
-        """Aggregate summary metrics for project verification status."""
-        # 1. Counts by case status
-        status_stmt = (
-            select(VerificationCase.case_status, func.count(VerificationCase.id))
-            .where(VerificationCase.project_id == project_id)
-            .group_by(VerificationCase.case_status)
-        )
-        status_rows = self.session.execute(status_stmt).all()
-        by_status = {str(row[0]): row[1] for row in status_rows}
-
-        # 2. Counts by priority
-        priority_stmt = (
-            select(VerificationCase.priority, func.count(VerificationCase.id))
-            .where(
-                VerificationCase.project_id == project_id,
-                VerificationCase.case_status != VerificationCaseStatus.ARCHIVED,
-            )
-            .group_by(VerificationCase.priority)
-        )
-        priority_rows = self.session.execute(priority_stmt).all()
-        by_priority = {str(row[0]): row[1] for row in priority_rows}
-
-        # 3. Active open issues count
-        issues_stmt = select(func.count(VerificationIssue.id)).where(
-            VerificationIssue.project_id == project_id,
-            VerificationIssue.resolution_state == IssueResolutionState.OPEN,
-        )
-        open_issues_count = self.session.execute(issues_stmt).scalar_one() or 0
-
-        # 4. Open conflicts count
-        conflicts_stmt = select(func.count(VerificationConflict.id)).where(
-            VerificationConflict.project_id == project_id,
-            VerificationConflict.resolution_state == ConflictResolutionState.UNRESOLVED,
-        )
-        open_conflicts_count = self.session.execute(conflicts_stmt).scalar_one() or 0
-
-        # 5. Pending context requests count
-        context_stmt = select(func.count(VerificationContextRequest.id)).where(
-            VerificationContextRequest.project_id == project_id,
-            VerificationContextRequest.status == ContextRequestStatus.PENDING,
-        )
-        pending_context_requests_count = self.session.execute(context_stmt).scalar_one() or 0
-
-        return {
-            "total_cases": sum(by_status.values()),
-            "by_status": by_status,
-            "by_priority": by_priority,
-            "open_issues_count": open_issues_count,
-            "open_conflicts_count": open_conflicts_count,
-            "pending_context_requests_count": pending_context_requests_count,
-        }
-
-    def update(self, case: VerificationCase) -> VerificationCase:
-        case.updated_at = utc_now()
-        self.session.flush()
-        return case
 
 
 class VerificationIssueRepository:
-    """Repository for managing VerificationIssue records."""
+    """Integration adapter for HandoverEligibilityService."""
 
     def __init__(self, session: Session) -> None:
         self.session = session
-
-    def create(self, issue: VerificationIssue) -> VerificationIssue:
-        self.session.add(issue)
-        self.session.flush()
-        return issue
-
-    def get_by_id(self, issue_id: uuid.UUID) -> VerificationIssue | None:
-        stmt = (
-            select(VerificationIssue)
-            .where(VerificationIssue.id == issue_id)
-            .options(
-                selectinload(VerificationIssue.conflicting_evidence),
-                selectinload(VerificationIssue.conflicting_chunk),
-            )
-        )
-        return self.session.execute(stmt).scalar_one_or_none()
 
     def list_by_case(
         self, case_id: uuid.UUID, *, open_only: bool = False
     ) -> list[VerificationIssue]:
         stmt = select(VerificationIssue).where(VerificationIssue.case_id == case_id)
         if open_only:
-            stmt = stmt.where(VerificationIssue.resolution_state == IssueResolutionState.OPEN)
-        stmt = stmt.options(
-            selectinload(VerificationIssue.conflicting_evidence),
-            selectinload(VerificationIssue.conflicting_chunk),
-        ).order_by(VerificationIssue.created_at.asc())
+            stmt = stmt.where(
+                VerificationIssue.resolution_state == IssueResolutionState.OPEN.value
+            )
         return list(self.session.execute(stmt).scalars().all())
-
-    def update_resolution(
-        self,
-        issue_id: uuid.UUID,
-        resolution_state: IssueResolutionState,
-        *,
-        reason: str | None = None,
-        resolved_by_user_id: uuid.UUID | None = None,
-    ) -> VerificationIssue | None:
-        issue = self.get_by_id(issue_id)
-        if not issue:
-            return None
-        issue.resolution_state = resolution_state
-        issue.resolution_reason = reason
-        issue.resolved_by_user_id = resolved_by_user_id
-        issue.resolved_at = utc_now() if resolution_state != IssueResolutionState.OPEN else None
-        issue.updated_at = utc_now()
-        self.session.flush()
-        return issue
 
 
 class VerificationConflictRepository:
-    """Repository for managing VerificationConflict records."""
+    """Integration adapter for HandoverEligibilityService."""
 
     def __init__(self, session: Session) -> None:
         self.session = session
-
-    def create(self, conflict: VerificationConflict) -> VerificationConflict:
-        self.session.add(conflict)
-        self.session.flush()
-        return conflict
-
-    def get_by_id(self, conflict_id: uuid.UUID) -> VerificationConflict | None:
-        stmt = (
-            select(VerificationConflict)
-            .where(VerificationConflict.id == conflict_id)
-            .options(
-                selectinload(VerificationConflict.claim_a_evidence),
-                selectinload(VerificationConflict.claim_b_evidence),
-            )
-        )
-        return self.session.execute(stmt).scalar_one_or_none()
 
     def list_by_case(
         self, case_id: uuid.UUID, *, unresolved_only: bool = False
@@ -295,189 +383,7 @@ class VerificationConflictRepository:
         stmt = select(VerificationConflict).where(VerificationConflict.case_id == case_id)
         if unresolved_only:
             stmt = stmt.where(
-                VerificationConflict.resolution_state == ConflictResolutionState.UNRESOLVED
+                VerificationConflict.resolution_state
+                == ConflictResolutionState.UNRESOLVED.value
             )
-        stmt = stmt.options(
-            selectinload(VerificationConflict.claim_a_evidence),
-            selectinload(VerificationConflict.claim_b_evidence),
-        ).order_by(VerificationConflict.created_at.asc())
         return list(self.session.execute(stmt).scalars().all())
-
-    def update_resolution(
-        self,
-        conflict_id: uuid.UUID,
-        resolution_state: ConflictResolutionState,
-        *,
-        notes: str | None = None,
-        resolved_by_user_id: uuid.UUID | None = None,
-    ) -> VerificationConflict | None:
-        conflict = self.get_by_id(conflict_id)
-        if not conflict:
-            return None
-        conflict.resolution_state = resolution_state
-        conflict.resolution_notes = notes
-        conflict.resolved_by_user_id = resolved_by_user_id
-        conflict.resolved_at = (
-            utc_now() if resolution_state != ConflictResolutionState.UNRESOLVED else None
-        )
-        self.session.flush()
-        return conflict
-
-    def list_by_project(
-        self,
-        project_id: uuid.UUID,
-        *,
-        resolution_state: str | None = None,
-        conflict_type: str | None = None,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> tuple[list[VerificationConflict], int]:
-        stmt = select(VerificationConflict).where(VerificationConflict.project_id == project_id)
-        if resolution_state and resolution_state.lower() != "all":
-            stmt = stmt.where(VerificationConflict.resolution_state == resolution_state)
-        if conflict_type and conflict_type.lower() != "all":
-            stmt = stmt.where(VerificationConflict.conflict_type == conflict_type)
-
-        count_stmt = select(func.count(VerificationConflict.id)).where(VerificationConflict.project_id == project_id)
-        if resolution_state and resolution_state.lower() != "all":
-            count_stmt = count_stmt.where(VerificationConflict.resolution_state == resolution_state)
-        if conflict_type and conflict_type.lower() != "all":
-            count_stmt = count_stmt.where(VerificationConflict.conflict_type == conflict_type)
-        total = self.session.execute(count_stmt).scalar() or 0
-
-        stmt = (
-            stmt.options(
-                selectinload(VerificationConflict.claim_a_evidence),
-                selectinload(VerificationConflict.claim_b_evidence),
-                selectinload(VerificationConflict.case),
-            )
-            .order_by(VerificationConflict.created_at.desc())
-            .offset(offset)
-            .limit(limit)
-        )
-        items = list(self.session.execute(stmt).scalars().all())
-        return items, total
-
-    def get_summary_by_project(self, project_id: uuid.UUID) -> dict[str, Any]:
-        """Aggregate counts of conflicts by resolution state and type."""
-        stmt = select(VerificationConflict).where(VerificationConflict.project_id == project_id)
-        all_conflicts = list(self.session.execute(stmt).scalars().all())
-
-        total = len(all_conflicts)
-        unresolved = sum(1 for c in all_conflicts if str(getattr(c, "resolution_state", "")).lower() == "unresolved")
-        reconciled = sum(1 for c in all_conflicts if str(getattr(c, "resolution_state", "")).lower() == "reconciled")
-        superseded = sum(1 for c in all_conflicts if str(getattr(c, "resolution_state", "")).lower() == "superseded")
-        dismissed = sum(1 for c in all_conflicts if str(getattr(c, "resolution_state", "")).lower() == "dismissed")
-
-        by_type: dict[str, int] = {}
-        for c in all_conflicts:
-            ct = str(getattr(c, "conflict_type", ""))
-            by_type[ct] = by_type.get(ct, 0) + 1
-
-        return {
-            "total_conflicts": total,
-            "unresolved_count": unresolved,
-            "reconciled_count": reconciled,
-            "superseded_count": superseded,
-            "dismissed_count": dismissed,
-            "by_type": by_type,
-        }
-
-
-class VerificationReviewEventRepository:
-    """Repository for appending and reading VerificationReviewEvent records."""
-
-    def __init__(self, session: Session) -> None:
-        self.session = session
-
-    def create(self, event: VerificationReviewEvent) -> VerificationReviewEvent:
-        self.session.add(event)
-        self.session.flush()
-        return event
-
-    def list_by_case(self, case_id: uuid.UUID) -> list[VerificationReviewEvent]:
-        stmt = (
-            select(VerificationReviewEvent)
-            .where(VerificationReviewEvent.case_id == case_id)
-            .options(selectinload(VerificationReviewEvent.reviewer))
-            .order_by(VerificationReviewEvent.created_at.desc())
-        )
-        return list(self.session.execute(stmt).scalars().all())
-
-
-class VerificationContextRequestRepository:
-    """Repository for managing VerificationContextRequest records."""
-
-    def __init__(self, session: Session) -> None:
-        self.session = session
-
-    def create(self, req: VerificationContextRequest) -> VerificationContextRequest:
-        self.session.add(req)
-        self.session.flush()
-        return req
-
-    def get_by_id(self, req_id: uuid.UUID) -> VerificationContextRequest | None:
-        stmt = (
-            select(VerificationContextRequest)
-            .where(VerificationContextRequest.id == req_id)
-            .options(
-                selectinload(VerificationContextRequest.requested_by),
-                selectinload(VerificationContextRequest.requested_from),
-                selectinload(VerificationContextRequest.response_evidence),
-            )
-        )
-        return self.session.execute(stmt).scalar_one_or_none()
-
-    def list_by_case(self, case_id: uuid.UUID) -> list[VerificationContextRequest]:
-        stmt = (
-            select(VerificationContextRequest)
-            .where(VerificationContextRequest.case_id == case_id)
-            .options(
-                selectinload(VerificationContextRequest.requested_by),
-                selectinload(VerificationContextRequest.requested_from),
-                selectinload(VerificationContextRequest.response_evidence),
-            )
-            .order_by(VerificationContextRequest.created_at.desc())
-        )
-        return list(self.session.execute(stmt).scalars().all())
-
-    def list_by_user(
-        self,
-        project_id: uuid.UUID,
-        user_id: uuid.UUID,
-        *,
-        status: ContextRequestStatus | None = None,
-    ) -> list[VerificationContextRequest]:
-        stmt = (
-            select(VerificationContextRequest)
-            .where(
-                VerificationContextRequest.project_id == project_id,
-                VerificationContextRequest.requested_from_user_id == user_id,
-            )
-            .options(
-                selectinload(VerificationContextRequest.requested_by),
-                selectinload(VerificationContextRequest.response_evidence),
-            )
-        )
-        if status is not None:
-            stmt = stmt.where(VerificationContextRequest.status == status)
-        stmt = stmt.order_by(VerificationContextRequest.created_at.desc())
-        return list(self.session.execute(stmt).scalars().all())
-
-    def respond(
-        self,
-        req_id: uuid.UUID,
-        response_text: str,
-        *,
-        evidence_id: uuid.UUID | None = None,
-    ) -> VerificationContextRequest | None:
-        req = self.get_by_id(req_id)
-        if not req:
-            return None
-        req.response_text = response_text
-        req.response_evidence_id = evidence_id
-        req.status = ContextRequestStatus.RESPONDED
-        req.responded_at = utc_now()
-        req.updated_at = utc_now()
-        self.session.flush()
-        return req

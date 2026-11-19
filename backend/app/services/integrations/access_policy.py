@@ -4,20 +4,27 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
-from sqlalchemy.orm import Session
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.exceptions import ForbiddenError
 from app.models.enums import (
     AuditOutcome,
+    EvidenceProcessingStatus,
     EvidenceSourceType,
     SourcePermissionVerificationStatus,
     SourceVisibilityPolicy,
 )
 from app.models.evidence import EvidenceItem
+from app.models.integration import SourceAccessPolicy
 from app.services.audit import AuditService
 from app.services.rbac import ProjectContext
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,11 +119,19 @@ class SourceAccessPolicyService:
     def can_user_access_evidence(
         self,
         *,
-        evidence: EvidenceItem,
+        evidence: EvidenceItem | None,
         user_id: uuid.UUID,
         has_project_manage: bool,
     ) -> bool:
         """Return True ONLY when platform RBAC + source ACL rules both allow inspection."""
+        if evidence is None:
+            return False
+        if (
+            evidence.deleted_at is not None
+            or evidence.processing_status == EvidenceProcessingStatus.DELETED.value
+        ):
+            return False
+
         is_legacy_upload = (
             evidence.source_type == EvidenceSourceType.DOCUMENT_UPLOAD.value
             and evidence.source_access_policy_id is None
@@ -152,6 +167,142 @@ class SourceAccessPolicyService:
             return str(user_id) in (policy.allowed_user_ids or [])
 
         return False
+
+    def can_user_access_evidence_safe(
+        self,
+        *,
+        evidence: EvidenceItem | None,
+        project_id: uuid.UUID,
+        user_id: uuid.UUID,
+        has_project_manage: bool,
+    ) -> bool:
+        """Fail-closed wrapper enforcing project scope, deletion check, and exception safety."""
+        if evidence is None or evidence.project_id != project_id:
+            return False
+        try:
+            return bool(
+                self.can_user_access_evidence(
+                    evidence=evidence,
+                    user_id=user_id,
+                    has_project_manage=has_project_manage,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Source ACL evaluation failed closed for evidence_id=%s project_id=%s",
+                evidence.id,
+                project_id,
+            )
+            return False
+
+    def evaluate_evidence_batch(
+        self,
+        session: Session,
+        evidence_ids: Iterable[uuid.UUID | None],
+        *,
+        project_id: uuid.UUID,
+        user_id: uuid.UUID,
+        has_project_manage: bool,
+    ) -> dict[uuid.UUID, tuple[bool, EvidenceItem | None]]:
+        """Batch-evaluate viewer source ACL for a set of evidence IDs in <=2 SQL queries.
+
+        Never caches decisions across users. Always fails closed for missing,
+        deleted, cross-project, or evaluation-error evidence records.
+        """
+        unique_ids = {eid for eid in evidence_ids if eid is not None}
+        if not unique_ids:
+            return {}
+
+        try:
+            rows = (
+                session.execute(
+                    select(EvidenceItem)
+                    .where(
+                        EvidenceItem.id.in_(unique_ids),
+                        EvidenceItem.project_id == project_id,
+                    )
+                    .options(selectinload(EvidenceItem.source_access_policy))
+                )
+                .scalars()
+                .all()
+            )
+        except Exception:
+            logger.warning(
+                "Batch source ACL query failed closed for project_id=%s count=%d",
+                project_id,
+                len(unique_ids),
+            )
+            return {eid: (False, None) for eid in unique_ids}
+
+        ev_map: dict[uuid.UUID, EvidenceItem] = {ev.id: ev for ev in rows}
+        results: dict[uuid.UUID, tuple[bool, EvidenceItem | None]] = {}
+        for eid in unique_ids:
+            ev = ev_map.get(eid)
+            allowed = self.can_user_access_evidence_safe(
+                evidence=ev,
+                project_id=project_id,
+                user_id=user_id,
+                has_project_manage=has_project_manage,
+            )
+            results[eid] = (allowed, ev)
+        return results
+
+    def list_restricted_titles_for_viewer(
+        self,
+        session: Session,
+        *,
+        project_id: uuid.UUID,
+        user_id: uuid.UUID,
+        has_project_manage: bool,
+    ) -> set[str]:
+        """Return titles of project evidence items that the viewer is NOT authorized to inspect.
+
+        Used to scrub restricted source titles that may appear inside derived
+        machine assessments (e.g., freshness supersession or contradiction candidates).
+        """
+        try:
+            restricted_candidates = (
+                session.execute(
+                    select(EvidenceItem)
+                    .outerjoin(
+                        SourceAccessPolicy,
+                        EvidenceItem.source_access_policy_id == SourceAccessPolicy.id,
+                    )
+                    .where(
+                        EvidenceItem.project_id == project_id,
+                        or_(
+                            EvidenceItem.acl_scope != "project_members",
+                            EvidenceItem.deleted_at.is_not(None),
+                            EvidenceItem.processing_status == EvidenceProcessingStatus.DELETED.value,
+                            SourceAccessPolicy.sync_permission_status
+                            == SourcePermissionVerificationStatus.REVOKED.value,
+                            SourceAccessPolicy.visibility_policy
+                            != SourceVisibilityPolicy.PROJECT_MEMBERS_VERIFIED.value,
+                        ),
+                    )
+                    .options(selectinload(EvidenceItem.source_access_policy))
+                )
+                .scalars()
+                .all()
+            )
+        except Exception:
+            logger.warning(
+                "Restricted-title lookup failed for project_id=%s",
+                project_id,
+            )
+            return set()
+
+        restricted_titles: set[str] = set()
+        for ev in restricted_candidates:
+            allowed = self.can_user_access_evidence_safe(
+                evidence=ev,
+                project_id=project_id,
+                user_id=user_id,
+                has_project_manage=has_project_manage,
+            )
+            if not allowed and ev.title and ev.title.strip():
+                restricted_titles.add(ev.title.strip())
+        return restricted_titles
 
     def enforce_evidence_access(
         self,
