@@ -1424,15 +1424,23 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   // Member actions
   const addMember = async (data: { email?: string; user_id?: string; role_name?: string; transition_role?: string }) => {
     if (!activeProject) throw new Error("No active project");
-    await api.members.add(activeProject.id, data);
+    const res = await api.members.add(activeProject.id, data);
     invalidateGraphCache("rel_");
     await refreshMembers();
     setIsAddMemberModalOpen(false);
-    addToast({
-      type: "success",
-      title: "Member Added",
-      message: "Team member joined the project workspace",
-    });
+    if (res && res.status === "invited") {
+      addToast({
+        type: "info",
+        title: "Invitation Sent",
+        message: `Project invitation issued for ${data.email || "new member"}`,
+      });
+    } else {
+      addToast({
+        type: "success",
+        title: "Member Added",
+        message: `${res?.full_name || data.email || "Team member"} joined the project workspace`,
+      });
+    }
   };
 
   const updateMember = async (memberId: string, data: { role_name?: string; transition_role?: string }) => {

@@ -273,13 +273,13 @@ function ProductIntroStory() {
 
 export function OnboardingPage() {
   const router = useRouter();
-  const { user } = useLiveApp();
+  const { user, activeOrg } = useLiveApp();
 
   const [step, setStep] = useState(0);
   const [profile, setProfile] = useState({
-    name: user?.full_name || "Maya Chen",
-    title: "Engineering Manager",
-    team: "Platform & Payments",
+    name: user?.full_name || user?.email?.split('@')[0] || "User",
+    title: "Project Lead",
+    team: "Engineering",
   });
   const [wsMode, setWsMode] = useState<"create" | "join">("join");
   const [wsName, setWsName] = useState("");
@@ -464,11 +464,11 @@ export function OnboardingPage() {
               {wsMode === "join" ? (
                 <div className="mt-5 flex items-center gap-3 rounded-xl border border-[#D9E1F0] p-4 bg-[#F6F8FC]/50">
                   <span className="flex size-10 items-center justify-center rounded-lg bg-[#203653] text-sm font-bold text-white">
-                    N
+                    {(activeOrg?.name || "O").charAt(0).toUpperCase()}
                   </span>
                   <div className="flex-1">
-                    <p className="text-sm font-semibold text-[#203653]">Northwind Labs</p>
-                    <p className="text-xs text-[#718096]">Invited by Tom Whitfield · 42 members</p>
+                    <p className="text-sm font-semibold text-[#203653]">{activeOrg?.name || "Your Organisation"}</p>
+                    <p className="text-xs text-[#718096]">Workspace active · Ready to collaborate</p>
                   </div>
                   <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 px-2.5 py-1 text-xs font-semibold text-[#299B80]">
                     <Check className="size-3.5" />

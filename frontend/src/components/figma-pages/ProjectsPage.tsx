@@ -800,7 +800,7 @@ export function ProjectTeam({ projectId }: { projectId: string }) {
   const [addOpen, setAddOpen] = useState(false)
   const [remove, setRemove] = useState<string | null>(null)
   const [newM, setNewM] = useState({ email: '', role: 'contributor' as MemberRole })
-  const [invites, setInvites] = useState([{ email: 'grace.liu@northwind.io', role: 'viewer' as MemberRole, sent: 'Jun 16' }])
+  const [invites, setInvites] = useState<{ email: string; role: MemberRole; sent: string }[]>([])
 
   if (!p) return <ProjectNotFound />
 
@@ -1001,7 +1001,7 @@ export function ProjectTeam({ projectId }: { projectId: string }) {
       >
         <div className="space-y-4">
           <Field label="Email or workspace member" hint="Workspace members are added immediately; others receive an invitation.">
-            <Input list="ws-people" value={newM.email} onChange={(e) => setNewM({ ...newM, email: e.target.value })} placeholder="name@northwind.io" />
+            <Input list="ws-people" value={newM.email} onChange={(e) => setNewM({ ...newM, email: e.target.value })} placeholder="colleague@company.com" />
             <datalist id="ws-people">
               {people.filter((x) => !members.some((m) => m.personId === x.id)).map((x) => (
                 <option key={x.id} value={x.email}>
@@ -1150,7 +1150,7 @@ function ProjectsPageInner({ view = 'list', id }: ProjectsPageProps) {
   const params = useParams()
   const s = useFigmaStore()
   const rawId = id || (Array.isArray(params?.id) ? params.id[0] : (params?.id as string | undefined))
-  const pid = (rawId || s.currentProject?.id || 'atlas') as string
+  const pid = (rawId || s.currentProject?.id || '') as string
 
   return (
     <>

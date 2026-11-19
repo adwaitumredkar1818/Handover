@@ -34,21 +34,9 @@ export interface Person {
   status: 'Active' | 'Invited' | 'Suspended'
 }
 
-export const ME = 'maya'
+export const ME = ''
 
-export const people: Person[] = [
-  { id: 'maya', name: 'Maya Chen', title: 'Engineering Manager', email: 'maya.chen@northwind.io', color: '#315FBA', wsRole: 'Owner', status: 'Active' },
-  { id: 'james', name: 'James Okafor', title: 'Staff Backend Engineer', email: 'james.okafor@northwind.io', color: '#299B80', wsRole: 'Member', status: 'Active' },
-  { id: 'priya', name: 'Priya Nair', title: 'Senior Backend Engineer', email: 'priya.nair@northwind.io', color: '#8B78C9', wsRole: 'Member', status: 'Active' },
-  { id: 'lucas', name: 'Lucas Berg', title: 'Platform Engineer', email: 'lucas.berg@northwind.io', color: '#B45309', wsRole: 'Admin', status: 'Active' },
-  { id: 'sofia', name: 'Sofia Alvarez', title: 'Mobile Lead', email: 'sofia.alvarez@northwind.io', color: '#B5728E', wsRole: 'Member', status: 'Active' },
-  { id: 'daniel', name: 'Daniel Kim', title: 'Mobile Engineer', email: 'daniel.kim@northwind.io', color: '#0369A1', wsRole: 'Member', status: 'Active' },
-  { id: 'aisha', name: 'Aisha Rahman', title: 'QA Engineer', email: 'aisha.rahman@northwind.io', color: '#4D7C0F', wsRole: 'Member', status: 'Active' },
-  { id: 'tom', name: 'Tom Whitfield', title: 'Product Manager', email: 'tom.whitfield@northwind.io', color: '#9333EA', wsRole: 'Admin', status: 'Active' },
-  { id: 'elena', name: 'Elena Petrova', title: 'Data Engineer', email: 'elena.petrova@northwind.io', color: '#C2410C', wsRole: 'Member', status: 'Active' },
-  { id: 'omar', name: 'Omar Haddad', title: 'Analytics Engineer', email: 'omar.haddad@northwind.io', color: '#1E40AF', wsRole: 'Member', status: 'Active' },
-  { id: 'grace', name: 'Grace Liu', title: 'Security Engineer', email: 'grace.liu@northwind.io', color: '#475569', wsRole: 'Member', status: 'Invited' },
-]
+export const people: Person[] = []
 
 export const registerPerson = (person: Person) => {
   if (!person || !person.id) return

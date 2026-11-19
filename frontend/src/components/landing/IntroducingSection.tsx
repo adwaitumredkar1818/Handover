@@ -65,13 +65,13 @@ const STAGES = [
 export function IntroducingSection() {
   const revealRef = useReveal<HTMLDivElement>();
   const { ref: scrollRef, progress: scrollProgress } = useElementScrollProgress<HTMLElement>({
-    startOffset: 0.85,
-    endOffset: 0.2,
+    mode: "pinned",
+    navOffset: 64,
   });
   const reducedMotion = useReducedMotion();
 
   const scrollDerivedStage: 1 | 2 | 3 =
-    scrollProgress < 0.38 ? 1 : scrollProgress < 0.72 ? 2 : 3;
+    scrollProgress < 0.35 ? 1 : scrollProgress < 0.70 ? 2 : 3;
 
   const [activeStage, setActiveStage] = useState<1 | 2 | 3>(1);
 
@@ -93,87 +93,97 @@ export function IntroducingSection() {
     <section
       ref={scrollRef}
       id="introducing"
-      className="ambient-section relative overflow-x-clip py-24 sm:py-32 bg-[#F8FAFD] border-y border-[#D9E1F0]/70"
+      className="ambient-section relative overflow-x-clip bg-[#F8FAFD] border-y border-[#D9E1F0]/70 py-16 lg:py-0 lg:h-[260vh] motion-reduce:py-24 motion-reduce:sm:py-32 motion-reduce:lg:h-auto"
     >
-      <div ref={revealRef} className="mx-auto w-full max-w-[1240px] px-5 sm:px-8">
-        {/* Section Heading */}
-        <div className="mx-auto max-w-3xl text-center">
-          <div className="reveal flex justify-center">
-            <p className="flex items-center gap-2 text-[12.5px] font-semibold uppercase tracking-[0.16em] text-[#315FBA]">
-              <span className="h-px w-6 bg-current opacity-60" />
-              Introducing Handover
+      <div className="lg:sticky lg:top-16 lg:h-[calc(100vh-4rem)] lg:flex lg:flex-col lg:justify-center motion-reduce:lg:static motion-reduce:lg:h-auto motion-reduce:lg:flex-initial">
+        <div ref={revealRef} className="mx-auto w-full max-w-[1240px] px-5 sm:px-8">
+          {/* Section Heading */}
+          <div className="mx-auto max-w-3xl text-center">
+            <div className="reveal flex justify-center">
+              <p className="flex items-center gap-2 text-[12.5px] font-semibold uppercase tracking-[0.16em] text-[#315FBA]">
+                <span className="h-px w-6 bg-current opacity-60" />
+                Introducing Handover
+              </p>
+            </div>
+            <h2 className="reveal mt-3 sm:mt-4 text-[30px] font-semibold leading-[1.08] tracking-[-0.035em] text-[#203653] sm:text-[38px] lg:text-[44px]">
+              One system. Complete project understanding.
+            </h2>
+            <p className="reveal mx-auto mt-3 sm:mt-4 max-w-2xl text-[15px] sm:text-[16px] leading-[1.6] text-[#56657c]">
+              Handover connects authorized organizational sources, reconstructs fragmented context into structured records with full provenance, surfaces conflicts, and produces auditable transition packages.
             </p>
+            {/* Desktop Pinned Scroll Progress Indicator */}
+            <div className="reveal hidden lg:flex items-center justify-center gap-2 mt-2 font-mono text-[11px] text-[#718096]">
+              <span className={`size-1.5 rounded-full ${activeStage === 3 ? "bg-[#299B80]" : "bg-[#315FBA] animate-pulse"}`} />
+              <span>
+                {activeStage === 3
+                  ? "Stage 03 of 03 · Verified Knowledge · Scroll to continue ↓"
+                  : `Stage 0${activeStage} of 03 · Scroll to advance or select stage`}
+              </span>
+            </div>
           </div>
-          <h2 className="reveal mt-5 text-[34px] font-semibold leading-[1.06] tracking-[-0.035em] text-[#203653] sm:text-[44px] lg:text-[52px]">
-            One system. Complete project understanding.
-          </h2>
-          <p className="reveal mx-auto mt-6 max-w-2xl text-[17px] leading-[1.65] text-[#56657c]">
-            Handover connects authorized organizational sources, reconstructs fragmented context into structured records with full provenance, surfaces conflicts, and produces auditable transition packages.
-          </p>
-        </div>
 
-        {/* 3-Stage Interactive Stepper Bar */}
-        <div className="reveal mt-12 flex justify-center">
-          <div className="inline-flex max-w-full overflow-x-auto rounded-2xl border border-[#D9E1F0] bg-white p-1.5 shadow-sm">
-            {STAGES.map((st) => {
-              const isActive = activeStage === st.num;
-              const isVerified = st.num === 3;
-              return (
-                <button
-                  key={st.num}
-                  type="button"
-                  onClick={() => setActiveStage(st.num)}
-                  className={`flex items-center gap-2.5 rounded-xl px-4 py-2.5 text-left transition-all duration-300 cursor-pointer shrink-0 ${
-                    isActive
-                      ? isVerified
-                        ? "bg-teal-50 text-[#1d6e5b] shadow-xs ring-1 ring-teal-500/30"
-                        : "bg-blue-50 text-[#315FBA] shadow-xs ring-1 ring-blue-500/30"
-                      : "text-[#56657c] hover:bg-slate-50 hover:text-[#203653]"
-                  }`}
-                >
-                  <span
-                    className={`flex size-6 items-center justify-center rounded-lg font-mono text-[11px] font-bold ${
+          {/* 3-Stage Interactive Stepper Bar */}
+          <div className="reveal mt-6 lg:mt-8 flex justify-center">
+            <div className="inline-flex max-w-full overflow-x-auto rounded-2xl border border-[#D9E1F0] bg-white p-1.5 shadow-sm">
+              {STAGES.map((st) => {
+                const isActive = activeStage === st.num;
+                const isVerified = st.num === 3;
+                return (
+                  <button
+                    key={st.num}
+                    type="button"
+                    onClick={() => setActiveStage(st.num)}
+                    className={`flex items-center gap-2.5 rounded-xl px-4 py-2 text-left transition-all duration-300 cursor-pointer shrink-0 ${
                       isActive
                         ? isVerified
-                          ? "bg-[#299B80] text-white"
-                          : "bg-[#315FBA] text-white"
-                        : "bg-slate-100 text-[#718096]"
+                          ? "bg-teal-50 text-[#1d6e5b] shadow-xs ring-1 ring-teal-500/30"
+                          : "bg-blue-50 text-[#315FBA] shadow-xs ring-1 ring-blue-500/30"
+                        : "text-[#56657c] hover:bg-slate-50 hover:text-[#203653]"
                     }`}
                   >
-                    0{st.num}
-                  </span>
-                  <span className="text-[13px] font-semibold whitespace-nowrap">
-                    {st.title}
-                  </span>
-                </button>
-              );
-            })}
+                    <span
+                      className={`flex size-6 items-center justify-center rounded-lg font-mono text-[11px] font-bold ${
+                        isActive
+                          ? isVerified
+                            ? "bg-[#299B80] text-white"
+                            : "bg-[#315FBA] text-white"
+                          : "bg-slate-100 text-[#718096]"
+                      }`}
+                    >
+                      0{st.num}
+                    </span>
+                    <span className="text-[13px] font-semibold whitespace-nowrap">
+                      {st.title}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
 
-        {/* Unified Interactive Transformation Workspace */}
-        <div className="reveal mt-10 rounded-[28px] border border-[#D9E1F0] bg-white p-6 sm:p-8 lg:p-10 shadow-pop">
-          <div className="grid gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
-            {/* Left Column: Active Stage Demonstration Details */}
-            <div className="space-y-6">
-              <div>
-                <span
-                  className={`font-mono text-[11px] font-semibold uppercase tracking-wider ${
-                    activeStage === 3 ? "text-[#299B80]" : "text-[#315FBA]"
-                  }`}
-                >
-                  {currentStage.tag}
-                </span>
-                <h3 className="mt-2 text-[26px] sm:text-[30px] font-semibold tracking-[-0.025em] text-[#203653]">
-                  {currentStage.subtitle}
-                </h3>
-                <p className="mt-3 text-[15px] leading-relaxed text-[#56657c]">
-                  {currentStage.description}
-                </p>
-              </div>
+          {/* Unified Interactive Transformation Workspace */}
+          <div className="reveal mt-6 lg:mt-7 rounded-[28px] border border-[#D9E1F0] bg-white p-5 sm:p-7 lg:p-8 shadow-pop">
+            <div className="grid gap-8 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
+              {/* Left Column: Active Stage Demonstration Details */}
+              <div className="space-y-4">
+                <div>
+                  <span
+                    className={`font-mono text-[11px] font-semibold uppercase tracking-wider ${
+                      activeStage === 3 ? "text-[#299B80]" : "text-[#315FBA]"
+                    }`}
+                  >
+                    {currentStage.tag}
+                  </span>
+                  <h3 className="mt-1 text-[22px] sm:text-[26px] font-semibold tracking-[-0.025em] text-[#203653]">
+                    {currentStage.subtitle}
+                  </h3>
+                  <p className="mt-2 text-[14px] leading-relaxed text-[#56657c]">
+                    {currentStage.description}
+                  </p>
+                </div>
 
-              {/* Stage-Specific Visual Artifact Container */}
-              <div className="rounded-2xl border border-[#D9E1F0] bg-[#F8FAFD] p-5 shadow-xs">
+                {/* Stage-Specific Visual Artifact Container */}
+                <div className="rounded-2xl border border-[#D9E1F0] bg-[#F8FAFD] p-4 shadow-xs">
                 {activeStage === 1 && (
                   <div className="space-y-3">
                     <p className="font-mono text-[11px] font-semibold uppercase tracking-wider text-[#718096] mb-3">
@@ -337,6 +347,7 @@ export function IntroducingSection() {
           </div>
         </div>
       </div>
+    </div>
     </section>
   );
 }

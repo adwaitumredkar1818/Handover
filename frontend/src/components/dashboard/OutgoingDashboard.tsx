@@ -31,10 +31,10 @@ export function OutgoingDashboard() {
   if (!project) return null;
 
   // Real data resolution
-  const readinessPct = overview?.readiness.overall_readiness_pct || 45;
+  const readinessPct = overview?.readiness.overall_readiness_pct || 0;
   const attentionItems = overview?.attention_items || [];
   const recentActivities = overview?.recent_activity || [];
-  const targetDate = overview?.target_handover_date || project.target_handover_date || "End of month";
+  const targetDate = overview?.target_handover_date || project.target_handover_date || "Not set";
 
   // Identify incoming successor from members list
   const successorMember = members.find((m) => m.transition_role === "incoming_assignee");
@@ -45,7 +45,7 @@ export function OutgoingDashboard() {
   const totalRisks = overview?.knowledge.risks_count || 0;
   const totalEvid = overview?.evidence.total_evidence_items || evidenceList.length;
 
-  const pendingVerificationCount = attentionItems.filter((a) => a.type?.toLowerCase().includes("verif") || a.type?.toLowerCase().includes("review")).length || Math.max(1, attentionItems.length);
+  const pendingVerificationCount = attentionItems.filter((a) => a.type?.toLowerCase().includes("verif") || a.type?.toLowerCase().includes("review")).length || attentionItems.length;
   const missingInfoCount = attentionItems.filter((a) => a.type?.toLowerCase().includes("gap") || a.type?.toLowerCase().includes("missing")).length;
 
   // 5-step checklist

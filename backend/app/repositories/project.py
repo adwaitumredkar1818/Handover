@@ -246,12 +246,12 @@ class ProjectRepository:
         project_id: uuid.UUID,
         departing_user_id: uuid.UUID,
         successor_user_id: uuid.UUID,
-        workflow_stage: str,
-        handover_scope: str | None,
-        source_scope: list[str] | None,
-        capture_start_date: date | None,
-        capture_end_date: date | None,
-        context_notes: str | None,
+        workflow_stage: str = "connect",
+        handover_scope: str | None = None,
+        source_scope: list[str] | None = None,
+        capture_start_date: date | None = None,
+        capture_end_date: date | None = None,
+        context_notes: str | None = None,
     ) -> ProjectTransition:
         transition = self.get_transition(project_id)
         if transition is None:
@@ -259,7 +259,7 @@ class ProjectRepository:
                 project_id=project_id,
                 departing_user_id=departing_user_id,
                 successor_user_id=successor_user_id,
-                workflow_stage=workflow_stage,
+                workflow_stage=workflow_stage or "connect",
                 handover_scope=handover_scope,
                 source_scope=source_scope,
                 capture_start_date=capture_start_date,
@@ -270,12 +270,18 @@ class ProjectRepository:
         else:
             transition.departing_user_id = departing_user_id
             transition.successor_user_id = successor_user_id
-            transition.workflow_stage = workflow_stage
-            transition.handover_scope = handover_scope
-            transition.source_scope = source_scope
-            transition.capture_start_date = capture_start_date
-            transition.capture_end_date = capture_end_date
-            transition.context_notes = context_notes
+            if workflow_stage is not None:
+                transition.workflow_stage = workflow_stage
+            if handover_scope is not None:
+                transition.handover_scope = handover_scope
+            if source_scope is not None:
+                transition.source_scope = source_scope
+            if capture_start_date is not None:
+                transition.capture_start_date = capture_start_date
+            if capture_end_date is not None:
+                transition.capture_end_date = capture_end_date
+            if context_notes is not None:
+                transition.context_notes = context_notes
         self._session.flush()
         return transition
 

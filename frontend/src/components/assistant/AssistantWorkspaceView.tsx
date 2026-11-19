@@ -712,7 +712,7 @@ export function AssistantWorkspaceView() {
               <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-slate-900 truncate">
-                    {activeProject?.name || "Skillpassport"}
+                    {activeProject?.name || "Project Workspace"}
                   </span>
                   <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
                     Active

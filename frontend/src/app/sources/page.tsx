@@ -1,8 +1,7 @@
-'use client'
+"use client";
 
-import React from 'react'
-import { KnowledgePage } from '../../components/figma-pages/KnowledgePage'
+import { ConnectedSourcesView } from "../../components/views/ConnectedSourcesView";
 
-export default function SourcesRoute() {
-  return <KnowledgePage view="sources" />
+export default function SourcesPage() {
+  return <ConnectedSourcesView />;
 }

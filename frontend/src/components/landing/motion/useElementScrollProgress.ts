@@ -4,9 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import { useReducedMotion } from "./useReducedMotion";
 
 export interface ElementScrollOptions {
-  /** Offset factor relative to viewport height when tracking starts/ends */
+  /** "standard" for natural element traversal, "pinned" for sticky scroll tracks */
+  mode?: "standard" | "pinned";
+  /** Offset factor relative to viewport height when tracking starts/ends (standard mode) */
   startOffset?: number;
   endOffset?: number;
+  /** Navbar or top offset in pixels where the element sticks (pinned mode, default 64) */
+  navOffset?: number;
 }
 
 export interface ElementScrollState<T extends HTMLElement> {
@@ -19,17 +23,17 @@ export interface ElementScrollState<T extends HTMLElement> {
 
 /**
  * Tracks an element's scroll progression (0 -> 1) cleanly via requestAnimationFrame.
- * Ideal for sticky storytelling sections, scroll-driven canvas morphing, and dossier assembly.
+ * Supports both standard element pass-through and pinned sticky scroll tracks.
  * Respects `prefers-reduced-motion: reduce` by returning static completion state (`progress: 1`).
  */
 export function useElementScrollProgress<T extends HTMLElement>(
   options: ElementScrollOptions = {}
 ): ElementScrollState<T> {
-  const { startOffset = 0.85, endOffset = 0.2 } = options;
+  const { mode = "standard", startOffset = 0.85, endOffset = 0.2, navOffset = 64 } = options;
   const ref = useRef<T | null>(null);
   const reducedMotion = useReducedMotion();
   const [state, setState] = useState<{ progress: number; isInView: boolean }>({
-    progress: reducedMotion ? 1 : 0,
+    progress: 0,
     isInView: false,
   });
 
@@ -63,10 +67,19 @@ export function useElementScrollProgress<T extends HTMLElement>(
       }
 
       const isInView = rect.top < vh && rect.bottom > 0;
-      const totalTravel = Math.max(1, rect.height + vh * (startOffset - endOffset));
-      const traveled = vh * startOffset - rect.top;
-      const raw = traveled / totalTravel;
-      const progress = Math.max(0, Math.min(1, Number(raw.toFixed(3))));
+      let progress = 0;
+
+      if (mode === "pinned") {
+        const pinDistance = Math.max(1, rect.height - vh + navOffset);
+        const traveled = navOffset - rect.top;
+        const raw = traveled / pinDistance;
+        progress = Math.max(0, Math.min(1, Number(raw.toFixed(3))));
+      } else {
+        const totalTravel = Math.max(1, rect.height + vh * (startOffset - endOffset));
+        const traveled = vh * startOffset - rect.top;
+        const raw = traveled / totalTravel;
+        progress = Math.max(0, Math.min(1, Number(raw.toFixed(3))));
+      }
 
       if (Math.abs(progress - lastProgress) >= 0.005 || isInView !== lastInView) {
         lastProgress = progress;
@@ -90,7 +103,7 @@ export function useElementScrollProgress<T extends HTMLElement>(
       window.removeEventListener("scroll", scheduleMeasure);
       window.removeEventListener("resize", scheduleMeasure);
     };
-  }, [startOffset, endOffset, reducedMotion]);
+  }, [mode, startOffset, endOffset, navOffset, reducedMotion]);
 
   return {
     ref,

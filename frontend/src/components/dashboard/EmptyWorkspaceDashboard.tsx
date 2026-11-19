@@ -29,7 +29,7 @@ export function EmptyWorkspaceDashboard() {
     setIsCreateOrgModalOpen,
   } = useLiveApp();
 
-  const orgName = activeOrg?.name || (organisations[0]?.name ?? "Workspace Sandbox");
+  const orgName = activeOrg?.name || (organisations[0]?.name ?? "Your Workspace");
 
   const steps = [
     {

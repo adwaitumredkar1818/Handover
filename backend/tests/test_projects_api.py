@@ -350,3 +350,81 @@ def test_project_lifecycle_ownership_and_member_role_management(
         assert "project.archived" in types
         assert "project.member.added" in types
         assert "project.member.removed" in types
+
+
+def test_add_project_member_by_email_and_invitation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with isolated_auth_app(monkeypatch) as ctx, TestClient(ctx.app) as client:
+        owner = register_and_login_user(
+            client,
+            email="manager@tenanta.com",
+            full_name="Project Manager",
+        )
+        colleague = register_and_login_user(
+            client,
+            email="adwaitumredkar1818@gmail.com",
+            full_name="Adwait Umredkar",
+        )
+
+        org_res = client.post(
+            "/api/v1/organisations",
+            headers=owner.headers,
+            json={"name": "Handover Platform Org"},
+        )
+        assert org_res.status_code == 201
+        org_id = org_res.json()["id"]
+
+        proj_res = client.post(
+            f"/api/v1/organisations/{org_id}/projects",
+            headers=owner.headers,
+            json={
+                "name": "Payment Platform",
+                "visibility": "private",
+                "status": "active",
+            },
+        )
+        assert proj_res.status_code == 201
+        proj_id = proj_res.json()["id"]
+
+        # 1. Add existing registered colleague by email only (no user_id passed)
+        add_colleague = client.post(
+            f"/api/v1/projects/{proj_id}/members",
+            headers=owner.headers,
+            json={
+                "email": "adwaitumredkar1818@gmail.com",
+                "role_name": "project_contributor",
+                "transition_role": "incoming_assignee",
+            },
+        )
+        assert add_colleague.status_code == 201
+        data = add_colleague.json()
+        assert data["email"] == "adwaitumredkar1818@gmail.com"
+        assert data["role_name"] == "project_member"
+        assert data["status"] == "active"
+        assert data["user_id"] == str(colleague.user_id)
+
+        # 2. Add an unregistered external user by email -> auto generates project invitation
+        add_unregistered = client.post(
+            f"/api/v1/projects/{proj_id}/members",
+            headers=owner.headers,
+            json={
+                "email": "new.colleague@external.com",
+                "role_name": "project_viewer",
+            },
+        )
+        assert add_unregistered.status_code == 201
+        unreg_data = add_unregistered.json()
+        assert unreg_data["email"] == "new.colleague@external.com"
+        assert unreg_data["status"] == "invited"
+
+        # 3. Supplying neither user_id nor email fails validation (422)
+        bad_req = client.post(
+            f"/api/v1/projects/{proj_id}/members",
+            headers=owner.headers,
+            json={
+                "role_name": "project_contributor",
+            },
+        )
+        assert bad_req.status_code == 422
+

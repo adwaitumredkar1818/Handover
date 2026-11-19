@@ -1,22 +1,44 @@
 "use client";
 
-import React, { useState } from "react";
-import { X, Users, Mail, ArrowRight, AlertCircle } from "lucide-react";
+import React, { useState, useEffect, useMemo } from "react";
+import { X, Users, Mail, ArrowRight, AlertCircle, CheckCircle2, Info } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
+import { api } from "../../lib/api";
+import type { OrganisationMember } from "../../lib/types";
 
 export function AddMemberModal() {
-  const { isAddMemberModalOpen, setIsAddMemberModalOpen, addMember } = useLiveApp();
+  const { isAddMemberModalOpen, setIsAddMemberModalOpen, addMember, activeOrg } = useLiveApp();
   const [email, setEmail] = useState("");
-  const [roleName, setRoleName] = useState("project_contributor");
+  const [roleName, setRoleName] = useState("project_member");
   const [transitionRole, setTransitionRole] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [orgMembers, setOrgMembers] = useState<OrganisationMember[]>([]);
+
+  useEffect(() => {
+    if (isAddMemberModalOpen && activeOrg?.id) {
+      api.organisations
+        .listMembers(activeOrg.id)
+        .then((members) => setOrgMembers(members || []))
+        .catch((err) => {
+          console.warn("Could not prefetch organisation members:", err);
+          setOrgMembers([]);
+        });
+    }
+  }, [isAddMemberModalOpen, activeOrg?.id]);
+
+  const matchedMember = useMemo(() => {
+    const clean = email.trim().toLowerCase();
+    if (!clean) return null;
+    return orgMembers.find((m) => m.email.toLowerCase() === clean) || null;
+  }, [email, orgMembers]);
 
   if (!isAddMemberModalOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim()) {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail) {
       setError("Email address is required");
       return;
     }
@@ -24,7 +46,8 @@ export function AddMemberModal() {
     setIsSubmitting(true);
     try {
       await addMember({
-        email: email.trim(),
+        email: cleanEmail,
+        user_id: matchedMember?.user_id,
         role_name: roleName,
         transition_role: transitionRole || undefined,
       });
@@ -76,10 +99,30 @@ export function AddMemberModal() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                list="org-members-datalist"
                 placeholder="colleague@organization.com"
                 className="w-full pl-9 pr-3 py-2 rounded-lg border border-[#DCE3EB] text-xs focus:outline-none focus:ring-2 focus:ring-[#4774A9] text-[#25334B]"
               />
+              <datalist id="org-members-datalist">
+                {orgMembers.map((m) => (
+                  <option key={m.id} value={m.email}>
+                    {m.full_name} ({m.email})
+                  </option>
+                ))}
+              </datalist>
             </div>
+
+            {matchedMember ? (
+              <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-emerald-700 font-medium">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>Colleague found: {matchedMember.full_name}</span>
+              </div>
+            ) : email.includes("@") && email.trim().length > 4 ? (
+              <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[#4774A9] font-medium">
+                <Info className="w-3.5 h-3.5 text-[#4774A9] shrink-0" />
+                <span>New collaborator: A project invitation will be issued.</span>
+              </div>
+            ) : null}
           </div>
 
           <div>
@@ -91,10 +134,9 @@ export function AddMemberModal() {
               onChange={(e) => setRoleName(e.target.value)}
               className="w-full px-3 py-2 rounded-lg border border-[#DCE3EB] text-xs focus:outline-none focus:ring-2 focus:ring-[#4774A9] text-[#25334B] bg-white"
             >
-              <option value="project_admin">Project Admin (Full Workspace Control)</option>
-              <option value="project_lead">Project Lead (Manage Members &amp; Approvals)</option>
-              <option value="project_contributor">Project Contributor (Upload &amp; Verify)</option>
-              <option value="project_viewer">Project Viewer (Read-only)</option>
+              <option value="project_member">Project Member (Upload &amp; Verify Evidence)</option>
+              <option value="project_manager">Project Manager (Workspace Admin &amp; Approvals)</option>
+              <option value="reviewer">Handover Reviewer (Verification &amp; Sign-off)</option>
             </select>
           </div>
 

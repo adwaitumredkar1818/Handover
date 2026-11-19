@@ -45,12 +45,12 @@ function Link({ to, href, className, children, onClick }: { to?: string; href?: 
 
 /* ---------- 10. Data Sources Constants & Connect Modal ---------- */
 const REPOS: Record<SourceType, string[]> = {
-  github: ['atlas-ledger', 'atlas-settlement', 'atlas-gateway', 'atlas-infra', 'payments-sdk-js', 'northwind-docs'],
-  jira: ['PAY · Payments', 'PAYOPS · Payments Ops', 'SEC · Security', 'PLAT · Platform'],
-  slack: ['#payments-arch', '#payments-oncall', '#incidents', '#eng-general', '#releases'],
+  github: [],
+  jira: [],
+  slack: [],
   docs: [],
-  confluence: ['ENG · Engineering', 'PAY · Payments space', 'OPS · Runbooks'],
-  gdrive: ['Payments / Architecture', 'Payments / Vendor contracts'],
+  confluence: [],
+  gdrive: [],
 }
 
 const SCOPES: Record<SourceType, string[]> = {
@@ -87,7 +87,7 @@ function ConnectFlow({ type, projectId, onClose }: { type: SourceType; projectId
         projectId,
         type,
         name: meta.label,
-        account: isUpload ? 'Manual uploads' : type === 'slack' ? 'Northwind HQ' : 'northwind-eng',
+        account: isUpload ? 'Manual uploads' : type === 'slack' ? 'Slack Workspace' : 'Connected',
         status: 'syncing',
         lastSync: 'Syncing now',
         records: 0,
@@ -672,7 +672,7 @@ export function SourceDetail({ projectId, sourceId }: { projectId: string; sourc
         <div className="mb-5">
           <ErrorState
             title="Authorisation expired"
-            body="The Slack token for Northwind HQ was revoked on Jun 16. 0 of 3 channels are syncing."
+            body="The Slack authorization token was revoked. Reconnect to resume syncing."
             action={canManage && <Button size="sm" variant="danger" onClick={reconnect}>{syncing ? 'Reconnecting…' : 'Reconnect Slack'}</Button>}
           />
         </div>

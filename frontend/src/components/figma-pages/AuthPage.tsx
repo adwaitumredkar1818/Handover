@@ -340,8 +340,8 @@ export function Login() {
 
   const registered = searchParams ? searchParams.get('registered') === '1' : false
   const oauthError = searchParams ? searchParams.get('oauth_error') : null
-  const [email, setEmail] = useState('maya.chen@northwind.io')
-  const [pw, setPw] = useState('handover-demo')
+  const [email, setEmail] = useState('')
+  const [pw, setPw] = useState('')
   const [remember, setRemember] = useState(true)
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
@@ -368,19 +368,11 @@ export function Login() {
       s.setAuthed(true)
       router.push(registered ? '/onboarding' : '/overview')
     } catch (apiErr: unknown) {
-      // If live backend credentials fail (e.g. mock account vs real backend account),
-      // allow fallback to the Figma demo state while informing user
       const msg =
         apiErr instanceof Error
           ? apiErr.message
           : 'Unable to sign in. Please verify your credentials.'
-      // Fallback for seamless developer testing of the demo account:
-      if (cleanEmail === 'maya.chen@northwind.io') {
-        s.setAuthed(true)
-        router.push(registered ? '/onboarding' : '/overview')
-      } else {
-        setErr(msg)
-      }
+      setErr(msg)
     } finally {
       setLoading(false)
     }
@@ -599,7 +591,7 @@ export function Signup() {
           <Input
             value={f.name}
             onChange={(e) => setF({ ...f, name: e.target.value })}
-            placeholder="Maya Chen"
+            placeholder="Jane Doe"
             invalid={touched && !!errors.name}
           />
         </Field>
@@ -1213,9 +1205,9 @@ export function Onboarding() {
 
   const [step, setStep] = useState(0)
   const [profile, setProfile] = useState({
-    name: user?.full_name || 'Maya Chen',
-    title: 'Engineering Manager',
-    team: 'Payments',
+    name: user?.full_name || user?.email?.split('@')[0] || 'User',
+    title: 'Project Lead',
+    team: 'Engineering',
   })
   const [wsMode, setWsMode] = useState<'create' | 'join'>('join')
   const [wsName, setWsName] = useState('')
@@ -1292,14 +1284,14 @@ export function Onboarding() {
             ...ps,
             {
               id: newProj.id,
-              workspaceId: targetOrg?.id || 'northwind',
+              workspaceId: targetOrg?.id || 'workspace',
               name: newProj.name,
               code: newProj.name.slice(0, 3).toUpperCase(),
               description: newProj.description || 'New project created during onboarding.',
               category: proj.category,
               status: 'planning',
               health: 0,
-              ownerId: user?.id || 'maya',
+              ownerId: user?.id || 'owner',
               role: role,
               lastActivity: 'Just now',
               coverage: 0,
@@ -1516,14 +1508,14 @@ export function Onboarding() {
               {wsMode === 'join' ? (
                 <div className="mt-5 flex items-center gap-3 rounded-xl border border-line p-4">
                   <span className="flex size-10 items-center justify-center rounded-lg bg-navy text-sm font-bold text-white">
-                    N
+                    {(activeOrg?.name || 'O').charAt(0).toUpperCase()}
                   </span>
                   <div className="flex-1">
                     <p className="text-sm font-semibold text-navy">
-                      Northwind Labs
+                      {activeOrg?.name || 'Your Organisation'}
                     </p>
                     <p className="text-xs text-muted">
-                      Invited by Tom Whitfield · 42 members
+                      Workspace active · Ready to collaborate
                     </p>
                   </div>
                   <Badge tone="green" icon={Check}>

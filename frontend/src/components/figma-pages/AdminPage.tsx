@@ -966,6 +966,7 @@ export function Settings() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const s = useFigmaStore()
+  const { activeOrg, user } = useLiveApp()
   const activeTabParam = searchParams ? searchParams.get('tab') : null
   const [tab, setTab] = useState<STab>(
     (activeTabParam as STab) || 'general',
@@ -975,8 +976,8 @@ export function Settings() {
     lang: 'English (UK)',
     tz: 'Europe/London',
     date: 'DD MMM YYYY',
-    wsName: 'Northwind Labs',
-    domain: 'northwind.io',
+    wsName: activeOrg?.name || 'Your Organisation',
+    domain: activeOrg?.slug ? `${activeOrg.slug}.com` : 'organisation.com',
     autoJoin: true,
     threshold: 70,
     requireVerify: true,
@@ -1418,7 +1419,8 @@ export function Profile() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const s = useFigmaStore()
-  const me = personById(ME) ?? people[0]
+  const { user } = useLiveApp()
+  const me = personById(user?.id || ME) ?? people[0]
   const initialTab =
     (searchParams?.get('tab') as
       | 'profile'
@@ -1429,10 +1431,10 @@ export function Profile() {
     initialTab,
   )
   const [f, setF] = useState({
-    name: me?.name ?? '',
-    title: me?.title ?? '',
-    email: me?.email ?? '',
-    phone: '+44 20 7946 0321',
+    name: user?.full_name || me?.name || '',
+    title: user?.roles?.[0] || me?.title || 'Member',
+    email: user?.email || me?.email || '',
+    phone: '',
   })
   const [pw, setPw] = useState({ cur: '', next: '', confirm: '' })
   const [sessions, setSessions] = useState([
@@ -1682,8 +1684,8 @@ export function Profile() {
       {tab === 'accounts' && (
         <Card className="divide-y divide-line">
           {[
-            { t: 'github' as SourceType, acc: '@mayachen', on: true },
-            { t: 'jira' as SourceType, acc: 'maya.chen@northwind.io', on: true },
+            { t: 'github' as SourceType, acc: '', on: false },
+            { t: 'jira' as SourceType, acc: user?.email || '', on: false },
             { t: 'slack' as SourceType, acc: '', on: false },
           ].map((a) => (
             <div key={a.t} className="flex items-center gap-4 p-5">
