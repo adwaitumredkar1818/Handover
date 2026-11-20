@@ -63,6 +63,13 @@ class PackageAssemblyRequest(BaseModel):
     include_domains: list[str] | None = None
     exclude_knowledge_item_ids: list[uuid.UUID] | None = None
     exclude_relationship_ids: list[uuid.UUID] | None = None
+    include_provisional_draft: bool = Field(
+        default=False,
+        description=(
+            "When true on an unapproved draft case, include pending-review findings with "
+            "explicit provisional labels alongside human-verified findings."
+        ),
+    )
 
 
 class ReadinessAssessmentRequest(BaseModel):
@@ -559,6 +566,19 @@ class HandoverMandatorySectionResponse(BaseModel):
     pending_verification_count: int = 0
 
 
+class HandoverStartHereBriefing(BaseModel):
+    """Executive 'Start Here' briefing synthesised deterministically for incoming successors."""
+
+    what_is_this_project: str
+    what_has_been_built: str
+    how_does_it_work: str
+    what_is_the_current_state: str
+    what_to_understand_first: str
+    where_to_start: str
+    role_guidance: str = ""
+    is_provisional_draft: bool = False
+
+
 class HandoverVersionSectionsResponse(BaseModel):
     """Canonical response for GET /cases/{case_id}/versions/{version_id}/sections."""
 
@@ -574,6 +594,9 @@ class HandoverVersionSectionsResponse(BaseModel):
     handover_type_label: str = "Developer Handover"
     role_focus_summary: str = ""
     mandatory_sections: list[HandoverMandatorySectionResponse] = Field(default_factory=list)
+    start_here_briefing: HandoverStartHereBriefing | None = None
+    total_underlying_findings: int = 0
+    composed_card_count: int = 0
 
 
 class HandoverReadinessAssessmentResponse(BaseModel):

@@ -53,6 +53,7 @@ from app.services.handover_sections import (
     HANDOVER_ROLE_CONFIG,
     HandoverSectionReadService,
     build_mandatory_ten_sections,
+    build_start_here_briefing,
     normalize_handover_type,
     redact_secrets,
 )
@@ -223,6 +224,10 @@ class HandoverExportService:
 
         sections: list[dict[str, Any]] = []
         mandatory_sections_out: list[dict[str, Any]] = []
+        start_here_out: dict[str, Any] | None = None
+        epistemic_summary_out: dict[str, Any] | None = None
+        total_underlying_findings = 0
+        composed_card_count = 0
         total_omitted_restricted = 0
         total_accessible_items = 0
         resolved_role = normalize_handover_type(
@@ -394,6 +399,24 @@ class HandoverExportService:
                 omit_restricted_items=True,
             )
             mandatory_sections_out = [m.model_dump(mode="json") for m in mandatory_objs]
+            has_provisional = any(
+                (ki.epistemic_status != "human_verified" or ki.review_status != "approved")
+                for m in mandatory_objs
+                for ki in m.knowledge_items
+            )
+            start_here_out = build_start_here_briefing(
+                mandatory_sections=mandatory_objs,
+                domain_context_overview=overview_ctx,
+                team_members_ctx=team_members_ctx,
+                transfers_ctx=transfers_ctx,
+                handover_type=resolved_role,
+                is_provisional_draft=has_provisional,
+            ).model_dump(mode="json")
+            epistemic_summary_out = hydrated.epistemic_summary.model_dump(mode="json")
+            total_underlying_findings = hydrated.total_underlying_findings
+            composed_card_count = len(mandatory_objs) and sum(
+                len(m.knowledge_items) for m in mandatory_objs
+            )
 
         signoffs = (
             self.session.query(HandoverSignoff)
@@ -485,6 +508,10 @@ class HandoverExportService:
             "accessible_items_count": total_accessible_items,
             "sections": sections,
             "mandatory_sections": mandatory_sections_out,
+            "start_here_briefing": start_here_out,
+            "epistemic_summary": epistemic_summary_out,
+            "total_underlying_findings": total_underlying_findings,
+            "composed_card_count": composed_card_count,
             "signoffs": signoff_list,
             "exported_at": datetime.now(UTC).isoformat(),
         }
@@ -537,6 +564,29 @@ class HandoverExportService:
             lines.extend([
                 "## Overview",
                 data["description"],
+                "",
+                "---",
+                "",
+            ])
+
+        briefing = data.get("start_here_briefing")
+        if isinstance(briefing, dict):
+            lines.extend([
+                "## Start Here — Executive Project Briefing",
+                "",
+            ])
+            if briefing.get("is_provisional_draft"):
+                lines.append(
+                    "> *Provisional Draft Notice*: Includes pending-review findings clearly separated from human-verified facts."
+                )
+                lines.append("")
+            lines.extend([
+                f"- **What is this project?**: {briefing.get('what_is_this_project', '')}",
+                f"- **What has been built?**: {briefing.get('what_has_been_built', '')}",
+                f"- **How does it work?**: {briefing.get('how_does_it_work', '')}",
+                f"- **What is the current state?**: {briefing.get('what_is_the_current_state', '')}",
+                f"- **What should you understand first?**: {briefing.get('what_to_understand_first', '')}",
+                f"- **Where should you start?**: {briefing.get('where_to_start', '')}",
                 "",
                 "---",
                 "",
@@ -721,10 +771,21 @@ class HandoverExportService:
         status_cls = "badge-green" if is_approved else "badge-amber"
         status_icon = shield_svg if is_approved else lock_svg
 
-        total_verified = (
-            sum(len(m.get("knowledge_items") or []) for m in summary_sections)
-            if summary_sections
-            else sum(int(s.get("evidence_item_count") or 0) for s in data["sections"])
+        ep_sum = data.get("epistemic_summary") or {}
+        if ep_sum:
+            total_verified = int(ep_sum.get("human_verified_included") or 0)
+            total_pending = int(ep_sum.get("pending_verification") or 0)
+        else:
+            total_verified = (
+                sum(len(m.get("knowledge_items") or []) for m in summary_sections)
+                if summary_sections
+                else sum(int(s.get("evidence_item_count") or 0) for s in data["sections"])
+            )
+            total_pending = 0
+        verified_summary_cell = (
+            f"{total_verified} verified ({total_pending} pending)"
+            if total_pending > 0
+            else f"{total_verified} verified"
         )
         outgoing_name = esc(str(data.get("departing_member_name") or data.get("departing_member_id") or "Assigned Member"))
         incoming_name = esc(str(data.get("successor_name") or data.get("successor_id") or "Unassigned"))
@@ -736,6 +797,39 @@ class HandoverExportService:
                 f'<div class="epistemic-banner" style="background:#fbf5ea;border:1px solid #ebd5ac;color:#775420;margin-top:8px;">'
                 f'<strong>Source Access Notice:</strong> {int(data["omitted_restricted_items_count"])} restricted item(s) omitted based on viewer permissions.'
                 f"</div>"
+            )
+
+        start_here_html = ""
+        briefing = data.get("start_here_briefing")
+        if isinstance(briefing, dict):
+            briefing_rows = [
+                ("What is this project?", briefing.get("what_is_this_project") or ""),
+                ("What has been built?", briefing.get("what_has_been_built") or ""),
+                ("How does it work?", briefing.get("how_does_it_work") or ""),
+                ("What is the current state?", briefing.get("what_is_the_current_state") or ""),
+                ("What should the successor understand first?", briefing.get("what_to_understand_first") or ""),
+                ("Where should they start?", briefing.get("where_to_start") or ""),
+            ]
+            briefing_cards = "".join(
+                f'<div class="handover-finding-card">'
+                f'<p class="finding-title">{esc(label)}</p>'
+                f'<p class="finding-body">{esc(str(val))}</p>'
+                f"</div>"
+                for label, val in briefing_rows
+                if str(val).strip()
+            )
+            prov_tag = (
+                ' <span class="badge badge-amber">Includes Provisional Draft Findings</span>'
+                if briefing.get("is_provisional_draft")
+                else ""
+            )
+            start_here_html = (
+                f'<section class="sec" style="border-top:none;padding-top:0;margin-top:0;margin-bottom:20px;">'
+                f'<div class="handover-section-heading">'
+                f'<div class="sec-left"><span class="sec-num">00</span> <h2 class="sec-title">Start Here &mdash; Executive Project Briefing</h2> {prov_tag}</div>'
+                f"</div>"
+                f'<div class="sec-cards">{briefing_cards}</div>'
+                f"</section>"
             )
 
         sections_html_parts: list[str] = []
@@ -750,7 +844,14 @@ class HandoverExportService:
 
                 kis = msec.get("knowledge_items") or msec.get("items") or []
                 ev_refs = msec.get("evidence_references") or []
-                v_cnt = len(kis) if kis else int(msec.get("verified_item_count") or 0)
+                v_cnt = sum(
+                    1
+                    for it in kis
+                    if isinstance(it, dict)
+                    and it.get("epistemic_status", "human_verified") == "human_verified"
+                    and it.get("review_status", "approved") == "approved"
+                )
+                p_cnt = len(kis) - v_cnt
                 s_cnt = len(ev_refs) if ev_refs else int(msec.get("citation_count") or 0)
 
                 guidance = str(msec.get("role_emphasis_note") or msec.get("role_guidance") or "").strip()
@@ -763,20 +864,36 @@ class HandoverExportService:
                         continue
                     ki_title = esc(str(ki.get("title") or "Verified Finding"))
                     ki_content = esc(str(ki.get("content") or ki.get("structured_summary") or ki.get("summary") or ""))
+                    is_item_verified = (
+                        ki.get("epistemic_status", "human_verified") == "human_verified"
+                        and ki.get("review_status", "approved") == "approved"
+                    )
+                    ep_icon = (
+                        f'<span style="color:#299b80;margin-left:4px;">{shield_svg}</span>'
+                        if is_item_verified
+                        else '<span class="badge badge-amber" style="margin-left:6px;">Provisional &middot; Pending review</span>'
+                    )
+                    cons_cnt = int(((ki.get("structured_payload") or {}).get("consolidated_finding_count")) or 1)
+                    cons_badge = (
+                        f'<span class="badge badge-blue" style="margin-left:6px;">Consolidated ({cons_cnt} findings)</span>'
+                        if cons_cnt > 1
+                        else ""
+                    )
                     prov = ki.get("provenance") or ki.get("citations") or []
                     prov_avail = ki.get("provenance_available", bool(prov))
                     if prov_avail and prov:
                         src_names = ", ".join(
                             esc(str(ev.get("source_name") or ev.get("evidence_title") or ev.get("source_title") or "Restricted"))
-                            for ev in prov
+                            for ev in prov[:8]
                             if isinstance(ev, dict)
                         )
-                        src_line = f"Sources: {src_names}"
+                        extra_src = f" (+{len(prov) - 8} more)" if len(prov) > 8 else ""
+                        src_line = f"Sources: {src_names}{extra_src}"
                     else:
                         src_line = "Provenance: No linked source recorded"
                     cards_html.append(
                         f'<div class="handover-finding-card">'
-                        f'<p class="finding-title">{ki_title} <span style="color:#299b80;margin-left:4px;">{shield_svg}</span></p>'
+                        f'<p class="finding-title">{ki_title} {ep_icon}{cons_badge}</p>'
                         f'<p class="finding-body">{ki_content}</p>'
                         f'<p class="finding-src">{src_line}</p>'
                         f"</div>"
@@ -795,7 +912,7 @@ class HandoverExportService:
                 resps = msec.get("responsibilities_summary") or []
                 if resps:
                     resp_lis = "".join(
-                        f'<li><span class="navy-med">{esc(str(r.get("responsibility_title") or r.get("title") or "Responsibility"))}</span> '
+                        f'<li><span class="navy-med">{esc(str(r.get("responsibility_description") or r.get("responsibility_title") or r.get("title") or "Responsibility"))}</span> '
                         f'&mdash; Status: {esc(str(r.get("transfer_status") or "pending"))}</li>'
                         for r in resps if isinstance(r, dict)
                     )
@@ -804,7 +921,7 @@ class HandoverExportService:
                 steps = msec.get("recommended_steps") or []
                 if steps:
                     step_lis = "".join(
-                        f'<li>[{esc(str(st.get("status") or "pending"))}] <span class="navy-med">{esc(str(st.get("title") or ""))}</span></li>'
+                        f'<li>[{esc(str(st.get("priority") or st.get("status") or "pending").upper())}] <span class="navy-med">{esc(str(st.get("title") or ""))}</span></li>'
                         for st in steps if isinstance(st, dict)
                     )
                     cards_html.append(f'<ul class="rel-list">{step_lis}</ul>')
@@ -824,13 +941,18 @@ class HandoverExportService:
 
                 insuff_html = f'<div class="insuff-box">{alert_svg}{esc(insuff)}</div>' if insuff else ""
                 guidance_html = f'<p class="sec-guide">{esc(guidance)}</p>' if guidance else ""
+                counts_label = (
+                    f"{v_cnt} verified &middot; {p_cnt} provisional &middot; {s_cnt} sources"
+                    if p_cnt > 0
+                    else f"{v_cnt} verified &middot; {s_cnt} sources"
+                )
 
                 sections_html_parts.append(
                     f'<section class="sec">'
                     f'<div class="handover-section-heading">'
                     f'<div class="sec-left"><span class="sec-num">{num}</span> <h2 class="sec-title">{title}</h2> {prio_html}</div>'
                     f'<div class="sec-right"><span class="badge {r_cls}">{readiness_label}</span> '
-                    f'<span class="sec-counts">{v_cnt} verified &middot; {s_cnt} sources</span></div>'
+                    f'<span class="sec-counts">{counts_label}</span></div>'
                     f"</div>"
                     f"{guidance_html}"
                     f"{insuff_html}"
@@ -1034,7 +1156,7 @@ class HandoverExportService:
         <div><dt class="meta-dt">Outgoing</dt><dd class="meta-dd">{outgoing_name}</dd></div>
         <div><dt class="meta-dt">Incoming</dt><dd class="meta-dd">{incoming_name}</dd></div>
         <div><dt class="meta-dt">Target Date</dt><dd class="meta-dd">{target_date}</dd></div>
-        <div><dt class="meta-dt">Verified</dt><dd class="meta-dd">{total_verified} verified</dd></div>
+        <div><dt class="meta-dt">Verified</dt><dd class="meta-dd">{esc(verified_summary_cell)}</dd></div>
       </dl>
       <div class="epistemic-banner">
         <span style="color:#299b80;margin-right:4px;">{shield_svg}</span>
@@ -1042,6 +1164,7 @@ class HandoverExportService:
       </div>
       {acl_banner_html}
     </header>
+    {start_here_html}
     {''.join(sections_html_parts)}
     {signoffs_html}
   </article>

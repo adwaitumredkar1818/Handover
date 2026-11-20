@@ -263,6 +263,18 @@ export function Report({ id }: { id: string }) {
                   )}
                 </Card>
                 <nav className="space-y-0.5">
+                  {effectiveData?.start_here_briefing && mandatorySections.length > 0 && (
+                    <a
+                      href="#sec-0"
+                      onClick={(e) => {
+                        e.preventDefault()
+                        document.getElementById('sec-0')?.scrollIntoView({ behavior: 'smooth' })
+                      }}
+                      className="flex items-center justify-between gap-2 rounded-lg px-3 py-1.5 text-[12.5px] font-medium text-brand hover:bg-white"
+                    >
+                      <span className="truncate">0. Start Here Briefing</span>
+                    </a>
+                  )}
                   {mandatorySections.length > 0
                     ? mandatorySections.map((ms) => (
                         <a
@@ -375,7 +387,50 @@ export function Report({ id }: { id: string }) {
                   </Callout>
                 ) : mandatorySections.length > 0 ? (
                   <div className="space-y-8">
-                    {mandatorySections.map((ms) => (
+                    {effectiveData?.start_here_briefing && (
+                      <section id="sec-0" className="scroll-mt-6 pb-2">
+                        <div className="handover-section-heading mb-3 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-xs font-semibold text-brand">00</span>
+                            <h2 className="text-[16px] font-semibold text-navy">
+                              Start Here — Executive Project Briefing
+                            </h2>
+                            {effectiveData.start_here_briefing.is_provisional_draft && (
+                              <Badge tone="amber">Includes Provisional Draft Findings</Badge>
+                            )}
+                          </div>
+                          {typeof effectiveData.total_underlying_findings === 'number' &&
+                            effectiveData.total_underlying_findings > 0 && (
+                              <span className="text-xs text-muted">
+                                Synthesised from {effectiveData.total_underlying_findings} underlying records
+                              </span>
+                            )}
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-2 text-[13.5px] leading-relaxed text-slate-700">
+                          {[
+                            ['What is this project?', effectiveData.start_here_briefing.what_is_this_project],
+                            ['What has been built?', effectiveData.start_here_briefing.what_has_been_built],
+                            ['How does it work?', effectiveData.start_here_briefing.how_does_it_work],
+                            ['What is the current state?', effectiveData.start_here_briefing.what_is_the_current_state],
+                            ['What should the successor understand first?', effectiveData.start_here_briefing.what_to_understand_first],
+                            ['Where should they start?', effectiveData.start_here_briefing.where_to_start],
+                          ]
+                            .filter(([, text]) => Boolean(text && text.trim()))
+                            .map(([label, text]) => (
+                              <div key={label} className="handover-finding-card rounded-lg border border-line bg-slate-50/40 p-3.5">
+                                <p className="font-semibold text-navy">{label}</p>
+                                <p className="mt-1 whitespace-pre-wrap text-[13px] text-slate-700">{text}</p>
+                              </div>
+                            ))}
+                        </div>
+                      </section>
+                    )}
+                    {mandatorySections.map((ms) => {
+                      const verifiedCardsCount = ms.knowledge_items.filter(
+                        (ki) => ki.epistemic_status === 'human_verified' && ki.review_status === 'approved'
+                      ).length
+                      const provisionalCardsCount = ms.knowledge_items.length - verifiedCardsCount
+                      return (
                       <section key={ms.section_key} id={`sec-${ms.section_number}`} className="scroll-mt-6 border-t border-line pt-6 first:border-0 first:pt-0">
                         <div className="handover-section-heading mb-3 flex flex-wrap items-center justify-between gap-2">
                           <div className="flex flex-wrap items-center gap-2">
@@ -400,7 +455,9 @@ export function Report({ id }: { id: string }) {
                               {ms.readiness_status.replace(/_/g, ' ')}
                             </Badge>
                             <span className="text-xs text-muted">
-                              {ms.knowledge_items.length} verified · {ms.evidence_references.length} sources
+                              {provisionalCardsCount > 0
+                                ? `${verifiedCardsCount} verified · ${provisionalCardsCount} provisional · ${ms.evidence_references.length} sources`
+                                : `${verifiedCardsCount} verified · ${ms.evidence_references.length} sources`}
                             </span>
                           </div>
                         </div>
@@ -414,20 +471,36 @@ export function Report({ id }: { id: string }) {
                           </div>
                         )}
                         <div className="space-y-3 text-[13.5px] leading-relaxed text-slate-700">
-                          {ms.knowledge_items.map((ki) => (
+                          {ms.knowledge_items.map((ki) => {
+                            const isItemVerified =
+                              ki.epistemic_status === 'human_verified' && ki.review_status === 'approved'
+                            const consolidatedCount =
+                              typeof ki.structured_payload?.consolidated_finding_count === 'number'
+                                ? ki.structured_payload.consolidated_finding_count
+                                : 1
+                            return (
                             <div key={ki.id} className="handover-finding-card rounded-lg border border-line bg-slate-50/40 p-3.5">
-                              <p className="font-semibold text-navy">
-                                {ki.title}
-                                <ShieldCheck className="ml-1.5 inline size-3.5 text-ok" />
-                              </p>
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <p className="font-semibold text-navy">
+                                  {ki.title}
+                                  {isItemVerified && <ShieldCheck className="ml-1.5 inline size-3.5 text-ok" />}
+                                </p>
+                                {!isItemVerified && (
+                                  <Badge tone="amber">Provisional · Pending review</Badge>
+                                )}
+                                {consolidatedCount > 1 && (
+                                  <Badge tone="blue">Consolidated ({consolidatedCount} findings)</Badge>
+                                )}
+                              </div>
                               <p className="mt-1 whitespace-pre-wrap text-[13px] text-slate-700">{ki.content}</p>
                               <p className="mt-1.5 text-[11px] text-muted">
                                 {ki.provenance_available
-                                  ? `Sources: ${ki.provenance.map((ev) => ev.source_name || 'Restricted').join(', ')}`
+                                  ? `Sources: ${ki.provenance.slice(0, 8).map((ev) => ev.source_name || 'Restricted').join(', ')}${ki.provenance.length > 8 ? ` (+${ki.provenance.length - 8} more)` : ''}`
                                   : 'Provenance: No linked source recorded'}
                               </p>
                             </div>
-                          ))}
+                            )
+                          })}
                           {ms.relationships.length > 0 && (
                             <ul className="list-disc space-y-1 pl-5 text-[13px]">
                               {ms.relationships.map((rel) => (
@@ -443,7 +516,7 @@ export function Report({ id }: { id: string }) {
                             <ul className="list-disc space-y-1 pl-5 text-[13px]">
                               {ms.responsibilities_summary.map((r, rIdx) => (
                                 <li key={rIdx}>
-                                  <span className="font-medium text-navy">{String(r.responsibility_title || r.title || 'Responsibility')}</span>{' '}
+                                  <span className="font-medium text-navy">{String(r.responsibility_description || r.responsibility_title || r.title || 'Responsibility')}</span>{' '}
                                   — Status: {String(r.transfer_status || 'pending')}
                                 </li>
                               ))}
@@ -453,7 +526,7 @@ export function Report({ id }: { id: string }) {
                             <ul className="list-disc space-y-1 pl-5 text-[13px]">
                               {ms.recommended_steps.map((st, sIdx) => (
                                 <li key={sIdx}>
-                                  [{String(st.status || 'pending')}] <span className="font-medium text-navy">{String(st.title || '')}</span>
+                                  [{String(st.priority || st.status || 'pending').toUpperCase()}] <span className="font-medium text-navy">{String(st.title || '')}</span>
                                 </li>
                               ))}
                             </ul>
@@ -472,7 +545,8 @@ export function Report({ id }: { id: string }) {
                           )}
                         </div>
                       </section>
-                    ))}
+                      )
+                    })}
                   </div>
                 ) : (
                   <div className="space-y-8">

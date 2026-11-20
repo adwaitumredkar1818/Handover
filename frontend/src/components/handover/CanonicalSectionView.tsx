@@ -34,6 +34,7 @@ import {
   Users,
 } from 'lucide-react'
 
+import { FormattedMarkdown } from '@/components/figma-ui/FormattedMarkdown'
 import {
   Avatar,
   Badge,
@@ -451,9 +452,15 @@ function VerifiedKnowledgeCard({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h4 className="text-[14px] font-semibold text-navy">{item.title}</h4>
-            <Badge tone="green" icon={ShieldCheck}>
-              Human verified
-            </Badge>
+            {item.epistemic_status === 'human_verified' && item.review_status === 'approved' ? (
+              <Badge tone="green" icon={ShieldCheck}>
+                Human verified
+              </Badge>
+            ) : (
+              <Badge tone="amber" icon={Clock}>
+                Provisional · Pending review
+              </Badge>
+            )}
             {item.normalised_status && (
               <Badge tone="blue">{humanizeStatus(item.normalised_status)}</Badge>
             )}
@@ -1436,7 +1443,10 @@ export function CanonicalSectionPanel({
             <p className="mt-0.5 text-xs text-muted">{domainMeta.description}</p>
           </div>
           <Badge tone={section.knowledge_items.length > 0 ? 'green' : 'gray'}>
-            {section.knowledge_items.length} verified item{section.knowledge_items.length === 1 ? '' : 's'}
+            {section.epistemic_breakdown.human_verified_included} verified
+            {section.epistemic_breakdown.pending_verification > 0
+              ? ` · ${section.epistemic_breakdown.pending_verification} pending`
+              : ''}
           </Badge>
         </div>
 
@@ -1531,11 +1541,7 @@ export function CanonicalSectionPanel({
           {section.content_summary && (
             <p className="mb-2 text-xs font-medium text-muted">{section.content_summary}</p>
           )}
-          {section.section_content && (
-            <p className="whitespace-pre-wrap text-[13.5px] leading-relaxed text-slate-700">
-              {section.section_content}
-            </p>
-          )}
+          {section.section_content && <FormattedMarkdown content={section.section_content} />}
         </Card>
       )}
 

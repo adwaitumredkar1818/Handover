@@ -622,6 +622,17 @@ export interface HandoverMandatorySection {
   pending_verification_count: number;
 }
 
+export interface HandoverStartHereBriefing {
+  what_is_this_project: string;
+  what_has_been_built: string;
+  how_does_it_work: string;
+  what_is_the_current_state: string;
+  what_to_understand_first: string;
+  where_to_start: string;
+  role_guidance?: string;
+  is_provisional_draft?: boolean;
+}
+
 export interface HandoverVersionSectionsResponse {
   case_id: UUID;
   project_id: UUID;
@@ -633,6 +644,9 @@ export interface HandoverVersionSectionsResponse {
   handover_type_label?: string;
   role_focus_summary?: string;
   mandatory_sections?: HandoverMandatorySection[];
+  start_here_briefing?: HandoverStartHereBriefing | null;
+  total_underlying_findings?: number;
+  composed_card_count?: number;
 }
 
 // ---------------------------------------------------------------------------

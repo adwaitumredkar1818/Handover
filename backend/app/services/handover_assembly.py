@@ -34,6 +34,9 @@ from app.models.enums import (
     KnowledgeCategory,
     KnowledgeReviewStatus,
     RelationshipVerificationStatus,
+    VerificationCaseStatus,
+    VerificationSeverity,
+    VerificationTargetType,
 )
 from app.models.handover import (
     HandoverCase,
@@ -42,8 +45,9 @@ from app.models.handover import (
     HandoverPackageSection,
     HandoverPackageVersion,
 )
-from app.models.knowledge import KnowledgeItem
-from app.models.relationship import KnowledgeRelationship
+from app.models.knowledge import KnowledgeEvidenceLink, KnowledgeItem
+from app.models.relationship import KnowledgeEntity, KnowledgeRelationship, RelationshipEvidenceLink
+from app.models.verification import VerificationCase, VerificationConflict, VerificationIssue
 from app.repositories.audit import AuditLogRepository
 from app.repositories.handover import (
     HandoverCaseRepository,
@@ -55,7 +59,10 @@ from app.repositories.handover import (
 from app.schemas.handover import PackageAssemblyRequest
 from app.services.audit import AuditService
 from app.services.handover_case import HandoverCaseService
-from app.services.handover_eligibility import HandoverEligibilityService
+from app.services.handover_eligibility import (
+    HandoverEligibilityService,
+    check_evidence_accessibility,
+)
 
 # Map Knowledge categories to Section types
 DOMAIN_CATEGORY_MAP: dict[str, list[str]] = {
@@ -216,12 +223,25 @@ class PackageAssemblyService:
         relationships = list(self.session.execute(stmt_rel).scalars().all())
         filtered_rels = [r for r in relationships if r.id not in exclude_rels]
 
+        allow_provisional_draft = bool(
+            request.include_provisional_draft
+            and case.status
+            in (
+                HandoverCaseStatus.DRAFT.value,
+                HandoverCaseStatus.ASSEMBLING.value,
+                HandoverCaseStatus.ASSEMBLED.value,
+                HandoverCaseStatus.UNDER_REVIEW.value,
+                HandoverCaseStatus.READINESS_ASSESSED.value,
+            )
+        )
+
         # Evaluate eligibility for all items
         eligible_items_by_section: dict[str, list[tuple[KnowledgeItem, Any]]] = {
             sec: [] for sec in SECTION_ORDER
         }
 
         included_ki_ids: list[str] = []
+        provisional_ki_ids: list[str] = []
         excluded_ki_ids: list[dict[str, Any]] = []
         exclusion_breakdown: dict[str, int] = {
             "pending_review": 0,
@@ -233,20 +253,170 @@ class PackageAssemblyService:
         }
         sample_verified_items: list[dict[str, Any]] = []
 
+        # Batch preload maps when assembling provisional draft or large project cleanly
+        vc_ki_map: dict[uuid.UUID, VerificationCase] = {}
+        open_conflict_vc_ids: set[uuid.UUID] = set()
+        blocking_issue_vc_ids: set[uuid.UUID] = set()
+        ki_ev_links_map: dict[uuid.UUID, list[uuid.UUID]] = {}
+        rel_ev_links_map: dict[uuid.UUID, list[uuid.UUID]] = {}
+        accessible_ev_cache: dict[uuid.UUID, bool] = {}
+
+        if allow_provisional_draft and filtered_kis:
+            ki_ids_all = [k.id for k in filtered_kis]
+            for vc in self.session.execute(
+                select(VerificationCase).where(
+                    VerificationCase.project_id == project_id,
+                    VerificationCase.target_type == VerificationTargetType.KNOWLEDGE_ITEM.value,
+                    VerificationCase.target_id.in_(ki_ids_all),
+                )
+            ).scalars().all():
+                vc_ki_map[vc.target_id] = vc
+
+            open_conflict_vc_ids = set(
+                self.session.execute(
+                    select(VerificationConflict.case_id).where(
+                        VerificationConflict.project_id == project_id,
+                        VerificationConflict.resolution_state.notin_(["resolved", "dismissed"]),
+                    )
+                ).scalars().all()
+            )
+            blocking_issue_vc_ids = set(
+                self.session.execute(
+                    select(VerificationIssue.case_id).where(
+                        VerificationIssue.project_id == project_id,
+                        VerificationIssue.resolution_state == "open",
+                        VerificationIssue.severity.in_(
+                            [VerificationSeverity.CRITICAL.value, VerificationSeverity.HIGH.value]
+                        ),
+                    )
+                ).scalars().all()
+            )
+            all_ev_ids_set: set[uuid.UUID] = set()
+            for row_ki_id, row_ev_id in self.session.execute(
+                select(KnowledgeEvidenceLink.knowledge_item_id, KnowledgeEvidenceLink.evidence_id).where(
+                    KnowledgeEvidenceLink.project_id == project_id
+                )
+            ).all():
+                ki_ev_links_map.setdefault(row_ki_id, []).append(row_ev_id)
+                all_ev_ids_set.add(row_ev_id)
+            for row_rel_id, row_ev_id in self.session.execute(
+                select(RelationshipEvidenceLink.relationship_id, RelationshipEvidenceLink.evidence_id).where(
+                    RelationshipEvidenceLink.project_id == project_id
+                )
+            ).all():
+                rel_ev_links_map.setdefault(row_rel_id, []).append(row_ev_id)
+                all_ev_ids_set.add(row_ev_id)
+
+            if all_ev_ids_set:
+                cached_policies = self.eligibility_service._get_policies(project_id)
+                _, inacc_list = check_evidence_accessibility(
+                    self.session,
+                    list(all_ev_ids_set),
+                    project_id=project_id,
+                    viewer_user_id=user_id,
+                    has_project_manage=has_project_manage,
+                    cached_policies=cached_policies,
+                )
+                inacc_set = set(inacc_list)
+                for ev_id in all_ev_ids_set:
+                    accessible_ev_cache[ev_id] = ev_id not in inacc_set
+
         for ki in filtered_kis:
-            if (
-                ki.epistemic_status != EpistemicStatus.HUMAN_VERIFIED.value
-                or ki.review_status != KnowledgeReviewStatus.APPROVED.value
-            ):
-                if ki.review_status == KnowledgeReviewStatus.REJECTED.value:
-                    exclusion_breakdown["rejected"] += 1
-                else:
-                    exclusion_breakdown["pending_review"] += 1
+            if ki.review_status == KnowledgeReviewStatus.REJECTED.value:
+                exclusion_breakdown["rejected"] += 1
+                excluded_ki_ids.append({
+                    "id": str(ki.id),
+                    "title": ki.title or str(ki.id),
+                    "blockers": ["Knowledge item was rejected during verification review."],
+                })
+                continue
+
+            if getattr(ki, "is_stale", False):
+                exclusion_breakdown["other"] += 1
+                excluded_ki_ids.append({
+                    "id": str(ki.id),
+                    "title": ki.title or str(ki.id),
+                    "blockers": ["Knowledge item is marked stale."],
+                })
+                continue
+
+            is_ki_meta_verified = (
+                ki.epistemic_status == EpistemicStatus.HUMAN_VERIFIED.value
+                and ki.review_status == KnowledgeReviewStatus.APPROVED.value
+            )
+
+            if not is_ki_meta_verified and not allow_provisional_draft:
+                exclusion_breakdown["pending_review"] += 1
                 excluded_ki_ids.append({
                     "id": str(ki.id),
                     "title": ki.title or str(ki.id),
                     "blockers": ["Knowledge item is not human-verified and approved."],
                 })
+                continue
+
+            if allow_provisional_draft:
+                vc = vc_ki_map.get(ki.id)
+                vc_status = vc.case_status if vc else "missing_case"
+                has_open_conflict = bool(vc and vc.id in open_conflict_vc_ids)
+                has_blocking_issue = bool(vc and vc.id in blocking_issue_vc_ids)
+                ev_ids = ki_ev_links_map.get(ki.id, [])
+                ev_ok = bool(ev_ids) and all(accessible_ev_cache.get(eid, False) for eid in ev_ids)
+
+                if not ev_ids:
+                    exclusion_breakdown["missing_evidence"] += 1
+                    excluded_ki_ids.append({
+                        "id": str(ki.id),
+                        "title": ki.title or str(ki.id),
+                        "blockers": ["Knowledge item has no supporting evidence links attached."],
+                    })
+                    continue
+                if not ev_ok:
+                    exclusion_breakdown["restricted_acl"] += 1
+                    excluded_ki_ids.append({
+                        "id": str(ki.id),
+                        "title": ki.title or str(ki.id),
+                        "blockers": ["Viewer lacks access to supporting evidence source(s)."],
+                    })
+                    continue
+                if has_open_conflict:
+                    exclusion_breakdown["conflicted"] += 1
+                    excluded_ki_ids.append({
+                        "id": str(ki.id),
+                        "title": ki.title or str(ki.id),
+                        "blockers": ["Unresolved cross-source conflict."],
+                    })
+                    continue
+
+                strict_eligible = (
+                    is_ki_meta_verified
+                    and vc_status == VerificationCaseStatus.VERIFIED.value
+                    and not has_blocking_issue
+                )
+                matched_section = HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value
+                for sec_type, categories in DOMAIN_CATEGORY_MAP.items():
+                    if ki.category in categories:
+                        matched_section = sec_type
+                        break
+                link_meta = {
+                    "is_eligible": strict_eligible,
+                    "is_provisional_draft": not strict_eligible,
+                    "case_status": vc_status,
+                    "epistemic_status": ki.epistemic_status if strict_eligible else EpistemicStatus.EXTRACTED.value,
+                }
+                eligible_items_by_section[matched_section].append((ki, link_meta))
+                if strict_eligible:
+                    included_ki_ids.append(str(ki.id))
+                    if len(sample_verified_items) < 5:
+                        sample_verified_items.append({
+                            "id": str(ki.id),
+                            "title": ki.title or "Verified Finding",
+                            "category": ki.category,
+                            "review_status": ki.review_status,
+                            "epistemic_status": ki.epistemic_status,
+                        })
+                else:
+                    provisional_ki_ids.append(str(ki.id))
+                    exclusion_breakdown["pending_review"] += 1
                 continue
 
             eligibility = self.eligibility_service.check_knowledge_item_eligibility(
@@ -256,7 +426,6 @@ class PackageAssemblyService:
             )
             if eligibility.is_eligible:
                 included_ki_ids.append(str(ki.id))
-                # Map to target section
                 matched_section = HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value
                 for sec_type, categories in DOMAIN_CATEGORY_MAP.items():
                     if ki.category in categories:
@@ -281,7 +450,7 @@ class PackageAssemblyService:
                     exclusion_breakdown["restricted_acl"] += 1
                 elif "reject" in blocker_text:
                     exclusion_breakdown["rejected"] += 1
-                elif "pending" in blocker_text or "review" in blocker_text:
+                elif "pending" in blocker_text or "review" in blocker_text or "candidate" in blocker_text:
                     exclusion_breakdown["pending_review"] += 1
                 else:
                     exclusion_breakdown["other"] += 1
@@ -296,6 +465,28 @@ class PackageAssemblyService:
             sec: [] for sec in SECTION_ORDER
         }
         for rel in filtered_rels:
+            if allow_provisional_draft:
+                if rel.verification_status in (
+                    RelationshipVerificationStatus.REJECTED.value,
+                    "rejected",
+                ) or getattr(rel, "is_stale", False):
+                    continue
+                r_ev_ids = rel_ev_links_map.get(rel.id, [])
+                if not r_ev_ids or not all(accessible_ev_cache.get(eid, False) for eid in r_ev_ids):
+                    continue
+                is_rel_verified = rel.verification_status == RelationshipVerificationStatus.VERIFIED.value
+                eligible_rels_by_section[
+                    HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value
+                ].append((
+                    rel,
+                    {
+                        "is_eligible": is_rel_verified,
+                        "is_provisional_draft": not is_rel_verified,
+                        "case_status": "verified" if is_rel_verified else "candidate",
+                    },
+                ))
+                continue
+
             if rel.verification_status != RelationshipVerificationStatus.VERIFIED.value:
                 continue
             eligibility = self.eligibility_service.check_relationship_eligibility(
@@ -304,7 +495,6 @@ class PackageAssemblyService:
                 has_project_manage=has_project_manage,
             )
             if eligibility.is_eligible:
-                # Place in DEPENDENCIES_RELATIONSHIPS by default
                 eligible_rels_by_section[
                     HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value
                 ].append((rel, eligibility))
@@ -320,11 +510,15 @@ class PackageAssemblyService:
             "project_id": str(project_id),
             "case_id": str(case_id),
             "handover_type": handover_type,
+            "generation_method": "deterministic_knowledge_composition",
+            "include_provisional_draft": allow_provisional_draft,
+            "is_test_draft": allow_provisional_draft,
             "total_eligible_knowledge_items": len(included_ki_ids),
+            "total_provisional_knowledge_items": len(provisional_ki_ids),
             "total_excluded_knowledge_items": len(excluded_ki_ids),
             "exclusion_breakdown": exclusion_breakdown,
             "sample_verified_items": sample_verified_items,
-            "excluded_items": excluded_ki_ids,
+            "excluded_items": excluded_ki_ids[:100],
             "domains_included": request.include_domains or ordered_sections,
         }
 
@@ -345,7 +539,32 @@ class PackageAssemblyService:
         created_version = self.version_repo.create(version)
         self.version_repo.set_current(package.id, created_version.id)
 
-        # Deterministic, evidence-backed section compilation (zero Ollama/LLM calls)
+        # Deterministic, composed section compilation (zero Ollama/LLM calls)
+        from app.services.handover_composer import classify_finding, _format_item_bullets as _fmt_composed
+        from app.schemas.handover import (
+            HandoverSectionKnowledgeItemResponse as _SecKIRsp,
+            HandoverVerificationSummaryResponse as _VerifRsp,
+        )
+
+        entity_name_map: dict[uuid.UUID, str] = {}
+        if any(eligible_rels_by_section.values()):
+            for eid, cname in self.session.execute(
+                select(KnowledgeEntity.id, KnowledgeEntity.canonical_name).where(
+                    KnowledgeEntity.project_id == project_id
+                )
+            ).all():
+                entity_name_map[eid] = cname
+
+        def _elig_json(elig_obj: Any, *, default_ep: str) -> dict[str, Any]:
+            if isinstance(elig_obj, dict):
+                return dict(elig_obj)
+            return {
+                "is_eligible": getattr(elig_obj, "is_eligible", False),
+                "is_provisional_draft": False,
+                "case_status": getattr(elig_obj, "case_status", "verified"),
+                "epistemic_status": getattr(elig_obj, "epistemic_status", default_ep),
+            }
+
         section_hashes: list[str] = []
 
         for order, sec_type in enumerate(SECTION_ORDER, start=1):
@@ -355,29 +574,98 @@ class PackageAssemblyService:
             sec_items = eligible_items_by_section.get(sec_type, [])
             sec_rels = eligible_rels_by_section.get(sec_type, [])
 
+            verified_cnt = sum(1 for _, el in sec_items if _elig_json(el, default_ep="human_verified").get("is_eligible"))
+            prov_cnt = len(sec_items) - verified_cnt
+
             content_lines: list[str] = [
                 f"# {SECTION_TITLES[sec_type]}",
                 "",
-                f"Compiled {len(sec_items)} human-approved knowledge items and {len(sec_rels)} verified relationships.",
-                "",
             ]
+            if allow_provisional_draft:
+                content_lines.append(
+                    f"Composed from {verified_cnt} human-verified and {prov_cnt} provisional finding(s), "
+                    f"and {len(sec_rels)} relationship(s)."
+                )
+            else:
+                content_lines.append(
+                    f"Compiled {len(sec_items)} human-approved knowledge items and {len(sec_rels)} verified relationships."
+                )
+            content_lines.append("")
+
             if not sec_items and not sec_rels:
                 content_lines.append("Insufficient approved information for this section.")
                 content_lines.append("")
+            else:
+                # Build lightweight DTOs so persisted Markdown is also grouped cleanly
+                manifest_pkgs: list[str] = []
+                commit_groups: dict[str, list[str]] = {}
+                author_counts: dict[str, int] = {}
+                substantive_lines: list[str] = []
 
-            for ki, _ in sec_items:
-                title = ki.title or "Verified Finding"
-                details = ki.structured_summary or ""
-                content_lines.append(f"### {title}")
-                if details:
-                    content_lines.append(f"{details}")
-                content_lines.append(f"- **Epistemic Status**: {ki.epistemic_status}")
-                content_lines.append(f"- **Review Status**: {ki.review_status}")
-                content_lines.append(f"- **Support**: {ki.support_classification}")
-                content_lines.append("")
+                for ki, elig in sec_items:
+                    ej = _elig_json(elig, default_ep=ki.epistemic_status)
+                    is_ver = bool(ej.get("is_eligible"))
+                    dto = _SecKIRsp(
+                        id=ki.id,
+                        content_link_id=ki.id,
+                        title=ki.title or "Finding",
+                        content=ki.structured_summary or "",
+                        category=ki.category,
+                        epistemic_status=ki.epistemic_status if is_ver else "extracted",
+                        review_status=ki.review_status if is_ver else "pending_review",
+                        support_classification=ki.support_classification,
+                        normalised_status=ki.normalised_status,
+                        owner_label=ki.person_or_owner_label,
+                        structured_payload=ki.structured_payload or {},
+                        created_at=ki.created_at,
+                        updated_at=ki.updated_at,
+                        verification=_VerifRsp(case_status="verified" if is_ver else "candidate"),
+                    )
+                    meta = classify_finding(dto)
+                    kind = meta["kind"]
+                    if kind == "manifest_dependency":
+                        manifest_pkgs.append(f"{meta['package']} ({meta['version']})" if meta.get("version") else meta["package"])
+                    elif kind == "raw_commit":
+                        ws = meta.get("workstream") or "Core Changes"
+                        sha = meta.get("sha") or ""
+                        subj = meta.get("subject") or dto.title
+                        commit_groups.setdefault(ws, []).append(f"`@{sha[:8]}` {subj}" if sha else subj)
+                    elif kind == "commit_author":
+                        auth = meta.get("author") or "Contributor"
+                        author_counts[auth] = author_counts.get(auth, 0) + 1
+                    else:
+                        tag = "" if is_ver else " *(Provisional — Pending Review)*"
+                        substantive_lines.append(f"### {dto.title}{tag}")
+                        if dto.content:
+                            substantive_lines.append(dto.content)
+                        substantive_lines.append("")
 
-            for rel, _ in sec_rels:
-                content_lines.append(f"- **Relationship**: `{rel.relationship_type}` (from `{rel.source_entity_id}` to `{rel.target_entity_id}`)")
+                content_lines.extend(substantive_lines)
+                if commit_groups:
+                    content_lines.append("### Grouped Repository Workstreams")
+                    for ws, msgs in commit_groups.items():
+                        content_lines.append(f"- **{ws}** ({len(msgs)} commit(s)): " + "; ".join(msgs[:5]))
+                    content_lines.append("")
+                if author_counts:
+                    content_lines.append("### Historical Commit Authors (Distinct from Ownership)")
+                    for auth, cnt in sorted(author_counts.items(), key=lambda x: -x[1]):
+                        content_lines.append(f"- **{auth}**: {cnt} commit(s)")
+                    content_lines.append("")
+                if manifest_pkgs:
+                    uniq_pkgs = sorted(set(manifest_pkgs))
+                    content_lines.append(f"### Declared Packages ({len(uniq_pkgs)} unique)")
+                    content_lines.append(", ".join(uniq_pkgs[:60]))
+                    content_lines.append("")
+
+            structural_rels = [
+                (r, e)
+                for r, e in sec_rels
+                if r.relationship_type not in {"BELONGS_TO_WORK_CLUSTER", "AUTHORED_BY", "CONFIGURED_IN"}
+            ]
+            for rel, _ in structural_rels[:40]:
+                s_name = entity_name_map.get(rel.source_entity_id, str(rel.source_entity_id))
+                t_name = entity_name_map.get(rel.target_entity_id, str(rel.target_entity_id))
+                content_lines.append(f"- **Relationship**: **{s_name}** `{rel.relationship_type}` **{t_name}**")
 
             section_text = "\n".join(content_lines)
             sec_hash = hashlib.sha256(section_text.encode("utf-8")).hexdigest()
@@ -390,11 +678,18 @@ class PackageAssemblyService:
                 section_type=sec_type,
                 section_title=SECTION_TITLES[sec_type],
                 section_content=section_text,
-                content_summary=f"{len(sec_items)} items, {len(sec_rels)} relationships.",
+                content_summary=f"{len(sec_items)} findings ({verified_cnt} verified, {prov_cnt} provisional), {len(sec_rels)} relationships.",
                 section_order=order,
                 knowledge_item_count=len(sec_items),
                 relationship_count=len(sec_rels),
-                metadata_json={"sha256": sec_hash, "llm_used": False, "handover_type": handover_type},
+                metadata_json={
+                    "sha256": sec_hash,
+                    "llm_used": False,
+                    "handover_type": handover_type,
+                    "generation_method": "deterministic_knowledge_composition",
+                    "include_provisional_draft": allow_provisional_draft,
+                    "is_test_draft": allow_provisional_draft,
+                },
             )
             created_section = self.section_repo.create(section)
 
@@ -409,16 +704,20 @@ class PackageAssemblyService:
                         version_id=created_version.id,
                         link_type=HandoverLinkType.KNOWLEDGE_ITEM.value,
                         knowledge_item_id=ki.id,
-                        eligibility_status_json={
-                            "is_eligible": elig.is_eligible,
-                            "case_status": elig.case_status,
-                            "epistemic_status": elig.epistemic_status,
-                        },
+                        eligibility_status_json=_elig_json(elig, default_ep=ki.epistemic_status),
                     )
                 )
 
             # Create Content Links for Relationships
             for rel, elig in sec_rels:
+                ej_rel = (
+                    elig
+                    if isinstance(elig, dict)
+                    else {
+                        "is_eligible": getattr(elig, "is_eligible", False),
+                        "case_status": getattr(elig, "case_status", "verified"),
+                    }
+                )
                 links_to_create.append(
                     HandoverContentLink(
                         organisation_id=case.organisation_id,
@@ -427,10 +726,7 @@ class PackageAssemblyService:
                         version_id=created_version.id,
                         link_type=HandoverLinkType.RELATIONSHIP.value,
                         relationship_id=rel.id,
-                        eligibility_status_json={
-                            "is_eligible": elig.is_eligible,
-                            "case_status": elig.case_status,
-                        },
+                        eligibility_status_json=ej_rel,
                     )
                 )
 
@@ -503,4 +799,7 @@ class PackageAssemblyService:
         )
 
         self.session.flush()
+        from app.services.handover_sections import invalidate_handover_sections_cache
+
+        invalidate_handover_sections_cache(project_id)
         return created_version

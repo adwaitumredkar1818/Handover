@@ -37,7 +37,7 @@ from app.repositories.handover import (
 from app.schemas.handover import NarrativeDraftRequest, SectionEditRequest
 from app.services.audit import AuditService
 from app.services.handover_eligibility import check_evidence_accessibility
-from app.services.handover_sections import redact_secrets
+from app.services.handover_sections import invalidate_handover_sections_cache, redact_secrets
 from app.services.llm import (
     DisabledLLMClient,
     LLMExecutionError,
@@ -193,6 +193,7 @@ class HandoverNarrativeService:
             content=request.section_content,
             summary=request.content_summary,
         )
+        invalidate_handover_sections_cache(project_id)
         self.audit_service.record_event(
             event_type="handover.section.edited",
             resource_type="handover_package_section",
