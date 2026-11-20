@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, CheckSquare, Scale, ShieldCheck } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
+import { getCachedGraph, invalidateGraphCache, setCachedGraph } from "../../lib/graphCache";
 import {
   verificationApi,
   type QueueFilters,
@@ -87,17 +88,43 @@ export function VerificationCenterWorkspace() {
     }
   };
 
-  // ── Load summary + queue ─────────────────────────────────────────────────
+  // ── Load summary + queue (with stale-while-revalidate cache) ───────────────
   const loadSummaryAndQueue = useCallback(
-    async (filtersOverride?: QueueFilters) => {
+    async (filtersOverride?: QueueFilters, forceRefresh = false) => {
       if (!projectId) return;
-      setQueueLoading(true);
+      const activeFilters = filtersOverride ?? debouncedFilters;
+      const cacheKey = `verif_q:${projectId}:${JSON.stringify(activeFilters)}`;
+      const cached = !forceRefresh
+        ? getCachedGraph<{
+            summary: VerificationSummary;
+            queue: Awaited<ReturnType<typeof verificationApi.getQueue>>;
+          }>(cacheKey, undefined, user?.id)
+        : null;
+
+      if (cached) {
+        setSummary(cached.summary);
+        setQueueItems(cached.queue.items);
+        setQueueTotal(cached.queue.total);
+        setAvailableDomains(cached.queue.available_domains);
+        setAvailableSources(cached.queue.available_sources);
+        setAvailablePeople(cached.queue.available_people);
+        setSelectedCaseId((prev) => {
+          const stillExists = cached.queue.items.some((i) => i.id === prev);
+          if (!prev || !stillExists) return cached.queue.items[0]?.id ?? null;
+          return prev;
+        });
+        setQueueLoading(false);
+      } else {
+        setQueueLoading(true);
+      }
+
       setErrorMsg(null);
       try {
         const [sumRes, qRes] = await Promise.all([
           verificationApi.getSummary(projectId),
-          verificationApi.getQueue(projectId, filtersOverride ?? debouncedFilters),
+          verificationApi.getQueue(projectId, activeFilters),
         ]);
+        setCachedGraph(cacheKey, { summary: sumRes, queue: qRes }, user?.id);
         setSummary(sumRes);
         setQueueItems(qRes.items);
         setQueueTotal(qRes.total);
@@ -112,30 +139,46 @@ export function VerificationCenterWorkspace() {
           return prev;
         });
       } catch (err) {
-        setErrorMsg(err instanceof Error ? err.message : "Failed to load verification queue.");
+        if (!cached) {
+          setErrorMsg(err instanceof Error ? err.message : "Failed to load verification queue.");
+        }
       } finally {
         setQueueLoading(false);
       }
     },
-    [projectId, debouncedFilters]
+    [projectId, debouncedFilters, user?.id]
   );
 
-  // ── Load case detail ─────────────────────────────────────────────────────
-  const loadCaseDetail = useCallback(async () => {
+  // ── Load case detail (with stale-while-revalidate cache) ──────────────────
+  const loadCaseDetail = useCallback(async (forceRefresh = false) => {
     if (!projectId || !selectedCaseId) {
       setCaseDetail(null);
       return;
     }
-    setDetailLoading(true);
+    const detailCacheKey = `verif_case:${projectId}:${selectedCaseId}`;
+    const cachedDetail = !forceRefresh
+      ? getCachedGraph<VerificationCaseDetail>(detailCacheKey, undefined, user?.id)
+      : null;
+
+    if (cachedDetail) {
+      setCaseDetail(cachedDetail);
+      setDetailLoading(false);
+    } else {
+      setDetailLoading(true);
+    }
+
     try {
       const detail = await verificationApi.getCaseDetail(projectId, selectedCaseId);
+      setCachedGraph(detailCacheKey, detail, user?.id);
       setCaseDetail(detail);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to load finding details.");
+      if (!cachedDetail) {
+        setErrorMsg(err instanceof Error ? err.message : "Failed to load finding details.");
+      }
     } finally {
       setDetailLoading(false);
     }
-  }, [projectId, selectedCaseId]);
+  }, [projectId, selectedCaseId, user?.id]);
 
   useEffect(() => {
     void loadSummaryAndQueue();
@@ -175,11 +218,13 @@ export function VerificationCenterWorkspace() {
     setStatusNotice(null);
     try {
       const res = await verificationApi.syncAndAssess(projectId);
+      invalidateGraphCache(`verif_q:${projectId}`);
+      invalidateGraphCache(`verif_case:${projectId}`);
       setStatusNotice(
         `Synced ${res.cases_created} new, assessed ${res.cases_assessed} case(s), detected ${res.issues_detected} issue(s).`
       );
-      await loadSummaryAndQueue();
-      if (selectedCaseId) await loadCaseDetail();
+      await loadSummaryAndQueue(undefined, true);
+      if (selectedCaseId) await loadCaseDetail(true);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Sync failed.");
     } finally {
@@ -196,9 +241,13 @@ export function VerificationCenterWorkspace() {
     setStatusNotice(null);
     try {
       const updated = await fn();
+      if (projectId) {
+        invalidateGraphCache(`verif_q:${projectId}`);
+        setCachedGraph(`verif_case:${projectId}:${updated.id}`, updated, user?.id);
+      }
       setCaseDetail(updated);
       setStatusNotice(notice);
-      await loadSummaryAndQueue();
+      await loadSummaryAndQueue(undefined, true);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Action failed.");
     } finally {
