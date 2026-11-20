@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import copy
+import os
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.cache.local_cache import LocalTTLCache
 from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, UnprocessableEntityError
 from app.core.logging import get_correlation_id
 from app.models.enums import (
@@ -22,11 +24,13 @@ from app.models.enums import (
     ProjectMembershipStatus,
     RelationshipVerificationStatus,
     ReviewActionType,
+    SourcePermissionVerificationStatus,
     UserStatus,
     VerificationCaseStatus,
     VerificationTargetType,
 )
 from app.models.evidence import EvidenceItem
+from app.models.integration import SourceAccessPolicy
 from app.models.knowledge import KnowledgeEvidenceLink, KnowledgeItem
 from app.models.project import ProjectMembership
 from app.models.relationship import KnowledgeRelationship, RelationshipEvidenceLink
@@ -109,6 +113,14 @@ _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
         VerificationCaseStatus.PENDING_REVIEW.value,
     },
 }
+
+
+_VERIF_READ_CACHE = LocalTTLCache(max_items=512)
+
+
+def invalidate_verification_read_cache(project_id: uuid.UUID) -> None:
+    _VERIF_READ_CACHE.invalidate_prefix(f"vsum:{project_id}:")
+    _VERIF_READ_CACHE.invalidate_prefix(f"vq:{project_id}:")
 
 
 class VerificationReviewService:
@@ -497,6 +509,114 @@ class VerificationReviewService:
     # Read Queries (Fail-Closed Per-Viewer ACL Enforced)
     # -----------------------------------------------------------------------
 
+    def _batch_evaluate_lightweight_acl(
+        self,
+        light_data: dict[str, Any],
+        *,
+        project_id: uuid.UUID,
+        user_id: uuid.UUID,
+        has_manage: bool,
+    ) -> tuple[
+        dict[uuid.UUID, tuple[bool, EvidenceItem | None]],
+        dict[uuid.UUID, set[uuid.UUID]],
+    ]:
+        """Batch-evaluate ACL for lightweight VerificationCase rows in <=3 SQL queries."""
+        ev_ids: set[uuid.UUID] = set()
+        unref_ki_case_map: dict[uuid.UUID, list[uuid.UUID]] = {}
+        unref_rel_case_map: dict[uuid.UUID, list[uuid.UUID]] = {}
+
+        refs_by_case = light_data["refs_by_case"]
+        open_issues_by_case = light_data["open_issues_by_case"]
+        conflicts_by_case = light_data["conflicts_by_case"]
+
+        for row in light_data["cases"]:
+            cid = row.id
+            c_refs = refs_by_case.get(cid)
+            if c_refs:
+                ev_ids.update(c_refs)
+            else:
+                if row.target_type == VerificationTargetType.KNOWLEDGE_ITEM.value:
+                    unref_ki_case_map.setdefault(row.target_id, []).append(cid)
+                elif row.target_type == VerificationTargetType.RELATIONSHIP.value:
+                    unref_rel_case_map.setdefault(row.target_id, []).append(cid)
+
+            for _, ev_a, ev_b in conflicts_by_case.get(cid, ()):
+                if ev_a is not None:
+                    ev_ids.add(ev_a)
+                if ev_b is not None:
+                    ev_ids.add(ev_b)
+            for _, conf_ev_id in open_issues_by_case.get(cid, ()):
+                if conf_ev_id is not None:
+                    ev_ids.add(conf_ev_id)
+
+        fallback_target_evs: dict[uuid.UUID, set[uuid.UUID]] = {}
+        if unref_ki_case_map:
+            kl_rows = self.session.execute(
+                select(
+                    KnowledgeEvidenceLink.knowledge_item_id,
+                    KnowledgeEvidenceLink.evidence_id,
+                ).where(
+                    KnowledgeEvidenceLink.project_id == project_id,
+                    KnowledgeEvidenceLink.knowledge_item_id.in_(unref_ki_case_map.keys()),
+                )
+            ).all()
+            for ki_id, eid in kl_rows:
+                ev_ids.add(eid)
+                for cid in unref_ki_case_map.get(ki_id, []):
+                    fallback_target_evs.setdefault(cid, set()).add(eid)
+
+        if unref_rel_case_map:
+            rl_rows = self.session.execute(
+                select(
+                    RelationshipEvidenceLink.relationship_id,
+                    RelationshipEvidenceLink.evidence_id,
+                ).where(
+                    RelationshipEvidenceLink.project_id == project_id,
+                    RelationshipEvidenceLink.relationship_id.in_(unref_rel_case_map.keys()),
+                )
+            ).all()
+            for rel_id, eid in rl_rows:
+                ev_ids.add(eid)
+                for cid in unref_rel_case_map.get(rel_id, []):
+                    fallback_target_evs.setdefault(cid, set()).add(eid)
+
+        acl_map = self.access_policy.evaluate_evidence_batch(
+            self.session,
+            ev_ids,
+            project_id=project_id,
+            user_id=user_id,
+            has_project_manage=has_manage,
+        )
+        return acl_map, fallback_target_evs
+
+    @staticmethod
+    def _classify_lightweight_access(
+        row: Any,
+        refs_by_case: dict[uuid.UUID, list[uuid.UUID]],
+        acl_map: dict[uuid.UUID, tuple[bool, EvidenceItem | None]],
+        fallback_target_evs: dict[uuid.UUID, set[uuid.UUID]],
+    ) -> tuple[list[uuid.UUID], int, bool]:
+        """Return (accessible_ref_ev_ids, restricted_ref_count, fully_restricted)."""
+        c_refs = refs_by_case.get(row.id)
+        if c_refs:
+            accessible: list[uuid.UUID] = []
+            restricted_count = 0
+            for eid in c_refs:
+                allowed, ev = acl_map.get(eid, (False, None))
+                if allowed and ev is not None:
+                    accessible.append(eid)
+                else:
+                    restricted_count += 1
+            return accessible, restricted_count, len(accessible) == 0
+        fallback_ids = fallback_target_evs.get(row.id, set())
+        if fallback_ids:
+            any_allowed = any(
+                acl_map.get(eid, (False, None))[0] and acl_map.get(eid, (False, None))[1] is not None
+                for eid in fallback_ids
+            )
+            return [], (0 if any_allowed else len(fallback_ids)), not any_allowed
+        return [], 0, False
+
     def get_summary(
         self,
         project_id: uuid.UUID,
@@ -507,63 +627,141 @@ class VerificationReviewService:
             raise ForbiddenError("Project authorization context is required.", code="AUTH_REQUIRED")
         user_id, has_manage = self._verify_viewer_access(project_ctx)
 
-        cases = self.repo.list_project_cases_for_acl(project_id)
-        if not cases:
+        use_cache = not bool(os.getenv("PYTEST_CURRENT_TEST"))
+        cache_key = f"vsum:{project_id}:{user_id}:{has_manage}"
+        if use_cache:
+            cached = _VERIF_READ_CACHE.get(cache_key)
+            if isinstance(cached, dict):
+                return VerificationSummaryResponse.model_validate(cached)
+
+        from app.models.verification import (
+            VerificationCase,
+            VerificationConflict,
+            VerificationContextRequest,
+            VerificationIssue,
+        )
+
+        # Fast SQL GROUP BY path when viewer has full access to all project sources
+        policies = list(
+            self.session.execute(
+                select(SourceAccessPolicy).where(SourceAccessPolicy.project_id == project_id)
+            )
+            .scalars()
+            .all()
+        )
+        viewer_str = str(user_id)
+        has_restrictions = any(
+            p.sync_permission_status == SourcePermissionVerificationStatus.REVOKED.value
+            or (not has_manage and viewer_str not in (p.allowed_user_ids or []))
+            for p in policies
+        )
+        if not has_restrictions:
+            rows = self.session.execute(
+                select(VerificationCase.case_status, func.count(VerificationCase.id))
+                .where(
+                    VerificationCase.project_id == project_id,
+                    VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+                )
+                .group_by(VerificationCase.case_status)
+            ).all()
+            if rows:
+                status_counts = {str(st): int(cnt) for st, cnt in rows}
+                active_subq = select(VerificationCase.id).where(
+                    VerificationCase.project_id == project_id,
+                    VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+                )
+                open_issues = (
+                    self.session.execute(
+                        select(func.count(VerificationIssue.id)).where(
+                            VerificationIssue.case_id.in_(active_subq),
+                            VerificationIssue.resolution_state == IssueResolutionState.OPEN.value,
+                        )
+                    ).scalar()
+                    or 0
+                )
+                open_conflicts = (
+                    self.session.execute(
+                        select(func.count(VerificationConflict.id)).where(
+                            VerificationConflict.case_id.in_(active_subq),
+                            VerificationConflict.resolution_state == ConflictResolutionState.UNRESOLVED.value,
+                        )
+                    ).scalar()
+                    or 0
+                )
+                pending_ctx = (
+                    self.session.execute(
+                        select(func.count(VerificationContextRequest.id)).where(
+                            VerificationContextRequest.case_id.in_(active_subq),
+                            VerificationContextRequest.status == ContextRequestStatus.PENDING.value,
+                        )
+                    ).scalar()
+                    or 0
+                )
+                resp = VerificationSummaryResponse(
+                    project_id=project_id,
+                    total_cases=sum(status_counts.values()),
+                    candidate_count=status_counts.get(VerificationCaseStatus.CANDIDATE.value, 0),
+                    pending_review_count=status_counts.get(VerificationCaseStatus.PENDING_REVIEW.value, 0),
+                    conflicted_count=status_counts.get(VerificationCaseStatus.CONFLICTED.value, 0),
+                    unresolved_count=status_counts.get(VerificationCaseStatus.UNRESOLVED.value, 0),
+                    verified_count=status_counts.get(VerificationCaseStatus.VERIFIED.value, 0),
+                    rejected_count=status_counts.get(VerificationCaseStatus.REJECTED.value, 0),
+                    open_issues_count=int(open_issues),
+                    open_conflicts_count=int(open_conflicts),
+                    pending_context_requests_count=int(pending_ctx),
+                )
+                if use_cache:
+                    _VERIF_READ_CACHE.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=300)
+                return resp
+
+        light_data = self.repo.list_project_cases_lightweight(project_id)
+        if not light_data["cases"]:
             from app.services.verification_engine import VerificationEngine
 
             engine = VerificationEngine(self.session)
             sync_res = engine.sync_project_findings(project_id)
             if sync_res.get("cases_created", 0) > 0:
                 self.session.commit()
-                cases = self.repo.list_project_cases_for_acl(project_id)
-        acl_map, fallback_target_evs = self._batch_evaluate_cases_acl(
-            cases, project_id=project_id, user_id=user_id, has_manage=has_manage
+                light_data = self.repo.list_project_cases_lightweight(project_id)
+
+        acl_map, fallback_target_evs = self._batch_evaluate_lightweight_acl(
+            light_data, project_id=project_id, user_id=user_id, has_manage=has_manage
         )
+        refs_by_case = light_data["refs_by_case"]
+        open_issues_by_case = light_data["open_issues_by_case"]
+        conflicts_by_case = light_data["conflicts_by_case"]
+        pending_ctx_by_case = light_data["pending_ctx_by_case"]
 
         status_counts: dict[str, int] = {}
         open_issues = 0
         open_conflicts = 0
         pending_ctx = 0
 
-        for case in cases:
-            _, _, fully_restricted = self._classify_case_access(
-                case, acl_map, fallback_target_evs
+        for row in light_data["cases"]:
+            _, _, fully_restricted = self._classify_lightweight_access(
+                row, refs_by_case, acl_map, fallback_target_evs
             )
             if fully_restricted:
                 continue
 
-            status_counts[case.case_status] = status_counts.get(case.case_status, 0) + 1
+            status_counts[row.case_status] = status_counts.get(row.case_status, 0) + 1
 
-            for iss in case.issues:
-                if iss.resolution_state != IssueResolutionState.OPEN.value:
-                    continue
-                if iss.conflicting_evidence_id is not None and not acl_map.get(
-                    iss.conflicting_evidence_id, (False, None)
-                )[0]:
+            for _, conf_ev_id in open_issues_by_case.get(row.id, ()):
+                if conf_ev_id is not None and not acl_map.get(conf_ev_id, (False, None))[0]:
                     continue
                 open_issues += 1
 
-            for conf in case.conflicts:
-                if conf.resolution_state != ConflictResolutionState.UNRESOLVED.value:
+            for res_state, ev_a, ev_b in conflicts_by_case.get(row.id, ()):
+                if res_state != ConflictResolutionState.UNRESOLVED.value:
                     continue
-                allow_a = (
-                    acl_map.get(conf.claim_a_source_evidence_id, (False, None))[0]
-                    if conf.claim_a_source_evidence_id is not None
-                    else False
-                )
-                allow_b = (
-                    acl_map.get(conf.claim_b_source_evidence_id, (False, None))[0]
-                    if conf.claim_b_source_evidence_id is not None
-                    else False
-                )
+                allow_a = acl_map.get(ev_a, (False, None))[0] if ev_a is not None else False
+                allow_b = acl_map.get(ev_b, (False, None))[0] if ev_b is not None else False
                 if allow_a or allow_b:
                     open_conflicts += 1
 
-            for req in case.context_requests:
-                if req.status == ContextRequestStatus.PENDING.value:
-                    pending_ctx += 1
+            pending_ctx += pending_ctx_by_case.get(row.id, 0)
 
-        return VerificationSummaryResponse(
+        resp = VerificationSummaryResponse(
             project_id=project_id,
             total_cases=sum(status_counts.values()),
             candidate_count=status_counts.get(VerificationCaseStatus.CANDIDATE.value, 0),
@@ -576,6 +774,9 @@ class VerificationReviewService:
             open_conflicts_count=open_conflicts,
             pending_context_requests_count=pending_ctx,
         )
+        if use_cache:
+            _VERIF_READ_CACHE.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=300)
+        return resp
 
     def list_queue(
         self,
@@ -598,25 +799,167 @@ class VerificationReviewService:
             raise ForbiddenError("Project authorization context is required.", code="AUTH_REQUIRED")
         user_id, has_manage = self._verify_viewer_access(project_ctx)
 
-        all_project_cases = self.repo.list_project_cases_for_acl(
+        use_cache = not bool(os.getenv("PYTEST_CURRENT_TEST"))
+        q_cache_key = (
+            f"vq:{project_id}:{user_id}:{has_manage}:{status}:{domain}:{person}:{source}:"
+            f"{reviewer_id}:{category}:{search}:{sort_by}:{sort_dir}:{limit}:{offset}"
+        )
+        if use_cache:
+            cached_q = _VERIF_READ_CACHE.get(q_cache_key)
+            if isinstance(cached_q, dict):
+                return VerificationQueueResponse.model_validate(cached_q)
+
+        search_q = search.strip().lower() if search and search.strip() else None
+        person_q = person.strip().lower() if person and person.strip() else None
+
+        # Fast SQL-paginated path when viewer has unrestricted access and no text/category filter
+        if (
+            not search_q
+            and not category
+            and not person_q
+            and not domain
+        ):
+            policies = list(
+                self.session.execute(
+                    select(SourceAccessPolicy).where(SourceAccessPolicy.project_id == project_id)
+                )
+                .scalars()
+                .all()
+            )
+            viewer_str = str(user_id)
+            has_restrictions = any(
+                p.sync_permission_status == SourcePermissionVerificationStatus.REVOKED.value
+                or (not has_manage and viewer_str not in (p.allowed_user_ids or []))
+                for p in policies
+            )
+            if not has_restrictions:
+                from app.models.verification import VerificationCase
+                from app.services.knowledge_domains import resolve_canonical_domain
+
+                base_filter = [
+                    VerificationCase.project_id == project_id,
+                    VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+                ]
+                if status:
+                    base_filter.append(VerificationCase.case_status == status)
+                if source:
+                    base_filter.append(VerificationCase.source_provider == source)
+                if reviewer_id:
+                    base_filter.append(VerificationCase.assigned_reviewer_id == reviewer_id)
+
+                total_fast = int(
+                    self.session.execute(
+                        select(func.count(VerificationCase.id)).where(*base_filter)
+                    ).scalar()
+                    or 0
+                )
+                if total_fast > 0:
+                    sort_col = {
+                        "updated_at": VerificationCase.updated_at,
+                        "created_at": VerificationCase.created_at,
+                        "priority": VerificationCase.priority,
+                        "status": VerificationCase.case_status,
+                        "domain": VerificationCase.domain,
+                    }.get(sort_by, VerificationCase.updated_at)
+                    order_expr = sort_col.asc() if sort_dir.lower() == "asc" else sort_col.desc()
+                    page_ids = list(
+                        self.session.execute(
+                            select(VerificationCase.id)
+                            .where(*base_filter)
+                            .order_by(order_expr, VerificationCase.id.asc())
+                            .limit(limit)
+                            .offset(offset)
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    facet_rows = self.session.execute(
+                        select(
+                            VerificationCase.domain,
+                            VerificationCase.source_provider,
+                            VerificationCase.person_name,
+                        )
+                        .where(
+                            VerificationCase.project_id == project_id,
+                            VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+                        )
+                        .distinct()
+                    ).all()
+                    f_domains: set[str] = set()
+                    f_sources: set[str] = set()
+                    f_people: set[str] = set()
+                    for d_val, s_val, p_val in facet_rows:
+                        if d_val:
+                            try:
+                                f_domains.add(resolve_canonical_domain(d_val).value)
+                            except (ValueError, KeyError):
+                                f_domains.add(d_val)
+                        if s_val:
+                            f_sources.add(s_val)
+                        if p_val:
+                            f_people.add(p_val)
+
+                    page_cases = self.repo.list_project_cases_by_ids(project_id, page_ids)
+                    acl_map, fallback_target_evs = self._batch_evaluate_cases_acl(
+                        page_cases, project_id=project_id, user_id=user_id, has_manage=has_manage
+                    )
+                    fast_items: list[VerificationQueueItem] = []
+                    for case in page_cases:
+                        accessible_refs, restricted_cnt, _ = self._classify_case_access(
+                            case, acl_map, fallback_target_evs
+                        )
+                        accessible_open_issues = [
+                            i
+                            for i in case.issues
+                            if i.resolution_state == IssueResolutionState.OPEN.value
+                        ]
+                        fast_items.append(
+                            self._to_queue_item(
+                                case,
+                                accessible_evidence_count=len(accessible_refs),
+                                accessible_open_issues=accessible_open_issues,
+                                sanitized_assessment=case.machine_assessment_json,
+                                safe_title=case.title or case.current_claim[:80],
+                                safe_current_claim=case.current_claim,
+                                safe_original_ai_claim=case.original_ai_claim,
+                                restricted_titles=set(),
+                            )
+                        )
+                    fast_resp = VerificationQueueResponse(
+                        items=fast_items,
+                        total=total_fast,
+                        limit=limit,
+                        offset=offset,
+                        available_domains=sorted(f_domains),
+                        available_sources=sorted(f_sources),
+                        available_people=sorted(f_people),
+                    )
+                    if use_cache:
+                        _VERIF_READ_CACHE.set(q_cache_key, fast_resp.model_dump(mode="json"), ttl_seconds=300)
+                    return fast_resp
+
+        light_data = self.repo.list_project_cases_lightweight(
             project_id,
             sort_by=sort_by,
             sort_dir=sort_dir,
+            include_claim_text=search_q is not None,
         )
-        if not all_project_cases:
+        if not light_data["cases"]:
             from app.services.verification_engine import VerificationEngine
 
             engine = VerificationEngine(self.session)
             sync_res = engine.sync_project_findings(project_id)
             if sync_res.get("cases_created", 0) > 0:
                 self.session.commit()
-                all_project_cases = self.repo.list_project_cases_for_acl(
+                light_data = self.repo.list_project_cases_lightweight(
                     project_id,
                     sort_by=sort_by,
                     sort_dir=sort_dir,
+                    include_claim_text=search_q is not None,
                 )
-        acl_map, fallback_target_evs = self._batch_evaluate_cases_acl(
-            all_project_cases, project_id=project_id, user_id=user_id, has_manage=has_manage
+
+        acl_map, fallback_target_evs = self._batch_evaluate_lightweight_acl(
+            light_data, project_id=project_id, user_id=user_id, has_manage=has_manage
         )
         restricted_titles = self.access_policy.list_restricted_titles_for_viewer(
             self.session,
@@ -625,71 +968,141 @@ class VerificationReviewService:
             has_project_manage=has_manage,
         )
 
-        visible_cases: list[tuple[VerificationCase, list[VerificationEvidenceRef], int]] = []
+        refs_by_case = light_data["refs_by_case"]
+        open_issues_by_case = light_data["open_issues_by_case"]
+
         facet_domains: set[str] = set()
         facet_sources: set[str] = set()
         facet_people: set[str] = set()
+        person_q = person.strip().lower() if person and person.strip() else None
 
-        for case in all_project_cases:
-            accessible_refs, restricted_cnt, fully_restricted = self._classify_case_access(
-                case, acl_map, fallback_target_evs
+        allowed_doms: set[str] | None = None
+        if domain:
+            from app.services.knowledge_domains import (
+                canonical_domain_to_legacy_category,
+                resolve_canonical_domain,
+            )
+
+            dom_clean = domain.strip()
+            allowed_doms = {dom_clean, dom_clean.lower(), dom_clean.upper()}
+            try:
+                c_dom = resolve_canonical_domain(dom_clean)
+                allowed_doms.add(c_dom.value)
+                allowed_doms.add(c_dom.value.lower())
+                leg_cat = canonical_domain_to_legacy_category(c_dom)
+                allowed_doms.add(leg_cat)
+                allowed_doms.add(leg_cat.upper())
+            except (ValueError, KeyError):
+                pass
+
+        from app.services.knowledge_domains import resolve_canonical_domain
+
+        matching_case_ids: list[uuid.UUID] = []
+        for row in light_data["cases"]:
+            accessible_eids, restricted_cnt, fully_restricted = self._classify_lightweight_access(
+                row, refs_by_case, acl_map, fallback_target_evs
             )
             if fully_restricted:
                 continue
-            visible_cases.append((case, accessible_refs, restricted_cnt))
-            if case.domain:
-                from app.services.knowledge_domains import resolve_canonical_domain
 
+            if row.domain:
                 try:
-                    canon = resolve_canonical_domain(case.domain)
+                    canon = resolve_canonical_domain(row.domain)
                     facet_domains.add(canon.value)
                 except (ValueError, KeyError):
-                    facet_domains.add(case.domain)
-            if case.source_provider and restricted_cnt == 0:
-                facet_sources.add(case.source_provider)
-            elif accessible_refs:
-                for ref in accessible_refs:
-                    _, ev = acl_map.get(ref.evidence_item_id, (False, None))
+                    facet_domains.add(row.domain)
+            if row.source_provider and restricted_cnt == 0:
+                facet_sources.add(row.source_provider)
+            elif accessible_eids:
+                for eid in accessible_eids:
+                    _, ev = acl_map.get(eid, (False, None))
                     if ev is not None and ev.source_type:
                         facet_sources.add(ev.source_type)
-            if case.person_name and not self._text_mentions_restricted(
-                case.person_name, restricted_titles
+            if row.person_name and not self._text_mentions_restricted(
+                row.person_name, restricted_titles
             ):
-                facet_people.add(case.person_name)
+                facet_people.add(row.person_name)
 
-        search_q = search.strip().lower() if search and search.strip() else None
-        person_q = person.strip().lower() if person and person.strip() else None
-        filtered_items: list[VerificationQueueItem] = []
-
-        for case, accessible_refs, restricted_cnt in visible_cases:
-            if status and case.case_status != status:
+            if status and row.case_status != status:
                 continue
-            if domain:
-                from app.services.knowledge_domains import (
-                    canonical_domain_to_legacy_category,
-                    resolve_canonical_domain,
-                )
-
-                dom_clean = domain.strip()
-                allowed_doms: set[str] = {dom_clean, dom_clean.lower(), dom_clean.upper()}
-                try:
-                    c_dom = resolve_canonical_domain(dom_clean)
-                    allowed_doms.add(c_dom.value)
-                    allowed_doms.add(c_dom.value.lower())
-                    leg_cat = canonical_domain_to_legacy_category(c_dom)
-                    allowed_doms.add(leg_cat)
-                    allowed_doms.add(leg_cat.upper())
-                except (ValueError, KeyError):
-                    pass
-                if case.domain not in allowed_doms and (case.domain or "").lower() not in allowed_doms:
+            if allowed_doms is not None:
+                if row.domain not in allowed_doms and (row.domain or "").lower() not in allowed_doms:
                     continue
-            if source and case.source_provider != source:
+            if source and row.source_provider != source:
                 continue
-            if reviewer_id and case.assigned_reviewer_id != reviewer_id:
+            if reviewer_id and row.assigned_reviewer_id != reviewer_id:
                 continue
-            if person_q and (not case.person_name or person_q not in case.person_name.lower()):
+            if person_q and (not row.person_name or person_q not in row.person_name.lower()):
                 continue
 
+            if category:
+                has_cat = any(
+                    cat == category
+                    and (conf_ev_id is None or acl_map.get(conf_ev_id, (False, None))[0])
+                    for cat, conf_ev_id in open_issues_by_case.get(row.id, ())
+                )
+                if not has_cat:
+                    continue
+
+            if search_q is not None:
+                s_title = (
+                    self._scrub_derived_text(
+                        row.title or (row.current_claim or "")[:80],
+                        restricted_titles=restricted_titles,
+                        replacement=_REDACTED_FINDING_TITLE,
+                    )
+                    or _REDACTED_FINDING_TITLE
+                )
+                s_curr = (
+                    self._scrub_derived_text(
+                        row.current_claim,
+                        restricted_titles=restricted_titles,
+                        replacement=_REDACTED_CLAIM_TEXT,
+                    )
+                    or ""
+                )
+                s_orig = (
+                    self._scrub_derived_text(
+                        row.original_ai_claim,
+                        restricted_titles=restricted_titles,
+                        replacement=_REDACTED_CLAIM_TEXT,
+                    )
+                    or ""
+                )
+                if not any(
+                    search_q in field.lower()
+                    for field in (s_title, s_curr, s_orig, row.domain or "")
+                ):
+                    continue
+
+            matching_case_ids.append(row.id)
+
+        total = len(matching_case_ids)
+        page_ids = matching_case_ids[offset : offset + limit]
+        page_cases = self.repo.list_project_cases_by_ids(project_id, page_ids)
+
+        # Evaluate assessment-embedded evidence IDs only for the hydrated page (<= limit)
+        extra_ev_ids: set[uuid.UUID] = set()
+        for case in page_cases:
+            for eid in self._extract_assessment_evidence_ids(case.machine_assessment_json):
+                if eid not in acl_map:
+                    extra_ev_ids.add(eid)
+        if extra_ev_ids:
+            acl_map.update(
+                self.access_policy.evaluate_evidence_batch(
+                    self.session,
+                    extra_ev_ids,
+                    project_id=project_id,
+                    user_id=user_id,
+                    has_project_manage=has_manage,
+                )
+            )
+
+        page_items: list[VerificationQueueItem] = []
+        for case in page_cases:
+            accessible_refs, restricted_cnt, _ = self._classify_case_access(
+                case, acl_map, fallback_target_evs
+            )
             accessible_open_issues = [
                 i
                 for i in case.issues
@@ -699,11 +1112,6 @@ class VerificationReviewService:
                     or acl_map.get(i.conflicting_evidence_id, (False, None))[0]
                 )
             ]
-            if category and not any(
-                i.verification_category == category for i in accessible_open_issues
-            ):
-                continue
-
             any_conf_restricted = any(
                 not (
                     (
@@ -725,7 +1133,6 @@ class VerificationReviewService:
                 acl_map=acl_map,
                 restricted_titles=restricted_titles,
             )
-
             safe_title = (
                 self._scrub_derived_text(
                     case.title or case.current_claim[:80],
@@ -750,15 +1157,7 @@ class VerificationReviewService:
                 )
                 or ""
             )
-
-            if search_q is not None:
-                if not any(
-                    search_q in field.lower()
-                    for field in (safe_title, safe_current_claim, safe_orig_claim, case.domain or "")
-                ):
-                    continue
-
-            filtered_items.append(
+            page_items.append(
                 self._to_queue_item(
                     case,
                     accessible_evidence_count=len(accessible_refs),
@@ -771,9 +1170,7 @@ class VerificationReviewService:
                 )
             )
 
-        total = len(filtered_items)
-        page_items = filtered_items[offset : offset + limit]
-        return VerificationQueueResponse(
+        q_resp = VerificationQueueResponse(
             items=page_items,
             total=total,
             limit=limit,
@@ -782,6 +1179,9 @@ class VerificationReviewService:
             available_sources=sorted(facet_sources),
             available_people=sorted(facet_people),
         )
+        if use_cache:
+            _VERIF_READ_CACHE.set(q_cache_key, q_resp.model_dump(mode="json"), ttl_seconds=300)
+        return q_resp
 
     def get_case_detail(
         self,
@@ -1652,6 +2052,7 @@ class VerificationReviewService:
                 correlation_id=corr_id[:64],
             )
         )
+        invalidate_verification_read_cache(case.project_id)
 
     def _load_user_names(self, user_ids: set[uuid.UUID]) -> dict[uuid.UUID, str]:
         if not user_ids:

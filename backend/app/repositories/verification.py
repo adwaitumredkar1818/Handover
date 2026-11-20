@@ -209,6 +209,152 @@ class VerificationRepository:
         stmt = stmt.order_by(order_expr, VerificationCase.id.asc())
         return list(self.session.execute(stmt).scalars().all())
 
+    def list_project_cases_by_ids(
+        self,
+        project_id: uuid.UUID,
+        case_ids: list[uuid.UUID],
+    ) -> list[VerificationCase]:
+        """Hydrate full VerificationCase ORM rows with relations ONLY for a small page of IDs."""
+        if not case_ids:
+            return []
+        stmt = (
+            select(VerificationCase)
+            .where(
+                VerificationCase.project_id == project_id,
+                VerificationCase.id.in_(case_ids),
+            )
+            .options(
+                selectinload(VerificationCase.issues),
+                selectinload(VerificationCase.evidence_refs),
+                selectinload(VerificationCase.conflicts),
+                selectinload(VerificationCase.context_requests),
+                selectinload(VerificationCase.assigned_reviewer),
+            )
+        )
+        by_id = {c.id: c for c in self.session.execute(stmt).scalars().all()}
+        return [by_id[cid] for cid in case_ids if cid in by_id]
+
+    def list_project_cases_lightweight(
+        self,
+        project_id: uuid.UUID,
+        *,
+        status: str | None = None,
+        domain: str | None = None,
+        source: str | None = None,
+        reviewer_id: uuid.UUID | None = None,
+        sort_by: str = "updated_at",
+        sort_dir: str = "desc",
+        include_claim_text: bool = False,
+    ) -> dict[str, Any]:
+        """Fetch lightweight column projections for fast ACL evaluation, summary, and queue pagination."""
+        cols: list[Any] = [
+            VerificationCase.id,
+            VerificationCase.case_status,
+            VerificationCase.target_type,
+            VerificationCase.target_id,
+            VerificationCase.domain,
+            VerificationCase.source_provider,
+            VerificationCase.assigned_reviewer_id,
+            VerificationCase.person_name,
+        ]
+        if include_claim_text:
+            cols.extend(
+                [
+                    VerificationCase.title,
+                    VerificationCase.current_claim,
+                    VerificationCase.original_ai_claim,
+                ]
+            )
+
+        base_filter = [
+            VerificationCase.project_id == project_id,
+            VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+        ]
+        if status:
+            base_filter.append(VerificationCase.case_status == status)
+        if domain:
+            base_filter.append(VerificationCase.domain == domain)
+        if source:
+            base_filter.append(VerificationCase.source_provider == source)
+        if reviewer_id:
+            base_filter.append(VerificationCase.assigned_reviewer_id == reviewer_id)
+
+        sort_column = {
+            "updated_at": VerificationCase.updated_at,
+            "created_at": VerificationCase.created_at,
+            "priority": VerificationCase.priority,
+            "status": VerificationCase.case_status,
+            "domain": VerificationCase.domain,
+        }.get(sort_by, VerificationCase.updated_at)
+        order_expr = sort_column.asc() if sort_dir.lower() == "asc" else sort_column.desc()
+
+        case_rows = list(
+            self.session.execute(
+                select(*cols).where(*base_filter).order_by(order_expr, VerificationCase.id.asc())
+            ).all()
+        )
+        if not case_rows:
+            return {
+                "cases": [],
+                "refs_by_case": {},
+                "open_issues_by_case": {},
+                "conflicts_by_case": {},
+                "pending_ctx_by_case": {},
+            }
+
+        case_id_subq = select(VerificationCase.id).where(*base_filter)
+
+        refs_by_case: dict[uuid.UUID, list[uuid.UUID]] = {}
+        for cid, eid in self.session.execute(
+            select(VerificationEvidenceRef.case_id, VerificationEvidenceRef.evidence_item_id).where(
+                VerificationEvidenceRef.case_id.in_(case_id_subq)
+            )
+        ).all():
+            refs_by_case.setdefault(cid, []).append(eid)
+
+        open_issues_by_case: dict[uuid.UUID, list[tuple[str | None, uuid.UUID | None]]] = {}
+        for cid, cat, conf_ev_id in self.session.execute(
+            select(
+                VerificationIssue.case_id,
+                VerificationIssue.verification_category,
+                VerificationIssue.conflicting_evidence_id,
+            ).where(
+                VerificationIssue.case_id.in_(case_id_subq),
+                VerificationIssue.resolution_state == IssueResolutionState.OPEN.value,
+            )
+        ).all():
+            open_issues_by_case.setdefault(cid, []).append((cat, conf_ev_id))
+
+        conflicts_by_case: dict[
+            uuid.UUID, list[tuple[str, uuid.UUID | None, uuid.UUID | None]]
+        ] = {}
+        for cid, res_state, ev_a, ev_b in self.session.execute(
+            select(
+                VerificationConflict.case_id,
+                VerificationConflict.resolution_state,
+                VerificationConflict.claim_a_source_evidence_id,
+                VerificationConflict.claim_b_source_evidence_id,
+            ).where(VerificationConflict.case_id.in_(case_id_subq))
+        ).all():
+            conflicts_by_case.setdefault(cid, []).append((res_state, ev_a, ev_b))
+
+        pending_ctx_by_case: dict[uuid.UUID, int] = {}
+        for (cid,) in self.session.execute(
+            select(VerificationContextRequest.case_id).where(
+                VerificationContextRequest.case_id.in_(case_id_subq),
+                VerificationContextRequest.status == ContextRequestStatus.PENDING.value,
+            )
+        ).all():
+            pending_ctx_by_case[cid] = pending_ctx_by_case.get(cid, 0) + 1
+
+        return {
+            "cases": case_rows,
+            "refs_by_case": refs_by_case,
+            "open_issues_by_case": open_issues_by_case,
+            "conflicts_by_case": conflicts_by_case,
+            "pending_ctx_by_case": pending_ctx_by_case,
+        }
+
     def get_summary_counts(self, project_id: uuid.UUID) -> dict[str, int]:
         rows = self.session.execute(
             select(VerificationCase.case_status, func.count(VerificationCase.id))

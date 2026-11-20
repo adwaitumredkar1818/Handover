@@ -739,7 +739,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         activeProjectIdRef.current,
         userId
       );
-    }, 600);
+    }, 5000);
     return () => {
       active = false;
       clearTimeout(timer);
@@ -834,7 +834,13 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       return;
     }
     const currentProjectId = activeProject.id;
-    setIsLoadingMembers(true);
+    const cachedMembers = getCachedGraph<ProjectMember[]>(`proj_members:${currentProjectId}`, undefined, user.id);
+    if (cachedMembers) {
+      setMembers(cachedMembers);
+      setIsLoadingMembers(false);
+    } else {
+      setIsLoadingMembers(true);
+    }
     try {
       const [membersRes, transRes] = await Promise.allSettled([
         api.members.list(currentProjectId),
@@ -867,6 +873,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       setActiveProjectInternal((curr) => {
         if (curr?.id === currentProjectId) {
           setMembers(annotated);
+          setCachedGraph(`proj_members:${currentProjectId}`, annotated, user.id);
           annotated.forEach((m) => {
             const memId = m.user_id || m.id;
             if (memId) {
@@ -901,7 +908,17 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
     const targetOrgId = activeOrg.id;
     const targetProjectId = activeProject?.id || null;
-    setIsLoadingSources(true);
+    const cachedMappings = targetProjectId
+      ? getCachedGraph<ProjectSourceMapping[]>(`proj_sources:${targetProjectId}`, undefined, user.id)
+      : null;
+    const cachedConns = getCachedGraph<SourceConnection[]>(`org_sources:${targetOrgId}`, undefined, user.id);
+    if (cachedMappings) setSourceMappings(cachedMappings);
+    if (cachedConns) setOrgConnections(cachedConns);
+    if (cachedMappings || cachedConns) {
+      setIsLoadingSources(false);
+    } else {
+      setIsLoadingSources(true);
+    }
     try {
       if (targetProjectId) {
         clearApiCache(`/projects/${targetProjectId}/sources`);
@@ -916,9 +933,13 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       if (activeOrgIdRef.current !== targetOrgId) return;
       if (mappingsRes.status === "fulfilled") {
         setSourceMappings(mappingsRes.value);
+        if (targetProjectId) {
+          setCachedGraph(`proj_sources:${targetProjectId}`, mappingsRes.value, user.id);
+        }
       }
       if (connsRes.status === "fulfilled") {
         setOrgConnections(connsRes.value);
+        setCachedGraph(`org_sources:${targetOrgId}`, connsRes.value, user.id);
       }
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 401) return;
@@ -951,14 +972,18 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     isFetchingEvidenceRef.current = true;
     hasPendingRefreshEvidenceRef.current = false;
     const currentProjectId = activeProject.id;
-    if (evidenceListLenRef.current === 0) {
+    const cachedEvidence = getCachedGraph<EvidenceSummary[]>(`proj_evidence:${currentProjectId}`, undefined, user.id);
+    if (cachedEvidence) {
+      setEvidenceList(cachedEvidence);
+      setIsLoadingEvidence(false);
+    } else if (evidenceListLenRef.current === 0) {
       setIsLoadingEvidence(true);
     }
     try {
       clearApiCache(`/projects/${currentProjectId}/evidence`);
       const [itemsRes, metricsRes] = await Promise.allSettled([
         api.evidence.list(currentProjectId, {
-          limit: 500,
+          limit: 100,
         }),
         api.evidence.getMetrics(currentProjectId),
       ]);
@@ -966,6 +991,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       const metrics = metricsRes.status === "fulfilled" ? metricsRes.value : null;
       if (activeProjectIdRef.current !== currentProjectId) return;
       setEvidenceList(items);
+      setCachedGraph(`proj_evidence:${currentProjectId}`, items, user.id);
       setEvidenceMetrics(metrics);
       if (items.length > 0 && items[0]) {
         const firstId = items[0].id;
@@ -1045,17 +1071,25 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       return;
     }
     const targetProjectId = activeProject.id;
-    setIsLoadingFindings(true);
+    const cachedList = getCachedGraph<KnowledgeFinding[]>(`ki_domains:${targetProjectId}:all`, undefined, user.id);
+    const cachedSum = getCachedGraph<KnowledgeSummaryTelemetry>(`proj_ki_summary:${targetProjectId}`, undefined, user.id);
+    if (cachedList) setFindings(cachedList);
+    if (cachedSum) setKnowledgeSummary(cachedSum);
+    setIsLoadingFindings(!cachedList);
     try {
       const [sum, list] = await Promise.allSettled([
         api.knowledgeIntelligence.getSummary(activeProject.id),
         api.knowledgeIntelligence.listFindings(activeProject.id, undefined, 100, 0),
       ]);
       if (activeProjectIdRef.current !== targetProjectId) return;
-      if (sum.status === "fulfilled") setKnowledgeSummary(sum.value as unknown as KnowledgeSummaryTelemetry);
+      if (sum.status === "fulfilled") {
+        setKnowledgeSummary(sum.value as unknown as KnowledgeSummaryTelemetry);
+        setCachedGraph(`proj_ki_summary:${targetProjectId}`, sum.value, user.id);
+      }
       if (list.status === "fulfilled") {
         const allItems = (list.value.items || []) as unknown as KnowledgeFinding[];
         setFindings(allItems);
+        setCachedGraph(`ki_domains:${targetProjectId}:all`, allItems, user.id);
       }
     } catch (err) {
       console.warn("Knowledge findings unavailable:", err instanceof Error ? err.message : String(err));
@@ -1162,9 +1196,17 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       setHandoverCases([]);
       return;
     }
-    setIsLoadingHandovers(true);
+    const currentProjectId = activeProject.id;
+    const cachedHandovers = getCachedGraph<{ items?: HandoverCaseItem[] }>(`proj_handovers:${currentProjectId}`, undefined, user.id);
+    if (cachedHandovers?.items) {
+      setHandoverCases(cachedHandovers.items);
+      setIsLoadingHandovers(false);
+    } else {
+      setIsLoadingHandovers(true);
+    }
     try {
-      const res = await api.handover.listCases(activeProject.id);
+      const res = await api.handover.listCases(currentProjectId);
+      setCachedGraph(`proj_handovers:${currentProjectId}`, res, user.id);
       setHandoverCases((res.items || []) as unknown as HandoverCaseItem[]);
     } catch (err) {
       console.error("Error loading handover cases:", err);
@@ -1327,19 +1369,17 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     let prefetchTimer: ReturnType<typeof setTimeout> | null = null;
     void Promise.resolve().then(() => {
       if (!active) return;
-      // Load workspace context first, then warm all graph/subpage caches with bounded concurrency
+      // Load active workspace context first; defer heavy background prefetches so active page stays fast
       void refreshOverview();
       void refreshMembers();
       void refreshSources();
       void refreshEvidence();
-      void refreshFindings();
-      void refreshVerification();
       void refreshHandovers();
       prefetchTimer = setTimeout(() => {
         if (active) {
           void prefetchProjectAssets(activeProjectId, currentUserId);
         }
-      }, 250);
+      }, 3000);
     });
     return () => {
       active = false;

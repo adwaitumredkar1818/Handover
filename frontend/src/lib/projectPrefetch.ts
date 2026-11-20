@@ -1,8 +1,9 @@
 import { api } from "./api";
 import { getCachedGraph, setCachedGraph } from "./graphCache";
+import { verificationApi } from "./verificationApi";
 
 const inFlightPrefetches = new Map<string, Promise<void>>();
-const PREFETCH_CONCURRENCY = 2;
+const PREFETCH_CONCURRENCY = 1;
 
 async function runWithConcurrency(
   factories: Array<() => Promise<unknown>>,
@@ -362,24 +363,63 @@ export async function prefetchAllWorkspaceProjects(
           const key = `proj_evidence:${pid}`;
           if (getCachedGraph(key, undefined, userId)) return Promise.resolve();
           return api.evidence
-            .list(pid)
+            .list(pid, { limit: 100 })
             .then((res) => setCachedGraph(key, res, userId))
             .catch(() => {});
         },
         () => {
-          const key = `proj_verification:${pid}`;
+          const key = `verif_q:${pid}:${JSON.stringify({ limit: 50, offset: 0 })}`;
           if (getCachedGraph(key, undefined, userId)) return Promise.resolve();
-          return api.verification
-            .getQueue(pid)
+          return Promise.all([
+            verificationApi.getSummary(pid),
+            verificationApi.getQueue(pid, { limit: 50, offset: 0 }),
+          ])
+            .then(([summary, queue]) => setCachedGraph(key, { summary, queue }, userId))
+            .catch(() => {});
+        },
+        () => {
+          const key = `proj_sources:${pid}`;
+          if (getCachedGraph(key, undefined, userId)) return Promise.resolve();
+          return api.sources
+            .listProjectMappings(pid)
             .then((res) => setCachedGraph(key, res, userId))
             .catch(() => {});
         },
         () => {
           const key = `proj_handovers:${pid}`;
-          if (getCachedGraph(key, undefined, userId)) return Promise.resolve();
-          return api.handover
-            .listCases(pid)
-            .then((res) => setCachedGraph(key, res, userId))
+          const cachedCases = getCachedGraph<{ items?: Array<{ id: string }> } | Array<{ id: string }>>(
+            key,
+            undefined,
+            userId
+          );
+          const casesPromise = cachedCases
+            ? Promise.resolve(cachedCases)
+            : api.handover
+                .listCases(pid)
+                .then((res) => {
+                  setCachedGraph(key, res, userId);
+                  return res;
+                });
+
+          return casesPromise
+            .then(async (casesRes) => {
+              const caseList = Array.isArray(casesRes) ? casesRes : casesRes?.items || [];
+              const firstCase = caseList.length > 0 ? caseList[0] : null;
+              if (!firstCase?.id || !api.handover?.getVersions) return;
+              const vKey = `handover_versions:${pid}:${firstCase.id}`;
+              let versions = getCachedGraph<Array<{ id: string }>>(vKey, undefined, userId);
+              if (!versions) {
+                versions = await api.handover.getVersions(pid, firstCase.id);
+                setCachedGraph(vKey, versions, userId);
+              }
+              const firstVer = Array.isArray(versions) && versions.length > 0 ? versions[0] : null;
+              if (!firstVer?.id || !api.handover?.getVersionSections) return;
+              const sKey = `handover_sections:${pid}:${firstCase.id}:${firstVer.id}`;
+              if (!getCachedGraph(sKey, undefined, userId)) {
+                const sec = await api.handover.getVersionSections(pid, firstCase.id, firstVer.id);
+                setCachedGraph(sKey, sec, userId);
+              }
+            })
             .catch(() => {});
         },
       ],
