@@ -329,7 +329,7 @@ export function Report({ id }: { id: string }) {
                   </Select>
                 </div>
               </div>
-              <article className="mx-auto max-w-[860px] rounded-2xl border border-line bg-white px-6 py-8 shadow-card sm:px-12 sm:py-12">
+              <article className="handover-report mx-auto max-w-[860px] rounded-2xl border border-line bg-white px-6 py-8 shadow-card sm:px-12 sm:py-12">
                 <header className="mb-8 border-b-2 border-navy pb-6">
                   <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
                     <Logo size={24} />
@@ -377,7 +377,7 @@ export function Report({ id }: { id: string }) {
                   <div className="space-y-8">
                     {mandatorySections.map((ms) => (
                       <section key={ms.section_key} id={`sec-${ms.section_number}`} className="scroll-mt-6 border-t border-line pt-6 first:border-0 first:pt-0">
-                        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <div className="handover-section-heading mb-3 flex flex-wrap items-center justify-between gap-2">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="font-mono text-xs font-semibold text-brand">
                               {String(ms.section_number).padStart(2, '0')}
@@ -415,7 +415,7 @@ export function Report({ id }: { id: string }) {
                         )}
                         <div className="space-y-3 text-[13.5px] leading-relaxed text-slate-700">
                           {ms.knowledge_items.map((ki) => (
-                            <div key={ki.id} className="rounded-lg border border-line bg-slate-50/40 p-3.5">
+                            <div key={ki.id} className="handover-finding-card rounded-lg border border-line bg-slate-50/40 p-3.5">
                               <p className="font-semibold text-navy">
                                 {ki.title}
                                 <ShieldCheck className="ml-1.5 inline size-3.5 text-ok" />

@@ -14,8 +14,12 @@ Security & Integrity:
 
 from __future__ import annotations
 
+import base64
+import html as html_lib
+import io
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pymupdf as fitz
@@ -619,6 +623,61 @@ class HandoverExportService:
             export_format="json",
         )
 
+    @staticmethod
+    def _load_logo_data_uri() -> str:
+        """Load the canonical frontend Handover logo PNG as a data URI for offline Chromium/PyMuPDF rendering."""
+        logo_path = Path(__file__).resolve().parents[3] / "frontend" / "public" / "handover-logo.png"
+        if logo_path.is_file():
+            encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+            return f"data:image/png;base64,{encoded}"
+        return ""
+
+    @staticmethod
+    def _render_html_to_pdf_bytes(html_doc: str, *, footer_label: str) -> bytes:
+        """Render print-ready HTML/CSS to A4 PDF using headless Chromium (Playwright), falling back to PyMuPDF Story."""
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                try:
+                    context = browser.new_context(viewport={"width": 1024, "height": 1448})
+                    page = context.new_page()
+                    page.set_content(html_doc, wait_until="load", timeout=15000)
+                    footer_html = (
+                        '<div style="width:100%;font-family:Inter,system-ui,sans-serif;font-size:8px;'
+                        'color:#718096;padding:0 14mm;display:flex;justify-content:space-between;align-items:center;">'
+                        f"<span>{html_lib.escape(footer_label)}</span>"
+                        '<span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>'
+                        "</div>"
+                    )
+                    pdf_bytes = page.pdf(
+                        format="A4",
+                        print_background=True,
+                        prefer_css_page_size=True,
+                        display_header_footer=True,
+                        header_template="<span></span>",
+                        footer_template=footer_html,
+                        margin={"top": "14mm", "right": "14mm", "bottom": "16mm", "left": "14mm"},
+                    )
+                    return pdf_bytes
+                finally:
+                    browser.close()
+        except Exception:
+            buf = io.BytesIO()
+            writer = fitz.DocumentWriter(buf)
+            story = fitz.Story(html=html_doc)
+            story.write(
+                writer,
+                lambda _rect_num, _filled: (
+                    fitz.Rect(0, 0, 595, 842),
+                    fitz.Rect(36, 36, 559, 806),
+                    None,
+                ),
+            )
+            writer.close()
+            return buf.getvalue()
+
     def export_pdf(
         self,
         *,
@@ -630,7 +689,7 @@ class HandoverExportService:
         can_review_or_manage: bool | None = None,
         role_override: str | None = None,
     ) -> bytes:
-        """Generate viewer-authorized PDF document using PyMuPDF (fitz)."""
+        """Generate viewer-authorized PDF matching the exact Handover Report UI."""
         data = self._get_case_data(
             project_id=project_id,
             case_id=case_id,
@@ -642,268 +701,354 @@ class HandoverExportService:
             export_format="pdf",
         )
 
-        doc = fitz.open()
+        esc = html_lib.escape
         watermark = data["approval_watermark"]
         is_approved = data["is_approved_release"]
-
-        # Page 1: Title and Metadata Cover Page
-        cover = doc.new_page(width=595, height=842)  # A4 size in points
-        y = 60
-
-        cover.insert_text(
-            fitz.Point(54, y),
-            watermark,
-            fontsize=10,
-            fontname="helv",
-            color=(0.1, 0.55, 0.25) if is_approved else (0.75, 0.2, 0.2),
-        )
-        y += 18
-        cover.insert_text(
-            fitz.Point(54, y),
-            f"THE HANDOVER PLATFORM  |  {data['handover_type_label'].upper()}",
-            fontsize=10,
-            fontname="helv",
-            color=(0.2, 0.4, 0.8),
-        )
-        y += 24
-        cover.insert_text(
-            fitz.Point(54, y),
-            data["title"][:54],
-            fontsize=18,
-            fontname="helv",
-            color=(0.1, 0.1, 0.1),
-        )
-        y += 20
-        cover.insert_text(
-            fitz.Point(54, y),
-            f"Project: {data['project_name']}",
-            fontsize=12,
-            fontname="helv",
-            color=(0.3, 0.3, 0.3),
-        )
-        y += 28
-
-        meta_lines = [
-            f"Handover Case ID: {data['case_id']}",
-            f"Handover Type: {data['handover_type_label']}",
-            f"Lifecycle Status: {data['status'].upper()} ({watermark})",
-            f"Package Version: v{data['package_version_number']} (Rev v{data['version']})",
-            f"Package Hash: {data['package_hash'][:24]}...",
-            f"Generated: {data['exported_at']}",
-        ]
-        if data.get("target_handover_date"):
-            meta_lines.append(f"Target Handover Date: {data['target_handover_date']}")
-        if data["viewer_acl_filtered"]:
-            meta_lines.append(
-                f"Source Access Notice: {data['omitted_restricted_items_count']} restricted item(s) omitted."
-            )
-
-        for line in meta_lines:
-            cover.insert_text(
-                fitz.Point(54, y),
-                line,
-                fontsize=9,
-                fontname="helv",
-                color=(0.25, 0.25, 0.25),
-            )
-            y += 14
-
-        y += 12
-        cover.draw_line(fitz.Point(54, y), fitz.Point(541, y), color=(0.8, 0.8, 0.8), width=1)
-        y += 20
-
-        if data["description"]:
-            cover.insert_text(
-                fitz.Point(54, y),
-                "EXECUTIVE SUMMARY",
-                fontsize=11,
-                fontname="helv",
-                color=(0.1, 0.1, 0.1),
-            )
-            y += 14
-            desc_rect = fitz.Rect(54, y, 541, y + 64)
-            cover.insert_textbox(
-                desc_rect,
-                data["description"][:380],
-                fontsize=9,
-                fontname="helv",
-                color=(0.2, 0.2, 0.2),
-            )
-            y += 72
-
         summary_sections = data["mandatory_sections"] or []
-        cover.insert_text(
-            fitz.Point(54, y),
-            "MANDATORY HANDOVER SECTIONS" if summary_sections else "COMPILED 8-DOMAIN SECTIONS",
-            fontsize=11,
-            fontname="helv",
-            color=(0.1, 0.1, 0.1),
-        )
-        y += 16
 
-        if summary_sections:
-            for msec in summary_sections:
-                sec_line = (
-                    f"{msec['section_number']}. {msec['section_title']} "
-                    f"[{msec['readiness_status']}]"
-                )
-                cover.insert_text(
-                    fitz.Point(60, y),
-                    sec_line[:68],
-                    fontsize=9,
-                    fontname="helv",
-                    color=(0.2, 0.2, 0.2),
-                )
-                y += 14
-        else:
-            for sec in data["sections"]:
-                sec_line = f"* {sec['title']} ({sec['evidence_item_count']} items)"
-                cover.insert_text(
-                    fitz.Point(60, y),
-                    sec_line[:60],
-                    fontsize=9,
-                    fontname="helv",
-                    color=(0.2, 0.2, 0.2),
-                )
-                y += 14
-
-        cover.insert_text(
-            fitz.Point(54, 800),
-            f"{watermark}  |  Confidential - The Handover Platform",
-            fontsize=8,
-            fontname="helv",
-            color=(0.5, 0.5, 0.5),
+        logo_uri = self._load_logo_data_uri()
+        logo_html = (
+            f'<img src="{logo_uri}" alt="Handover" style="height:24px;width:auto;display:block;" />'
+            if logo_uri
+            else '<span style="font-size:15px;font-weight:700;color:#203653;">Handover</span>'
         )
 
-        # Render the 10 mandatory sections when available, else fallback to 8-domain sections
+        shield_svg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-2px;"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>'
+        lock_svg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-1px;"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'
+        sparkles_svg = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-1px;"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></svg>'
+        alert_svg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#d39b43" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-2px;margin-right:5px;"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>'
+
+        status_cls = "badge-green" if is_approved else "badge-amber"
+        status_icon = shield_svg if is_approved else lock_svg
+
+        total_verified = (
+            sum(len(m.get("knowledge_items") or []) for m in summary_sections)
+            if summary_sections
+            else sum(int(s.get("evidence_item_count") or 0) for s in data["sections"])
+        )
+        outgoing_name = esc(str(data.get("departing_member_name") or data.get("departing_member_id") or "Assigned Member"))
+        incoming_name = esc(str(data.get("successor_name") or data.get("successor_id") or "Unassigned"))
+        target_date = esc(str(data.get("target_handover_date") or "Not set"))
+
+        acl_banner_html = ""
+        if data["viewer_acl_filtered"]:
+            acl_banner_html = (
+                f'<div class="epistemic-banner" style="background:#fbf5ea;border:1px solid #ebd5ac;color:#775420;margin-top:8px;">'
+                f'<strong>Source Access Notice:</strong> {int(data["omitted_restricted_items_count"])} restricted item(s) omitted based on viewer permissions.'
+                f"</div>"
+            )
+
+        sections_html_parts: list[str] = []
         if summary_sections:
             for msec in summary_sections:
-                page = doc.new_page(width=595, height=842)
-                py = 54
-                page.insert_text(
-                    fitz.Point(54, py),
-                    f"{msec['section_number']}. {msec['section_title'].upper()}"[:58],
-                    fontsize=13,
-                    fontname="helv",
-                    color=(0.1, 0.2, 0.5),
-                )
-                py += 14
-                header_sub = (
-                    f"Readiness: {msec['readiness_status']}  |  "
-                    f"Priority #{msec['role_priority_rank']} ({data['handover_type_label']})"
-                )
-                page.insert_text(
-                    fitz.Point(54, py),
-                    header_sub[:85],
-                    fontsize=8,
-                    fontname="helv",
-                    color=(0.4, 0.4, 0.4),
-                )
-                py += 10
-                page.draw_line(
-                    fitz.Point(54, py),
-                    fitz.Point(541, py),
-                    color=(0.85, 0.85, 0.85),
-                    width=0.75,
-                )
-                py += 16
-                content_rect = fitz.Rect(54, py, 541, 780)
-                body_text = (
-                    msec.get("content_markdown")
-                    or msec.get("insufficient_info_message")
-                    or "No verified content recorded for this section."
-                )
-                page.insert_textbox(
-                    content_rect,
-                    body_text[:3400],
-                    fontsize=9,
-                    fontname="helv",
-                    color=(0.15, 0.15, 0.15),
-                )
-                page_footer = f"{watermark}  |  Handover: {data['title'][:36]}  |  Page {page.number + 1}"
-                page.insert_text(
-                    fitz.Point(54, 810),
-                    page_footer,
-                    fontsize=8,
-                    fontname="helv",
-                    color=(0.5, 0.5, 0.5),
+                num = f"{int(msec['section_number']):02d}"
+                title = esc(str(msec["section_title"]))
+                is_prio = bool(msec.get("is_role_priority") or msec.get("is_priority_for_role"))
+                readiness = str(msec.get("readiness_status") or "insufficient_information")
+                readiness_label = esc(readiness.replace("_", " "))
+                r_cls = "badge-green" if readiness == "ready" else ("badge-red" if readiness == "has_conflicts" else "badge-amber")
+
+                kis = msec.get("knowledge_items") or msec.get("items") or []
+                ev_refs = msec.get("evidence_references") or []
+                v_cnt = len(kis) if kis else int(msec.get("verified_item_count") or 0)
+                s_cnt = len(ev_refs) if ev_refs else int(msec.get("citation_count") or 0)
+
+                guidance = str(msec.get("role_emphasis_note") or msec.get("role_guidance") or "").strip()
+                insuff = str(msec.get("insufficient_info_message") or "").strip()
+                prio_html = f'<span class="badge badge-blue">{sparkles_svg} Priority</span>' if is_prio else ""
+
+                cards_html: list[str] = []
+                for ki in kis:
+                    if not isinstance(ki, dict):
+                        continue
+                    ki_title = esc(str(ki.get("title") or "Verified Finding"))
+                    ki_content = esc(str(ki.get("content") or ki.get("structured_summary") or ki.get("summary") or ""))
+                    prov = ki.get("provenance") or ki.get("citations") or []
+                    prov_avail = ki.get("provenance_available", bool(prov))
+                    if prov_avail and prov:
+                        src_names = ", ".join(
+                            esc(str(ev.get("source_name") or ev.get("evidence_title") or ev.get("source_title") or "Restricted"))
+                            for ev in prov
+                            if isinstance(ev, dict)
+                        )
+                        src_line = f"Sources: {src_names}"
+                    else:
+                        src_line = "Provenance: No linked source recorded"
+                    cards_html.append(
+                        f'<div class="handover-finding-card">'
+                        f'<p class="finding-title">{ki_title} <span style="color:#299b80;margin-left:4px;">{shield_svg}</span></p>'
+                        f'<p class="finding-body">{ki_content}</p>'
+                        f'<p class="finding-src">{src_line}</p>'
+                        f"</div>"
+                    )
+
+                rels = msec.get("relationships") or []
+                if rels:
+                    rel_lis = "".join(
+                        f'<li><span class="navy-med">{esc(str(r.get("source_entity_name") or r.get("source_entity_id") or ""))}</span> '
+                        f'<span style="color:#315fba;">[{esc(str(r.get("relationship_type") or ""))}]</span> '
+                        f'<span class="navy-med">{esc(str(r.get("target_entity_name") or r.get("target_entity_id") or ""))}</span></li>'
+                        for r in rels if isinstance(r, dict)
+                    )
+                    cards_html.append(f'<ul class="rel-list">{rel_lis}</ul>')
+
+                resps = msec.get("responsibilities_summary") or []
+                if resps:
+                    resp_lis = "".join(
+                        f'<li><span class="navy-med">{esc(str(r.get("responsibility_title") or r.get("title") or "Responsibility"))}</span> '
+                        f'&mdash; Status: {esc(str(r.get("transfer_status") or "pending"))}</li>'
+                        for r in resps if isinstance(r, dict)
+                    )
+                    cards_html.append(f'<ul class="rel-list">{resp_lis}</ul>')
+
+                steps = msec.get("recommended_steps") or []
+                if steps:
+                    step_lis = "".join(
+                        f'<li>[{esc(str(st.get("status") or "pending"))}] <span class="navy-med">{esc(str(st.get("title") or ""))}</span></li>'
+                        for st in steps if isinstance(st, dict)
+                    )
+                    cards_html.append(f'<ul class="rel-list">{step_lis}</ul>')
+
+                conflicts = msec.get("unresolved_conflicts") or []
+                if conflicts:
+                    cf_lis = "".join(f"<li>{esc(str(cf.get('explanation') or ''))}</li>" for cf in conflicts if isinstance(cf, dict))
+                    cards_html.append(
+                        f'<div class="conflict-box"><p class="conflict-title">Unresolved Verification Conflicts ({len(conflicts)} &mdash; Excluded from Verified Facts)</p>'
+                        f'<ul class="conflict-list">{cf_lis}</ul></div>'
+                    )
+
+                if not cards_html and not insuff:
+                    raw_md = str(msec.get("content_markdown") or "").strip()
+                    if raw_md:
+                        cards_html.append(f'<div class="handover-finding-card"><p class="finding-body">{esc(raw_md)}</p></div>')
+
+                insuff_html = f'<div class="insuff-box">{alert_svg}{esc(insuff)}</div>' if insuff else ""
+                guidance_html = f'<p class="sec-guide">{esc(guidance)}</p>' if guidance else ""
+
+                sections_html_parts.append(
+                    f'<section class="sec">'
+                    f'<div class="handover-section-heading">'
+                    f'<div class="sec-left"><span class="sec-num">{num}</span> <h2 class="sec-title">{title}</h2> {prio_html}</div>'
+                    f'<div class="sec-right"><span class="badge {r_cls}">{readiness_label}</span> '
+                    f'<span class="sec-counts">{v_cnt} verified &middot; {s_cnt} sources</span></div>'
+                    f"</div>"
+                    f"{guidance_html}"
+                    f"{insuff_html}"
+                    f'<div class="sec-cards">{"".join(cards_html)}</div>'
+                    f"</section>"
                 )
         else:
-            for sec in data["sections"]:
-                page = doc.new_page(width=595, height=842)
-                py = 54
-                page.insert_text(
-                    fitz.Point(54, py),
-                    sec["title"].upper()[:50],
-                    fontsize=13,
-                    fontname="helv",
-                    color=(0.1, 0.2, 0.5),
+            for idx, sec in enumerate(data["sections"], start=1):
+                paragraphs = "".join(
+                    f"<p>{esc(line)}</p>"
+                    for line in str(sec.get("content") or "No content recorded.").splitlines()
+                    if line.strip()
                 )
-                py += 14
-                badge = "Human Verified" if sec["is_human_edited"] else "Machine Assembly"
-                header_sub = f"Domain: {sec['section_type']}  |  Status: {badge}"
-                page.insert_text(
-                    fitz.Point(54, py),
-                    header_sub[:80],
-                    fontsize=8,
-                    fontname="helv",
-                    color=(0.4, 0.4, 0.4),
-                )
-                py += 10
-                page.draw_line(
-                    fitz.Point(54, py),
-                    fitz.Point(541, py),
-                    color=(0.85, 0.85, 0.85),
-                    width=0.75,
-                )
-                py += 16
-                content_rect = fitz.Rect(54, py, 541, 780)
-                text_to_insert = sec["content"] or "No content recorded for this section."
-                page.insert_textbox(
-                    content_rect,
-                    text_to_insert[:3000],
-                    fontsize=9,
-                    fontname="helv",
-                    color=(0.15, 0.15, 0.15),
-                )
-                page_footer = f"{watermark}  |  Handover: {data['title'][:36]}  |  Page {page.number + 1}"
-                page.insert_text(
-                    fitz.Point(54, 810),
-                    page_footer,
-                    fontsize=8,
-                    fontname="helv",
-                    color=(0.5, 0.5, 0.5),
+                sections_html_parts.append(
+                    f'<section class="sec">'
+                    f'<div class="handover-section-heading">'
+                    f'<div class="sec-left"><span class="sec-num">{idx:02d}</span> <h2 class="sec-title">{esc(str(sec["title"]))}</h2></div>'
+                    f"</div>"
+                    f'<div class="handover-finding-card"><div class="finding-body">{paragraphs}</div></div>'
+                    f"</section>"
                 )
 
+        signoffs_html = ""
         if data["signoffs"]:
-            spage = doc.new_page(width=595, height=842)
-            sy = 54
-            spage.insert_text(
-                fitz.Point(54, sy),
-                "HUMAN SIGN-OFFS & APPROVAL LOG",
-                fontsize=13,
-                fontname="helv",
-                color=(0.1, 0.2, 0.5),
+            rows = "".join(
+                f'<li><span class="navy-med">{esc(str(s["signoff_type"]))}</span>: '
+                f'{esc(str(s["decision"]).upper())} ({esc(str(s.get("signed_at") or "Pending"))})</li>'
+                for s in data["signoffs"]
             )
-            sy += 24
-            for s in data["signoffs"]:
-                sline = f"* {s['signoff_type']} : {s['decision'].upper()} ({s['signed_at'] or 'Pending'})"
-                spage.insert_text(
-                    fitz.Point(54, sy),
-                    sline[:85],
-                    fontsize=9,
-                    fontname="helv",
-                    color=(0.15, 0.15, 0.15),
-                )
-                sy += 16
-            spage.insert_text(
-                fitz.Point(54, 810),
-                f"{watermark}  |  Page {spage.number + 1}",
-                fontsize=8,
-                fontname="helv",
-                color=(0.5, 0.5, 0.5),
+            signoffs_html = (
+                f'<section class="sec">'
+                f'<div class="handover-section-heading"><div class="sec-left"><h2 class="sec-title">Human Sign-Offs &amp; Approval Log</h2></div></div>'
+                f'<ul class="rel-list">{rows}</ul>'
+                f"</section>"
             )
 
-        pdf_bytes = doc.tobytes()
-        doc.close()
-        return pdf_bytes
+        html_doc = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  @page {{ size: A4; margin: 14mm 14mm 16mm 14mm; }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    font-family: 'Manrope', 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+    color: #203653;
+    background: #ffffff;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0;
+    padding: 0;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }}
+  .handover-report {{
+    max-width: 100%;
+    background: #ffffff;
+  }}
+  .report-header {{
+    border-bottom: 2px solid #203653;
+    padding-bottom: 20px;
+    margin-bottom: 24px;
+  }}
+  .topbar {{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 16px;
+  }}
+  .topbar-badges {{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }}
+  .badge {{
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 9px;
+    border-radius: 9999px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid #d9e1f0;
+  }}
+  .badge-amber {{ background: #fbf5ea; color: #8f6522; border-color: #ebd5ac; }}
+  .badge-green {{ background: #eef6f3; color: #1d6e5b; border-color: #bfdcd3; }}
+  .badge-indigo {{ background: #f4f2fa; color: #5f4f9a; border-color: #d3ccec; }}
+  .badge-blue {{ background: #eef2fa; color: #284f9c; border-color: #c3d2ec; }}
+  .badge-red {{ background: #fbf0f0; color: #a04549; border-color: #edc5c7; }}
+  .case-ver {{ font-size: 11.5px; font-weight: 500; color: #718096; }}
+  .eyebrow {{
+    margin: 18px 0 0 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    color: #315fba;
+  }}
+  h1 {{
+    margin: 6px 0 0 0;
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: #203653;
+    line-height: 1.15;
+  }}
+  .case-title {{ margin: 4px 0 0 0; font-size: 13.5px; color: #718096; }}
+  .meta-grid {{
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    margin: 20px 0 0 0;
+    font-size: 12.5px;
+  }}
+  .meta-dt {{ font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; }}
+  .meta-dd {{ margin: 2px 0 0 0; font-weight: 500; color: #203653; }}
+  .epistemic-banner {{
+    margin-top: 16px;
+    border-radius: 8px;
+    background: #f8fafc;
+    padding: 8px 12px;
+    font-size: 11.5px;
+    color: #718096;
+  }}
+  .sec {{
+    border-top: 1px solid #d9e1f0;
+    padding-top: 20px;
+    margin-top: 24px;
+  }}
+  .sec:first-of-type {{ border-top: none; padding-top: 0; margin-top: 0; }}
+  .handover-section-heading {{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 10px;
+    break-after: avoid;
+    page-break-after: avoid;
+  }}
+  .sec-left {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }}
+  .sec-right {{ display: flex; align-items: center; gap: 8px; }}
+  .sec-num {{ font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11.5px; font-weight: 600; color: #315fba; }}
+  .sec-title {{ margin: 0; font-size: 15.5px; font-weight: 600; color: #203653; }}
+  .sec-counts {{ font-size: 11.5px; color: #718096; }}
+  .sec-guide {{ margin: 0 0 10px 0; font-size: 11.5px; color: #718096; break-after: avoid; page-break-after: avoid; }}
+  .insuff-box {{
+    margin-bottom: 10px;
+    border-radius: 8px;
+    border: 1px solid #ebd5ac;
+    background: rgba(251, 245, 234, 0.7);
+    padding: 10px 12px;
+    font-size: 11.5px;
+    color: #5f4219;
+  }}
+  .sec-cards {{ display: flex; flex-direction: column; gap: 10px; }}
+  .handover-finding-card {{
+    border-radius: 8px;
+    border: 1px solid #d9e1f0;
+    background: rgba(248, 250, 252, 0.45);
+    padding: 12px 14px;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }}
+  .finding-title {{ margin: 0; font-size: 13px; font-weight: 600; color: #203653; }}
+  .finding-body {{ margin: 4px 0 0 0; font-size: 12.5px; color: #334155; white-space: pre-wrap; line-height: 1.5; }}
+  .finding-src {{ margin: 6px 0 0 0; font-size: 11px; color: #718096; }}
+  .rel-list {{ margin: 4px 0 0 0; padding-left: 18px; font-size: 12.5px; color: #334155; }}
+  .rel-list li {{ margin-bottom: 3px; }}
+  .navy-med {{ font-weight: 500; color: #203653; }}
+  .conflict-box {{
+    border-radius: 8px;
+    border: 1px solid #edc5c7;
+    background: rgba(251, 240, 240, 0.45);
+    padding: 10px 12px;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }}
+  .conflict-title {{ margin: 0; font-size: 11.5px; font-weight: 600; color: #a04549; }}
+  .conflict-list {{ margin: 6px 0 0 0; padding-left: 16px; font-size: 11.5px; color: #334155; }}
+</style>
+</head>
+<body>
+  <article class="handover-report">
+    <header class="report-header">
+      <div class="topbar">
+        <div>{logo_html}</div>
+        <div class="topbar-badges">
+          <span class="badge {status_cls}">{status_icon} {esc(watermark)}</span>
+          <span class="badge badge-indigo">{esc(data["handover_type_label"])}</span>
+          <span class="case-ver">Version v{int(data["package_version_number"])}</span>
+        </div>
+      </div>
+      <p class="eyebrow">Handover Report</p>
+      <h1>{esc(str(data["project_name"]))}</h1>
+      <p class="case-title">{esc(str(data["title"]))}</p>
+      <dl class="meta-grid">
+        <div><dt class="meta-dt">Outgoing</dt><dd class="meta-dd">{outgoing_name}</dd></div>
+        <div><dt class="meta-dt">Incoming</dt><dd class="meta-dd">{incoming_name}</dd></div>
+        <div><dt class="meta-dt">Target Date</dt><dd class="meta-dd">{target_date}</dd></div>
+        <div><dt class="meta-dt">Verified</dt><dd class="meta-dd">{total_verified} verified</dd></div>
+      </dl>
+      <div class="epistemic-banner">
+        <span style="color:#299b80;margin-right:4px;">{shield_svg}</span>
+        Only human-verified knowledge compiled into this immutable package version appears as confirmed handover content. Unresolved conflicts and unverified items are explicitly separated.
+      </div>
+      {acl_banner_html}
+    </header>
+    {''.join(sections_html_parts)}
+    {signoffs_html}
+  </article>
+</body>
+</html>"""
+
+        return self._render_html_to_pdf_bytes(
+            html_doc,
+            footer_label=f"{watermark} · {data['project_name']} · v{data['package_version_number']} · Hash {str(data['package_hash'])[:16]}",
+        )

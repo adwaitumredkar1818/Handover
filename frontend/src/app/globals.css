@@ -371,9 +371,34 @@
     transform: none !important;
   }
 }
+@page {
+  size: A4;
+  margin: 14mm;
+}
 @media print {
-  .no-print { display: none !important; }
-  body { background: white; }
+  .no-print,
+  .handover-screen-only-control {
+    display: none !important;
+  }
+  body {
+    background: white !important;
+  }
+  .handover-report {
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    max-width: 100% !important;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .handover-section-heading {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+  .handover-finding-card {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
 }
 
 /* ==========================================================================

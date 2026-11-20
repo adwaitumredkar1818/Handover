@@ -16,6 +16,7 @@ import {
   gaps, ME, personById, ROLE_LABEL, HANDOVER_STATUS_LABEL,
   type Handover, type HandoverStatus, type ProjectRole
 } from '../../lib/figmaStore'
+import { getCachedGraph, setCachedGraph } from '../../lib/graphCache'
 
 import {
   MetricBand, Avatar, Badge, Button, Callout, Card, CardHeader, Checkbox,
@@ -1370,12 +1371,23 @@ export function HandoverLayout({
       return
     }
 
-    setIsLoadingVersions(true)
+    const versionsKey = `handover_versions:${resolvedProjectId}:${id}`
+    const cachedVersions = getCachedGraph<HandoverPackageVersionSummary[]>(versionsKey, undefined, user?.id)
+    if (cachedVersions && cachedVersions.length > 0) {
+      setVersions(cachedVersions)
+      const fromParam = versionParam && cachedVersions.find((v) => v.id === versionParam)
+      const current = cachedVersions.find((v) => v.is_current)
+      setSelectedVersionId((fromParam || current || cachedVersions[0])!.id)
+      setIsLoadingVersions(false)
+    } else {
+      setIsLoadingVersions(true)
+    }
     api.handover
       .getVersions(resolvedProjectId, id)
       .then((res) => {
         if (!active) return
         const list = Array.isArray(res) ? res : []
+        setCachedGraph(versionsKey, list, user?.id)
         setVersions(list)
         if (list.length > 0) {
           const fromParam = versionParam && list.find((v) => v.id === versionParam)
@@ -1405,7 +1417,14 @@ export function HandoverLayout({
       return
     }
 
-    setIsLoadingSections(true)
+    const secKey = `handover_sections:${resolvedProjectId}:${id}:${selectedVersionId}`
+    const cachedSections = getCachedGraph<HandoverVersionSectionsResponse>(secKey, undefined, user?.id)
+    if (cachedSections && cachedSections.case_id === id && cachedSections.version?.id === selectedVersionId) {
+      setSectionsData(cachedSections)
+      setIsLoadingSections(false)
+    } else {
+      setIsLoadingSections(true)
+    }
     setSectionsError(null)
     api.handover
       .getVersionSections(resolvedProjectId, id, selectedVersionId)
@@ -1413,14 +1432,17 @@ export function HandoverLayout({
         if (!active) return
         // Guard against stale cross-case / cross-version responses
         if (res.case_id === id && res.version?.id === selectedVersionId) {
+          setCachedGraph(secKey, res, user?.id)
           setSectionsData(res)
         }
       })
       .catch((err: unknown) => {
         if (!active) return
-        const msg = err instanceof Error ? err.message : 'Failed to retrieve canonical handover sections.'
-        setSectionsError(msg)
-        setSectionsData(null)
+        if (!cachedSections) {
+          const msg = err instanceof Error ? err.message : 'Failed to retrieve canonical handover sections.'
+          setSectionsError(msg)
+          setSectionsData(null)
+        }
       })
       .finally(() => {
         if (active) setIsLoadingSections(false)
@@ -2217,6 +2239,18 @@ export function PublishedHandovers() {
     return true
   })
 
+  const draftList = (handoverCases || [])
+    .filter(
+      (c) =>
+        !['published', 'completed', 'delivered', 'acknowledged'].includes(
+          String(c.status || '').toLowerCase()
+        ) && Boolean(c.current_version_id)
+    )
+    .map((c) => ({
+      raw: c,
+      mapped: mapCaseToHandover(c, c.project_id || ''),
+    }))
+
   return (
     <>
       <div className="flex flex-col gap-3 pb-5 sm:flex-row sm:items-center sm:justify-between">
@@ -2339,6 +2373,102 @@ export function PublishedHandovers() {
           </div>
         )}
       </Card>
+
+      {draftList.length > 0 && (
+        <Card className="mt-6 overflow-hidden">
+          <div className="border-b border-line bg-amber-50/70 px-5 py-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-navy">
+                  Authorised Draft &amp; Test Handovers (Unapproved)
+                </h3>
+                <p className="text-xs text-amber-900">
+                  Unapproved draft packages — pending formal review and approval.
+                </p>
+              </div>
+              <Badge tone="amber" dot>
+                Unapproved Drafts ({draftList.length})
+              </Badge>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <Table>
+              <thead>
+                <tr>
+                  <Th>Title</Th>
+                  <Th>Project</Th>
+                  <Th>Departing Member</Th>
+                  <Th>Successor</Th>
+                  <Th>Handover Type</Th>
+                  <Th>Lifecycle State</Th>
+                  <Th>Version</Th>
+                  <Th className="text-right">Actions</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {draftList.map(({ raw, mapped: h }) => {
+                  const p = projects.find((x) => x.id === h.projectId)
+                  const outName = getMemberDisplayName(h.outgoingId, members, user)
+                  const incName = h.incomingId
+                    ? getMemberDisplayName(h.incomingId, members, user)
+                    : 'Unassigned'
+                  return (
+                    <tr
+                      key={h.id}
+                      onClick={() => router.push(`/handovers/${h.id}`)}
+                      className="cursor-pointer transition-colors hover:bg-tint/40"
+                    >
+                      <Td>
+                        <div className="font-semibold text-navy">{raw.title || h.code}</div>
+                        <div className="text-[11px] font-medium text-amber-800">
+                          Draft · Not Approved
+                        </div>
+                      </Td>
+                      <Td className="text-[13px] text-slate-700">{p?.name || 'Project'}</Td>
+                      <Td className="text-[13px] text-slate-700">{outName}</Td>
+                      <Td className="text-[13px] text-slate-700">{incName}</Td>
+                      <Td>
+                        <Badge tone="indigo">
+                          {HANDOVER_TYPE_LABELS[h.handoverType || 'developer'] || 'Developer Handover'}
+                        </Badge>
+                      </Td>
+                      <Td>
+                        <StatusBadge status={h.status} />
+                      </Td>
+                      <Td>
+                        <Badge tone="blue">{raw.version ? `v${raw.version}` : 'Draft'}</Badge>
+                      </Td>
+                      <Td className="text-right">
+                        <div
+                          className="flex justify-end gap-1.5"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            icon={Eye}
+                            onClick={() => router.push(`/handovers/${h.id}`)}
+                          >
+                            Open Draft
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            icon={FileText}
+                            onClick={() => router.push(`/handovers/${h.id}/report`)}
+                          >
+                            10-Section Report
+                          </Button>
+                        </div>
+                      </Td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </Table>
+          </div>
+        </Card>
+      )}
     </>
   )
 }
