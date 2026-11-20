@@ -480,6 +480,11 @@ class ProjectIntelligenceOrchestrator:
         project_ctx: ProjectContext,
     ) -> InvestigationState:
         """Persist user turn, assistant message, citations, and investigation trace."""
+        try:
+            self.session.rollback()
+        except Exception:
+            pass
+
         # Persist Assistant Message Turn
         structured_payload = {
             "investigation_id": str(state.investigation_id),

@@ -12,8 +12,6 @@ import {
   ShieldAlert,
   RefreshCw,
   AlertCircle,
-  AlertTriangle,
-  HelpCircle,
   FileText,
   GitCommit,
   CheckCircle2,
@@ -22,60 +20,73 @@ import {
   ChevronDown,
   ChevronUp,
   ChevronRight,
+  ChevronLeft,
   Database,
   Layers,
   Search,
   User,
-  ArrowRight,
-  Hash,
   Clock,
-  Check,
   BookOpen,
   Brain,
   Table,
   Copy,
   CheckCheck,
-  Loader2,
+  X,
+  Cpu,
+  Users,
+  CheckSquare,
+  Bell,
+  Folder,
 } from "lucide-react";
 import Link from "next/link";
-import { api, getApiBaseUrl } from "../../lib/api";
+import { api } from "../../lib/api";
 import { useLiveApp } from "../../context/LiveAppContext";
-import { ListSkeleton, AIAssistantThinking, ButtonLoader } from "../loading";
+import { ListSkeleton } from "../loading";
+import { AssistantThinking3D } from "./AssistantThinking3D";
 import type {
   AssistantConversation,
   AssistantMessage,
-  AssistantCitation,
-  AssistantClaim,
   AssistantAnswerStatus,
   AssistantResponseMode,
 } from "../../lib/types";
 
-// Starter prompt recommendations
-const STARTER_PROMPTS = [
+// Quick action questions matching general project exploration
+const QUICK_QUESTIONS = [
   {
-    title: "Platform Identity & Auth",
-    question: "What is the platform identity and authentication architecture?",
+    title: "Project Overview & Goals",
+    question: "What is the core purpose, mission, and current scope of this project?",
+    category: "Overview",
+    icon: BookOpen,
+  },
+  {
+    title: "Architecture & Tech Stack",
+    question: "What is the overall architecture, technology stack, and backend design?",
     category: "Architecture",
+    icon: Layers,
   },
   {
-    title: "RTX 4050 VRAM Contention",
-    question: "What are the main architecture risks regarding Ollama and RTX 4050 VRAM contention?",
-    category: "Risks",
-  },
-  {
-    title: "Storage Provider Decision",
-    question: "What are the key architectural decisions regarding dual-provider storage?",
+    title: "Key Decisions & Rationale",
+    question: "What are the key technical and architectural decisions made in this project and why?",
     category: "Decisions",
+    icon: FileText,
   },
   {
     title: "Ownership & Responsibilities",
-    question: "Who is responsible for platform architecture and cryptographic security?",
+    question: "Who is responsible for the key modules and who are the primary points of contact?",
     category: "Ownership",
+    icon: Users,
   },
   {
-    title: "Unfinished Tasks & Milestones",
-    question: "What unfinished tasks and blockers remain for the project transition?",
+    title: "Tasks & Progress Status",
+    question: "What work has been completed so far and what remains in progress?",
     category: "Tasks",
+    icon: CheckSquare,
+  },
+  {
+    title: "Blockers & Known Risks",
+    question: "What are the main blockers, technical risks, or critical concerns identified?",
+    category: "Risks",
+    icon: ShieldAlert,
   },
 ];
 
@@ -105,44 +116,17 @@ export function AssistantWorkspaceView() {
   const [liveInvestigationStage, setLiveInvestigationStage] = useState<string | null>(null);
   const [liveInvestigationEvents, setLiveInvestigationEvents] = useState<string[]>([]);
   const [liveStreamingAnswer, setLiveStreamingAnswer] = useState<string>("");
-  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
 
-  // Elapsed timer active while asking
-  useEffect(() => {
-    let timer: NodeJS.Timeout | null = null;
-    if (asking) {
-      setElapsedSeconds(0);
-      timer = setInterval(() => {
-        setElapsedSeconds((prev) => prev + 1);
-      }, 1000);
-    } else {
-      setElapsedSeconds(0);
-    }
-    return () => {
-      if (timer) clearInterval(timer);
-    };
-  }, [asking]);
+  // Floating side panel states (Both collapsible independently)
+  const [leftPanelOpen, setLeftPanelOpen] = useState<boolean>(true);
+  const [rightPanelOpen, setRightPanelOpen] = useState<boolean>(true);
 
-  // Progressive stage progression during long synchronous or SSE fallback waits
-  useEffect(() => {
-    if (asking && !liveStreamingAnswer) {
-      if (elapsedSeconds >= 2 && elapsedSeconds < 6) {
-        setLiveInvestigationStage("planning");
-      } else if (elapsedSeconds >= 6 && elapsedSeconds < 12) {
-        setLiveInvestigationStage("retrieving");
-      } else if (elapsedSeconds >= 12 && elapsedSeconds < 20) {
-        setLiveInvestigationStage("delegating");
-      } else if (elapsedSeconds >= 20) {
-        setLiveInvestigationStage("synthesizing");
-      }
-    }
-  }, [asking, elapsedSeconds, liveStreamingAnswer]);
-
-  // Form input
+  // Form input & composer options
   const [inputValue, setInputValue] = useState<string>("");
   const [selectedDomain, setSelectedDomain] = useState<string>("all");
   const [retrievalMode, setRetrievalMode] = useState<"hybrid" | "keyword" | "semantic">("hybrid");
   const [responseMode, setResponseMode] = useState<AssistantResponseMode>("standard");
+  const [showSettingsPopover, setShowSettingsPopover] = useState<boolean>(false);
 
   // Interaction
   const [activeCitationLabel, setActiveCitationLabel] = useState<string | null>(null);
@@ -154,10 +138,28 @@ export function AssistantWorkspaceView() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const citationRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  // Close popover when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
+        setShowSettingsPopover(false);
+      }
+    }
+    if (showSettingsPopover) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [showSettingsPopover]);
 
   // Auto-scroll messages
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (typeof messagesEndRef.current?.scrollIntoView === "function") {
+      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
   };
 
   useEffect(() => {
@@ -204,7 +206,10 @@ export function AssistantWorkspaceView() {
       setLoadingMessages(true);
       try {
         const detail = await api.assistant.getConversation(activeProject.id, convId);
-        setMessages(detail?.messages || []);
+        const filtered = (detail?.messages || []).filter(
+          (m) => m.sender_type !== "system" && !m.content?.startsWith("Investigation Checkpoint:")
+        );
+        setMessages(filtered);
       } catch (err) {
         console.error("Failed to load conversation detail:", err);
         setMessages([]);
@@ -230,7 +235,7 @@ export function AssistantWorkspaceView() {
       addToast({
         type: "success",
         title: "Thread Created",
-        message: `New assistant conversation "${threadTitle}" opened.`,
+        message: `New conversation "${threadTitle}" opened.`,
       });
       setConversations((prev) => [newConv, ...prev]);
       setActiveConversationId(newConv.id);
@@ -318,12 +323,12 @@ export function AssistantWorkspaceView() {
     setMessages((prev) => [...prev, tempUserMsg]);
     setAsking(true);
     setLiveInvestigationStage("initiating");
-    setLiveInvestigationEvents(["Initializing investigation session..."]);
+    setLiveInvestigationEvents(["Understanding your question..."]);
     setLiveStreamingAnswer("");
 
     try {
       const domainsFilter = selectedDomain === "all" ? undefined : [selectedDomain];
-      
+
       // 1. Start live investigation session
       let invId: string | null = null;
       try {
@@ -340,9 +345,11 @@ export function AssistantWorkspaceView() {
 
       // 2. If investigation ID returned, listen to live SSE event stream
       if (invId) {
-        const token = typeof window !== "undefined" ? localStorage.getItem("handover_access_token") : null;
-        const sseUrl = `${getApiBaseUrl()}/api/v1/projects/${activeProject.id}/assistant/investigations/${invId}/events`;
-        
+        const token =
+          (typeof window !== "undefined" && localStorage.getItem("handover_access_token")) ||
+          (typeof window !== "undefined" && localStorage.getItem("access_token"));
+        const sseUrl = `${process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"}/api/v1/projects/${activeProject.id}/assistant/investigations/${invId}/events`;
+
         let lastEventId = 0;
         let eventStreamClosed = false;
 
@@ -351,16 +358,16 @@ export function AssistantWorkspaceView() {
             const ev = line.slice(7).trim();
             if (ev === "node_started" || ev === "plan_created") {
               setLiveInvestigationStage("planning");
-              setLiveInvestigationEvents((p) => [...p, "Formulating plan & expanding subqueries..."]);
+              setLiveInvestigationEvents((p) => [...p, "Searching project knowledge..."]);
             } else if (ev === "retrieval_started" || ev === "retrieval_progress") {
               setLiveInvestigationStage("retrieving");
-              setLiveInvestigationEvents((p) => [...p, "Searching semantic vector index & project documents..."]);
+              setLiveInvestigationEvents((p) => [...p, "Reviewing relevant evidence..."]);
             } else if (ev === "agent_selected" || ev === "agent_started") {
               setLiveInvestigationStage("delegating");
-              setLiveInvestigationEvents((p) => [...p, "Delegating subtask to specialized dynamic agent worker..."]);
+              setLiveInvestigationEvents((p) => [...p, "Consulting specialized project intelligence..."]);
             } else if (ev === "synthesis_started") {
               setLiveInvestigationStage("synthesizing");
-              setLiveInvestigationEvents((p) => [...p, "Synthesizing findings with project evidence..."]);
+              setLiveInvestigationEvents((p) => [...p, "Preparing your answer..."]);
             } else if (ev === "token_delta") {
               setLiveInvestigationStage("streaming");
             } else if (ev === "investigation_completed") {
@@ -413,7 +420,11 @@ export function AssistantWorkspaceView() {
         // Fetch finalized investigation state
         try {
           const finalState = await api.assistant.getInvestigation(activeProject.id, invId);
-          if (finalState && finalState.raw_answer) {
+          if (
+            finalState &&
+            finalState.raw_answer &&
+            !finalState.raw_answer.startsWith("Investigation Checkpoint:")
+          ) {
             const mappedClaims = (finalState.claims || []).map((c) => ({
               claim_text: c.claim_text,
               citation_labels: c.citation_labels,
@@ -463,7 +474,7 @@ export function AssistantWorkspaceView() {
         }
       }
 
-      // Synchronous fallback if SSE/Investigation did not yield terminal message
+      // Synchronous fallback
       const maxCits = responseMode === "deep_research" ? 14 : responseMode === "deep_think" ? 12 : 8;
       const answerRes = await api.assistant.askQuestion(activeProject.id, targetConvId, {
         question: q,
@@ -473,7 +484,6 @@ export function AssistantWorkspaceView() {
         max_citations: maxCits,
       });
 
-      // Append assistant message from answer response
       const assistantMsg: AssistantMessage = {
         id: answerRes.message_id,
         conversation_id: answerRes.conversation_id,
@@ -502,7 +512,6 @@ export function AssistantWorkspaceView() {
 
       setMessages((prev) => [...prev, assistantMsg]);
 
-      // If citations were returned, focus the first one
       if (answerRes.citations && answerRes.citations.length > 0 && answerRes.citations[0]) {
         setActiveCitationLabel(answerRes.citations[0].citation_label);
       }
@@ -513,14 +522,13 @@ export function AssistantWorkspaceView() {
         title: "Assistant Error",
         message: errorMsg,
       });
-      // Append error message to chat
       setMessages((prev) => [
         ...prev,
         {
           id: `temp-err-${Date.now()}`,
           conversation_id: targetConvId!,
           sender_type: "assistant",
-          content: `⚠️ Error during knowledge retrieval: ${errorMsg}. Please verify that the AI assistant service and knowledge store are running.`,
+          content: `⚠️ Unable to retrieve project information: ${errorMsg}. Please ensure the AI service is reachable.`,
           answer_status: "declined",
           citations: [],
           created_at: new Date().toISOString(),
@@ -531,7 +539,7 @@ export function AssistantWorkspaceView() {
     }
   };
 
-  // Submit message feedback
+  // Submit feedback
   const handleFeedback = async (messageId: string, type: "helpful" | "unhelpful") => {
     if (!activeProject?.id) return;
     try {
@@ -542,23 +550,26 @@ export function AssistantWorkspaceView() {
       addToast({
         type: "success",
         title: "Feedback Recorded",
-        message: type === "helpful" ? "Marked response as helpful." : "Marked response as needing improvement.",
+        message: type === "helpful" ? "Marked as helpful." : "Marked as needing improvement.",
       });
     } catch {
       // Fallback
     }
   };
 
-  // Handle citation click: highlight and scroll to Panel 3 card
+  // Handle citation click
   const handleCitationClick = (citationLabel: string) => {
     setActiveCitationLabel(citationLabel);
+    if (!rightPanelOpen) {
+      setRightPanelOpen(true);
+    }
     const element = citationRefs.current[citationLabel];
-    if (element) {
+    if (element && typeof element.scrollIntoView === "function") {
       element.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   };
 
-  // Extract all citations from the latest assistant message or active thread
+  // Latest assistant message and citations
   const latestAssistantMessage = useMemo(() => {
     return [...messages].reverse().find((m) => m.sender_type === "assistant");
   }, [messages]);
@@ -567,7 +578,7 @@ export function AssistantWorkspaceView() {
     return latestAssistantMessage?.citations || [];
   }, [latestAssistantMessage]);
 
-  // Group citations for Panel 3 breakdown
+  // Group citations for Right Panel breakdown
   const filteredCitations = useMemo(() => {
     if (evidenceFilterTab === "all") return activeCitations;
     if (evidenceFilterTab === "jira") {
@@ -614,7 +625,7 @@ export function AssistantWorkspaceView() {
     };
   }, [activeCitations]);
 
-  // Helper to render answer text with interactive [S1], [S2] chips
+  // Render formatted answer with interactive [S1] chips
   const renderFormattedAnswer = (text: string) => {
     const parts = text.split(/(\[S?\d+\])/g);
     return parts.map((part, idx) => {
@@ -629,10 +640,10 @@ export function AssistantWorkspaceView() {
             onClick={() => handleCitationClick(label)}
             className={`inline-flex items-center mx-0.5 px-1.5 py-0.2 rounded text-[11px] font-mono font-bold transition-all shadow-2xs ${
               isActive
-                ? "bg-emerald-600 text-white ring-2 ring-emerald-400 scale-105"
-                : "bg-emerald-100 text-emerald-800 hover:bg-emerald-200 border border-emerald-300"
+                ? "bg-blue-600 text-white ring-2 ring-blue-400 scale-105"
+                : "bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200"
             }`}
-            title={`View evidence record [${label}] in Panel 3`}
+            title={`View evidence record [${label}]`}
           >
             {part}
           </button>
@@ -650,7 +661,7 @@ export function AssistantWorkspaceView() {
       addToast({
         type: "success",
         title: "Copied",
-        message: "Extracted data copied to clipboard as JSON.",
+        message: "Data copied to clipboard.",
       });
     } catch {
       addToast({
@@ -668,1197 +679,1080 @@ export function AssistantWorkspaceView() {
     return conversations.filter((c) => c.title.toLowerCase().includes(q));
   }, [conversations, searchThreadQuery]);
 
-  return (
-    <div className="flex flex-col min-h-[calc(100vh-64px)] bg-[#f8fafc] text-slate-800 p-6 space-y-6">
-      {/* ------------------------------------------------------------- */}
-      {/* Top Bar Header & Breadcrumbs                                 */}
-      {/* ------------------------------------------------------------- */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-5">
-        <div>
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-teal-800">
-            <span className="inline-block size-2 rounded-full bg-teal-500 animate-pulse" />
-            Sidebar: AI ASSISTANT &gt; Project Knowledge Assistant
-            <span className="text-slate-400">·</span>
-            <span className="text-emerald-700 font-mono lowercase tracking-normal">evidence-grounded answers</span>
+  // Mode descriptions for the clean popover
+  const modeConfigs = [
+    {
+      id: "standard",
+      label: "Standard",
+      description: "Direct answers grounded in verified project sources",
+      icon: Sparkles,
+      color: "text-blue-600",
+    },
+    {
+      id: "deep_research",
+      label: "Deep Research",
+      description: "Comprehensive multi-source report with recommendations",
+      icon: BookOpen,
+      color: "text-indigo-600",
+    },
+    {
+      id: "deep_think",
+      label: "Deep Think",
+      description: "Causal analysis and architecture trade-offs",
+      icon: Brain,
+      color: "text-purple-600",
+    },
+    {
+      id: "deep_extract",
+      label: "Deep Extract",
+      description: "Structured table extraction with JSON export",
+      icon: Table,
+      color: "text-sky-600",
+    },
+  ];
+
+  // Minimal Composer Component used both in Welcome Flow and Active Chat
+  const renderComposer = () => (
+    <div className="relative w-full">
+      {/* Settings Popover opened via '+' */}
+      {showSettingsPopover && (
+        <div
+          ref={popoverRef}
+          className="absolute bottom-14 left-0 w-76 sm:w-80 bg-white/95 backdrop-blur-xl border border-slate-200/90 shadow-[0_16px_50px_rgba(0,35,90,0.14)] rounded-2xl p-3.5 space-y-3 z-50 animate-fade-in text-xs"
+        >
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+            <span className="font-bold text-slate-900 text-xs">Assistant Settings</span>
+            <button
+              type="button"
+              onClick={() => setShowSettingsPopover(false)}
+              className="text-slate-400 hover:text-slate-600 p-0.5"
+            >
+              <X className="size-3.5" />
+            </button>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 mt-1 flex items-center gap-2">
-            Project Knowledge Assistant
-          </h1>
-          <p className="text-xs text-slate-500 mt-1 max-w-2xl">
-            Permission-filtered hybrid RAG assistant with strict source citations, source ACL checks, and uncertainty disclosure.
-          </p>
+
+          {/* Assistant Mode */}
+          <div className="space-y-1.5">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+              Mode
+            </span>
+            <div className="grid grid-cols-2 gap-1.5">
+              {modeConfigs.map((mode) => {
+                const Icon = mode.icon;
+                const isSelected = responseMode === mode.id;
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    onClick={() => setResponseMode(mode.id as AssistantResponseMode)}
+                    className={`p-2 rounded-xl border text-left transition flex flex-col gap-0.5 ${
+                      isSelected
+                        ? "bg-blue-50 border-blue-400 ring-1 ring-blue-400 text-blue-950 font-semibold"
+                        : "bg-white border-slate-200 hover:bg-slate-50 text-slate-700"
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Icon className={`size-3.5 ${mode.color}`} />
+                      <span className="text-[11px]">{mode.label}</span>
+                    </div>
+                    <span className="text-[9px] text-slate-400 line-clamp-1">
+                      {mode.description}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Domain Selector */}
+          <div className="space-y-1">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+              Knowledge Domain
+            </span>
+            <select
+              value={selectedDomain}
+              onChange={(e) => setSelectedDomain(e.target.value)}
+              className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 text-slate-700 focus:outline-hidden focus:ring-1 focus:ring-blue-500"
+            >
+              {DOMAINS_LIST.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Retrieval Strategy */}
+          <div className="space-y-1">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+              Search Method
+            </span>
+            <select
+              value={retrievalMode}
+              onChange={(e) => setRetrievalMode(e.target.value as "hybrid" | "keyword" | "semantic")}
+              className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 text-slate-700 focus:outline-hidden focus:ring-1 focus:ring-blue-500"
+            >
+              <option value="hybrid">Smart Search (Vector + Keyword)</option>
+              <option value="keyword">Keyword Search</option>
+              <option value="semantic">Semantic Search</option>
+            </select>
+          </div>
+        </div>
+      )}
+
+      {/* Minimal Composer Pill */}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          handleAsk();
+        }}
+        className="w-full bg-white/95 backdrop-blur-xl border border-blue-200/90 shadow-[0_8px_30px_rgba(37,99,235,0.12)] rounded-full px-2 py-1.5 flex items-center gap-2 transition focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-400/20"
+      >
+        {/* '+' Button to toggle Settings Popover */}
+        <button
+          type="button"
+          onClick={() => setShowSettingsPopover((prev) => !prev)}
+          className={`size-9 rounded-full flex items-center justify-center transition shrink-0 ${
+            showSettingsPopover
+              ? "bg-blue-600 text-white shadow-sm"
+              : "bg-slate-100 hover:bg-slate-200 text-slate-700"
+          }`}
+          title="Assistant Modes &amp; Search Settings"
+        >
+          <Plus className="size-4" />
+        </button>
+
+        {/* Active non-standard indicators (compact tags) */}
+        {responseMode !== "standard" && (
+          <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-800 shrink-0">
+            {responseMode === "deep_research"
+              ? "Research"
+              : responseMode === "deep_think"
+              ? "Think"
+              : "Extract"}
+          </span>
+        )}
+
+        {selectedDomain !== "all" && (
+          <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-100 text-slate-700 truncate max-w-[100px] shrink-0">
+            {DOMAINS_LIST.find((d) => d.id === selectedDomain)?.label}
+          </span>
+        )}
+
+        {/* Main Question Input Field */}
+        <input
+          type="text"
+          placeholder="Ask a question about the project (e.g. architecture, ownership, decisions)..."
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          disabled={asking}
+          className="flex-1 bg-transparent px-3 py-1.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-hidden"
+        />
+
+        {/* Blue Circular Send Button */}
+        <button
+          type="submit"
+          disabled={!inputValue.trim() || asking}
+          className="size-9 rounded-full bg-blue-600 hover:bg-blue-700 active:scale-95 text-white flex items-center justify-center shadow-md transition disabled:opacity-40 disabled:hover:bg-blue-600 disabled:active:scale-100 shrink-0"
+          title="Ask Question"
+        >
+          <Send className="size-4" />
+        </button>
+      </form>
+    </div>
+  );
+
+  return (
+    <div className="relative h-[calc(100vh-64px)] w-full flex flex-col bg-gradient-to-b from-[#f0f6ff]/40 via-[#f8fbff]/70 to-[#f0f6ff]/40 text-slate-800 overflow-hidden">
+      {/* ------------------------------------------------------------- */}
+      {/* Top Bar Header & Breadcrumbs                                  */}
+      {/* ------------------------------------------------------------- */}
+      <header className="w-full border-b border-blue-100/70 bg-white/70 backdrop-blur-md px-4 sm:px-6 py-2.5 flex items-center justify-between gap-4 z-20 shrink-0">
+        {/* Left: Breadcrumbs & Page Identity */}
+        <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
+          <Bot className="size-4 text-blue-600" />
+          <span className="text-slate-400">AI Assistant</span>
+          <ChevronRight className="size-3 text-slate-300" />
+          <span className="font-semibold text-slate-900">Project Knowledge Assistant</span>
         </div>
 
-        <div className="flex items-center gap-2 self-start md:self-auto">
+        {/* Right: Actions Lockup */}
+        <div className="flex items-center gap-2">
           <button
             onClick={() => handleCreateNewThread()}
-            className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-teal-700 hover:bg-teal-800 text-white shadow-xs transition"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-xs transition"
           >
             <Plus className="size-3.5" />
-            New Thread
+            <span>New Thread</span>
           </button>
+
           <Link
             href="/evidence"
-            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 shadow-xs transition"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 shadow-2xs transition"
           >
             <Database className="size-3.5 text-slate-500" />
-            Go to Evidence Center
+            <span>Evidence Center</span>
           </Link>
+
           <button
             onClick={() => {
               if (activeConversationId) loadMessages(activeConversationId);
               loadConversations();
             }}
             disabled={loadingConversations || loadingMessages}
-            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 shadow-xs transition disabled:opacity-50"
-            title="Refresh threads and active turn"
+            className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 shadow-2xs transition disabled:opacity-50"
+            title="Refresh active thread"
           >
             <RefreshCw className={`size-3.5 ${loadingConversations || loadingMessages ? "animate-spin" : ""}`} />
           </button>
-        </div>
-      </div>
 
-      {/* ------------------------------------------------------------- */}
-      {/* 3-Panel Main Workspace Architecture (Matches Wireframe Fig. 8) */}
-      {/* ------------------------------------------------------------- */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 flex-1 items-start">
-        {/* ============================================================ */}
-        {/* PANEL 1: CONTEXT (Left Panel)                               */}
-        {/* ============================================================ */}
-        <div className="lg:col-span-3 bg-white border border-slate-200 rounded-xl shadow-xs flex flex-col overflow-hidden h-[760px]">
-          {/* Header */}
-          <div className="bg-[#1e293b] text-white px-4 py-2.5 flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2">
-              <Layers className="size-3.5 text-blue-400" />
-              1 CONTEXT
-            </span>
-            <span className="text-[11px] font-mono text-slate-300 bg-slate-800 px-2 py-0.5 rounded-full">
-              {conversations.length} threads
-            </span>
+          <button
+            type="button"
+            className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 shadow-2xs transition relative"
+            title="Notifications"
+          >
+            <Bell className="size-3.5" />
+            <span className="absolute top-1 right-1 size-1.5 rounded-full bg-blue-600" />
+          </button>
+
+          {/* User Initials Avatar */}
+          <div className="size-7 rounded-full bg-blue-100 border border-blue-200 text-blue-800 text-xs font-bold flex items-center justify-center shrink-0">
+            {user?.full_name
+              ? user.full_name
+                  .split(" ")
+                  .map((n: string) => n[0])
+                  .join("")
+                  .toUpperCase()
+                  .slice(0, 2)
+              : user?.email
+              ? user.email.slice(0, 2).toUpperCase()
+              : "SU"}
           </div>
+        </div>
+      </header>
 
-          <div className="p-3.5 flex flex-col gap-4 overflow-y-auto flex-1">
-            {/* Section 1: PROJECT, ROLE */}
-            <div>
-              <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">
-                PROJECT, ROLE
-              </div>
-              <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-900 truncate">
-                    {activeProject?.name || "Project Workspace"}
-                  </span>
-                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
-                    Active
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5 text-xs text-slate-600">
-                  <User className="size-3 text-slate-400" />
-                  <span className="font-medium text-slate-700">
-                    {(user?.roles && user.roles[0]) || "project_manager"}
-                  </span>
-                  <span className="text-slate-400">·</span>
-                  <span className="text-[11px] text-slate-500">Project Member</span>
-                </div>
-                <div className="pt-2 border-t border-slate-200 flex items-start gap-1.5 text-[11px] text-slate-500 leading-tight">
-                  <ShieldCheck className="size-3.5 text-teal-600 shrink-0 mt-0.5" />
-                  <span>Strict pre-retrieval source ACL enforcement. Citations fail-closed.</span>
-                </div>
-              </div>
-            </div>
+      {/* ------------------------------------------------------------- */}
+      {/* Floating Edge Reopen Controls (When panels are collapsed)     */}
+      {/* ------------------------------------------------------------- */}
+      {!leftPanelOpen && (
+        <button
+          onClick={() => setLeftPanelOpen(true)}
+          className="fixed top-20 left-4 z-40 size-8 rounded-full bg-white/90 backdrop-blur-md border border-slate-200/90 shadow-md flex items-center justify-center text-slate-600 hover:text-blue-600 hover:border-blue-300 transition"
+          title="Open Context & History"
+        >
+          <ChevronRight className="size-4" />
+        </button>
+      )}
 
-            {/* Section 2: CONVERSATION HISTORY */}
-            <div className="flex flex-col flex-1 min-h-[220px]">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                  CONVERSATION HISTORY
+      {!rightPanelOpen && (
+        <button
+          onClick={() => setRightPanelOpen(true)}
+          className="fixed top-20 right-4 z-40 size-8 rounded-full bg-white/90 backdrop-blur-md border border-slate-200/90 shadow-md flex items-center justify-center text-slate-600 hover:text-blue-600 hover:border-blue-300 transition"
+          title="Open Retrieved Evidence"
+        >
+          <ChevronLeft className="size-4" />
+        </button>
+      )}
+
+      {/* ------------------------------------------------------------- */}
+      {/* Main Workspace Canvas with Docked Animated Sidebars           */}
+      {/* ------------------------------------------------------------- */}
+      <div className="relative flex-1 w-full h-[calc(100vh-64px)] flex flex-row p-2 sm:p-3 gap-2 sm:gap-3 overflow-hidden">
+        {/* ============================================================ */}
+        {/* DOCKED LEFT PANEL: Context & History                         */}
+        {/* ============================================================ */}
+        <aside
+          className={`relative z-20 h-full flex flex-col bg-white/85 backdrop-blur-xl border border-white/90 shadow-[0_8px_30px_rgb(0,0,0,0.04)] rounded-2xl transition-all duration-300 ease-in-out shrink-0 overflow-hidden ${
+            leftPanelOpen
+              ? "w-72 xl:w-80 opacity-100"
+              : "w-0 p-0 m-0 border-0 opacity-0 pointer-events-none"
+          }`}
+          aria-hidden={!leftPanelOpen}
+        >
+          {leftPanelOpen && (
+            <>
+              {/* Panel Header */}
+              <div className="p-3 border-b border-blue-50 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <Layers className="size-3.5 text-blue-600" />
+                <span className="text-xs font-bold text-slate-900">Context &amp; History</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-slate-400 font-medium">
+                  {conversations.length} threads
                 </span>
                 <button
-                  onClick={() => handleCreateNewThread()}
-                  className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 flex items-center gap-1"
+                  onClick={() => setLeftPanelOpen(false)}
+                  className="p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition"
+                  title="Close panel"
                 >
-                  <Plus className="size-3" />
-                  New
+                  <X className="size-3.5" />
                 </button>
               </div>
-
-              {/* Thread search */}
-              <div className="relative mb-2">
-                <Search className="absolute left-2.5 top-2.5 size-3 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Filter threads..."
-                  value={searchThreadQuery}
-                  onChange={(e) => setSearchThreadQuery(e.target.value)}
-                  className="w-full pl-7 pr-2 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md focus:bg-white focus:outline-hidden focus:ring-1 focus:ring-teal-500 text-slate-800 placeholder-slate-400"
-                />
-              </div>
-
-              {/* Thread list */}
-              <div className="space-y-1.5 overflow-y-auto flex-1 pr-1 max-h-[220px]">
-                {loadingConversations ? (
-                  <ListSkeleton variant="thread" count={4} />
-                ) : filteredThreads.length === 0 ? (
-                  <div className="p-4 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-lg">
-                    No conversations found. Click &quot;New&quot; to start.
-                  </div>
-                ) : (
-                  filteredThreads.map((conv) => {
-                    const isActive = conv.id === activeConversationId;
-                    return (
-                      <div
-                        key={conv.id}
-                        onClick={() => setActiveConversationId(conv.id)}
-                        className={`group p-2.5 rounded-lg border text-xs cursor-pointer transition-all flex items-start justify-between gap-2 ${
-                          isActive
-                            ? "bg-teal-50/80 border-teal-300 shadow-2xs font-medium text-teal-950"
-                            : "bg-white border-slate-200 hover:bg-slate-50 text-slate-700"
-                        }`}
-                      >
-                        <div className="flex-1 min-w-0">
-                          <div className="truncate font-semibold">{conv.title}</div>
-                          <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-1">
-                            <Clock className="size-2.5" />
-                            <span>
-                              {conv.last_message_at
-                                ? new Date(conv.last_message_at).toLocaleTimeString([], {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                  })
-                                : new Date(conv.created_at).toLocaleDateString()}
-                            </span>
-                          </div>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={(e) => handleDeleteThread(conv.id, e)}
-                          className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-rose-600 p-1 rounded transition-opacity"
-                          title="Delete thread"
-                        >
-                          <Trash2 className="size-3" />
-                        </button>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
             </div>
 
-            {/* Section 3: RECENT QUESTIONS / STARTER PROMPTS */}
-            <div>
-              <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">
-                RECENT QUESTIONS &amp; PROMPTS
-              </div>
-              <div className="space-y-1.5">
-                {STARTER_PROMPTS.map((prompt, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => handleAsk(prompt.question)}
-                    disabled={asking}
-                    className="w-full text-left p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 hover:border-teal-300 transition-colors text-xs text-slate-700 flex items-start justify-between gap-2 group disabled:opacity-50"
-                  >
-                    <div className="flex-1">
-                      <span className="font-medium group-hover:text-teal-900 block">{prompt.title}</span>
-                      <span className="text-[10px] text-slate-400 truncate block mt-0.5">{prompt.question}</span>
+            {/* Scrollable Content */}
+            <div className="p-3 space-y-3.5 overflow-y-auto flex-1 text-xs">
+              {/* Project Context */}
+              <div className="space-y-1">
+                <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                  Project Context
+                </div>
+                <div className="p-2.5 rounded-xl bg-white/70 border border-blue-100/70 shadow-2xs space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 truncate">
+                      <Folder className="size-3.5 text-blue-600 shrink-0" />
+                      <span className="font-bold text-slate-900 truncate">
+                        {activeProject?.name || "Project Workspace"}
+                      </span>
                     </div>
-                    <ArrowRight className="size-3 text-slate-400 group-hover:text-teal-600 shrink-0 mt-1" />
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* ============================================================ */}
-        {/* PANEL 2: QUESTION AND ANSWER (Center Panel)                  */}
-        {/* ============================================================ */}
-        <div className="lg:col-span-5 bg-white border border-slate-200 rounded-xl shadow-xs flex flex-col overflow-hidden h-[760px]">
-          {/* Header */}
-          <div className="bg-[#0f766e] text-white px-4 py-2.5 flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2">
-              <Bot className="size-3.5 text-emerald-300" />
-              2 QUESTION AND ANSWER
-            </span>
-            <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-1 text-[10px] font-mono bg-teal-800/80 text-teal-100 px-2 py-0.5 rounded-full border border-teal-600/50">
-                <Sparkles className="size-2.5 text-emerald-300" />
-                Evidence Grounded
-              </span>
-            </div>
-          </div>
-
-          {/* Conversation Turns Scroll Area */}
-          <div className="flex-1 p-4 overflow-y-auto space-y-5 bg-slate-50/50">
-            {loadingMessages ? (
-              <div className="space-y-4 py-4 max-w-3xl mx-auto w-full animate-pulse">
-                {/* User bubble skeleton */}
-                <div className="flex justify-end">
-                  <div className="w-2/3 h-14 bg-blue-100/70 rounded-2xl rounded-tr-xs" />
-                </div>
-                {/* Assistant bubble skeleton */}
-                <div className="flex justify-start">
-                  <div className="w-4/5 h-32 bg-white rounded-2xl rounded-tl-xs border border-slate-200 p-4 space-y-2.5">
-                    <div className="h-3.5 bg-slate-200 rounded-sm w-3/4" />
-                    <div className="h-3 bg-slate-100 rounded-sm w-full" />
-                    <div className="h-3 bg-slate-100 rounded-sm w-5/6" />
+                    <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-blue-50 text-blue-700 border border-blue-200/60">
+                      Active
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
+                    <User className="size-3 text-slate-400" />
+                    <span>{user?.full_name || user?.email || "standard_user"}</span>
+                    <span>·</span>
+                    <span>Project Member</span>
+                  </div>
+                  <div className="pt-1.5 border-t border-slate-100 flex items-center gap-1.5 text-[10px] text-slate-500">
+                    <ShieldCheck className="size-3 text-blue-600 shrink-0" />
+                    <span>Only information you are allowed to access is used. Citations fail-closed.</span>
                   </div>
                 </div>
               </div>
-            ) : messages.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center p-6 text-center">
-                <div className="size-12 rounded-full bg-teal-100 flex items-center justify-center text-teal-700 mb-3">
-                  <Bot className="size-6" />
+
+              {/* Conversation History */}
+              <div className="space-y-1.5 flex flex-col">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                    Conversation History
+                  </span>
+                  <button
+                    onClick={() => handleCreateNewThread()}
+                    className="text-[10px] font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                  >
+                    <Plus className="size-3" />
+                    <span>New</span>
+                  </button>
                 </div>
-                <h3 className="text-sm font-bold text-slate-900">Project Knowledge Assistant</h3>
-                <p className="text-xs text-slate-500 max-w-sm mt-1 leading-relaxed">
-                  Ask any question regarding architecture, technical decisions, unfinished work, responsibilities, or risks.
-                  Every statement is grounded in authorized project sources with zero fabrication.
-                </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-5 w-full max-w-md">
-                  {STARTER_PROMPTS.slice(0, 4).map((p, i) => (
+
+                {/* Thread search */}
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-2.5 size-3 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search threads..."
+                    value={searchThreadQuery}
+                    onChange={(e) => setSearchThreadQuery(e.target.value)}
+                    className="w-full pl-7 pr-2 py-1 text-xs bg-white/70 border border-slate-200/80 rounded-lg focus:bg-white focus:outline-hidden focus:ring-1 focus:ring-blue-500 text-slate-800 placeholder-slate-400 transition"
+                  />
+                </div>
+
+                {/* Thread list */}
+                <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                  {loadingConversations ? (
+                    <ListSkeleton variant="thread" count={2} />
+                  ) : filteredThreads.length === 0 ? (
+                    <div className="p-3 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-xl space-y-0.5 bg-white/40">
+                      <div className="font-semibold text-slate-600 text-[11px]">No conversations yet</div>
+                      <div className="text-[10px] text-slate-400">
+                        Start a new thread to begin an investigation.
+                      </div>
+                    </div>
+                  ) : (
+                    filteredThreads.map((conv) => {
+                      const isActive = conv.id === activeConversationId;
+                      return (
+                        <div
+                          key={conv.id}
+                          onClick={() => setActiveConversationId(conv.id)}
+                          className={`group p-2 rounded-lg border text-xs cursor-pointer transition-all flex items-center justify-between gap-2 ${
+                            isActive
+                              ? "bg-blue-50/90 border-blue-200 font-semibold text-blue-950 shadow-2xs"
+                              : "bg-white/60 border-slate-200/70 hover:bg-white text-slate-700"
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="truncate">{conv.title}</div>
+                            <div className="flex items-center gap-1 text-[9px] text-slate-400 mt-0.5">
+                              <Clock className="size-2.5" />
+                              <span>
+                                {conv.last_message_at
+                                  ? new Date(conv.last_message_at).toLocaleTimeString([], {
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })
+                                  : new Date(conv.created_at).toLocaleDateString()}
+                              </span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => handleDeleteThread(conv.id, e)}
+                            className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-rose-600 p-1 rounded transition-opacity"
+                            title="Delete thread"
+                          >
+                            <Trash2 className="size-3" />
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              {/* Quick Questions List */}
+              <div className="space-y-1 pt-1">
+                <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                  <Sparkles className="size-3 text-blue-600" />
+                  <span>Quick Questions</span>
+                </div>
+                <div className="space-y-1">
+                  {QUICK_QUESTIONS.map((item, idx) => {
+                    const Icon = item.icon;
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => handleAsk(item.question)}
+                        disabled={asking}
+                        className="w-full text-left p-1.5 rounded-lg border border-slate-200/80 bg-white/70 hover:bg-white hover:border-blue-300 transition text-[11px] text-slate-700 flex items-center justify-between gap-1.5 group disabled:opacity-50 shadow-2xs"
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <Icon className="size-3 text-blue-600 shrink-0" />
+                          <span className="font-medium text-slate-800 truncate group-hover:text-blue-900">
+                            {item.title}
+                          </span>
+                        </div>
+                        <ChevronRight className="size-3 text-slate-400 group-hover:text-blue-600 shrink-0" />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* Edge Collapse Button */}
+            <button
+              onClick={() => setLeftPanelOpen(false)}
+              className="absolute -right-3 top-1/2 -translate-y-1/2 size-6 rounded-full bg-white border border-slate-200 shadow-md flex items-center justify-center text-slate-400 hover:text-blue-600 transition z-40 hidden lg:flex"
+              title="Collapse Context panel"
+            >
+              <ChevronLeft className="size-3.5" />
+            </button>
+          </>
+        )}
+      </aside>
+
+        {/* ============================================================ */}
+        {/* MAIN CHAT CANVAS (Expands smoothly when sidebars close)      */}
+        {/* ============================================================ */}
+        <main
+          className={`flex-1 min-w-0 flex flex-col h-full overflow-hidden transition-all duration-300 ease-in-out mx-auto ${
+            !leftPanelOpen && !rightPanelOpen
+              ? "max-w-4xl xl:max-w-5xl"
+              : !leftPanelOpen || !rightPanelOpen
+              ? "max-w-3xl xl:max-w-4xl"
+              : "max-w-2xl xl:max-w-3xl"
+          }`}
+        >
+          {loadingMessages ? (
+            <div className="space-y-4 py-8 max-w-xl mx-auto w-full animate-pulse my-auto">
+              <div className="flex justify-end">
+                <div className="w-2/3 h-12 bg-blue-100/70 rounded-2xl rounded-tr-xs" />
+              </div>
+              <div className="flex justify-start">
+                <div className="w-4/5 h-28 bg-white rounded-2xl rounded-tl-xs border border-slate-200 p-4 space-y-2">
+                  <div className="h-3.5 bg-slate-200 rounded-sm w-3/4" />
+                  <div className="h-3 bg-slate-100 rounded-sm w-full" />
+                </div>
+              </div>
+            </div>
+          ) : messages.length === 0 ? (
+            /* WELCOME STATE: ELEVATED CHAT CANVAS & PROMINENT COMPOSER */
+            <div className="h-full flex flex-col items-center justify-start text-center pt-2 sm:pt-4 lg:pt-6 animate-fade-in overflow-y-auto">
+              {/* 3D Stacked Glass Thinking Animation */}
+              <AssistantThinking3D size="lg" className="mb-0.5 shrink-0" />
+
+              <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 mt-0.5">
+                Project Knowledge Assistant
+              </h2>
+
+              <p className="text-xs text-slate-500 max-w-md mt-0.5 leading-relaxed">
+                Ask any question regarding architecture, technical decisions, unfinished work, responsibilities, or risks. Every statement is grounded in authorized project sources with zero fabrication.
+              </p>
+
+              {/* Grid of Quick Action Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2.5 w-full max-w-xl shrink-0">
+                {QUICK_QUESTIONS.map((p, i) => {
+                  const Icon = p.icon;
+                  return (
                     <button
                       key={i}
                       type="button"
                       onClick={() => handleAsk(p.question)}
-                      className="p-2 text-left bg-white border border-slate-200 rounded-lg hover:border-teal-400 hover:shadow-2xs transition text-xs"
+                      className="p-2.5 text-left bg-white/80 hover:bg-white border border-slate-200/90 hover:border-blue-300 rounded-xl shadow-2xs hover:shadow-xs transition flex items-center justify-between gap-2.5 group"
                     >
-                      <div className="font-semibold text-slate-800 text-[11px]">{p.title}</div>
-                      <div className="text-[10px] text-slate-400 truncate mt-0.5">{p.question}</div>
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Icon className="size-3.5 text-blue-600 shrink-0" />
+                        <span className="font-semibold text-slate-800 text-[11px] truncate group-hover:text-blue-900">
+                          {p.title}
+                        </span>
+                      </div>
+                      <ChevronRight className="size-3 text-slate-400 group-hover:text-blue-600 shrink-0" />
                     </button>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              messages.map((msg, index) => {
-                if (msg.sender_type === "user") {
-                  return (
-                    <div key={msg.id || index} className="flex flex-col items-end">
-                      <div className="flex items-center gap-1.5 text-[10px] text-slate-400 uppercase font-semibold mb-1 mr-1">
-                        <User className="size-3" />
-                        <span>QUESTION (user)</span>
-                        <span>·</span>
-                        <span>
-                          {msg.created_at ? new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Now"}
-                        </span>
-                      </div>
-                      <div className="max-w-[85%] bg-blue-50/80 border border-blue-200 text-slate-900 rounded-2xl rounded-tr-xs px-4 py-3 text-xs leading-relaxed shadow-2xs">
-                        {msg.content}
-                      </div>
-                    </div>
                   );
-                }
+                })}
+              </div>
 
-                // Assistant message turn
-                const isInsufficient = msg.answer_status === "insufficient_evidence";
-                const isPartial = msg.answer_status === "partially_answered" || Boolean(msg.structured_payload_json?.uncertainty);
-                const hasConflicts =
-                  (msg.structured_payload_json?.conflicts &&
-                    msg.structured_payload_json.conflicts.length > 0) ||
-                  msg.answer_status === "conflicted_evidence";
-                const claims = msg.structured_payload_json?.claims || [];
-                const followups = msg.structured_payload_json?.suggested_followup_questions || [];
-                const isClaimsExpanded = expandedClaims[msg.id];
-                const currentFeedback = feedbackGiven[msg.id];
-                const msgMode = msg.structured_payload_json?.response_mode || msg.response_mode || "standard";
+              {/* CHAT BOX (ELEVATED DIRECTLY BENEATH CARDS) */}
+              <div className="w-full max-w-xl mt-3 shrink-0">
+                {renderComposer()}
+              </div>
+            </div>
+          ) : (
+            /* ACTIVE CONVERSATION STATE */
+            <div className="flex flex-col h-full overflow-hidden">
+              {/* Scrollable Turn History */}
+              <div className="flex-1 overflow-y-auto space-y-3 p-2 sm:p-3">
+                {messages
+                  .filter((m) => m.sender_type !== "system" && !m.content?.startsWith("Investigation Checkpoint:"))
+                  .map((msg, index) => {
+                  if (msg.sender_type === "user") {
+                    return (
+                      <div key={msg.id || index} className="flex flex-col items-end">
+                        <div className="flex items-center gap-1.5 text-[10px] text-slate-400 uppercase font-semibold mb-1 mr-1">
+                          <User className="size-3" />
+                          <span>Question</span>
+                        </div>
+                        <div className="max-w-[85%] bg-blue-50/90 border border-blue-200 text-slate-900 rounded-2xl rounded-tr-xs px-3.5 py-2.5 text-xs leading-relaxed shadow-2xs">
+                          {msg.content}
+                        </div>
+                      </div>
+                    );
+                  }
 
-                const researchReport = msg.structured_payload_json?.research_report;
-                const deepThink = msg.structured_payload_json?.deep_think;
-                const deepExtract = msg.structured_payload_json?.deep_extract;
+                  const isInsufficient = msg.answer_status === "insufficient_evidence";
+                  const isPartial =
+                    msg.answer_status === "partially_answered" ||
+                    Boolean(msg.structured_payload_json?.uncertainty);
+                  const hasConflicts =
+                    (msg.structured_payload_json?.conflicts &&
+                      msg.structured_payload_json.conflicts.length > 0) ||
+                    msg.answer_status === "conflicted_evidence";
+                  const claims = msg.structured_payload_json?.claims || [];
+                  const followups = msg.structured_payload_json?.suggested_followup_questions || [];
+                  const isClaimsExpanded = expandedClaims[msg.id];
+                  const currentFeedback = feedbackGiven[msg.id];
+                  const msgMode =
+                    msg.structured_payload_json?.response_mode || msg.response_mode || "standard";
 
-                return (
-                  <div key={msg.id || index} className="flex flex-col items-start w-full">
-                    <div className="flex items-center gap-1.5 text-[10px] text-slate-500 uppercase font-semibold mb-1 ml-1">
-                      <Bot className="size-3 text-teal-600" />
-                      <span className="text-teal-900 font-bold">ANSWER</span>
+                  const researchReport = msg.structured_payload_json?.research_report;
+                  const deepThink = msg.structured_payload_json?.deep_think;
+                  const deepExtract = msg.structured_payload_json?.deep_extract;
 
-                      {/* Response Mode Badge */}
-                      {msgMode === "deep_research" ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-800 border border-indigo-200 rounded text-[9px] font-bold">
-                          <BookOpen className="size-2.5" />
-                          Deep Research
-                        </span>
-                      ) : msgMode === "deep_think" ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-800 border border-purple-200 rounded text-[9px] font-bold">
-                          <Brain className="size-2.5" />
-                          Deep Think
-                        </span>
-                      ) : msgMode === "deep_extract" ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-sky-100 text-sky-800 border border-sky-200 rounded text-[9px] font-bold">
-                          <Table className="size-2.5" />
-                          Deep Extract
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-teal-100 text-teal-800 border border-teal-200 rounded text-[9px] font-bold">
-                          <Sparkles className="size-2.5" />
-                          Standard
-                        </span>
-                      )}
-
-                      {msg.structured_payload_json?.query_type && (
-                        <span className="px-1.5 py-0.2 bg-slate-100 text-slate-700 rounded text-[9px] font-mono">
-                          {msg.structured_payload_json.query_type}
-                        </span>
-                      )}
-                      {msg.duration_ms && (
-                        <span className="text-slate-400 font-mono text-[9px]">
-                          {(msg.duration_ms / 1000).toFixed(1)}s
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="w-full bg-white border border-slate-200 rounded-2xl rounded-tl-xs p-4 text-xs shadow-xs space-y-3.5">
-                      {/* Main answer text */}
-                      <div className="text-slate-800 leading-relaxed space-y-2 whitespace-pre-wrap">
-                        {renderFormattedAnswer(msg.content)}
+                  return (
+                    <div key={msg.id || index} className="flex items-start gap-3 w-full">
+                      {/* Compact 3D Thinking Avatar on the Left */}
+                      <div className="shrink-0 pt-0.5" title="Project Knowledge Assistant">
+                        <AssistantThinking3D size="xs" isThinking={false} />
                       </div>
 
-                      {/* ======================================================== */}
-                      {/* DEEP RESEARCH STRUCTURED REPORT                          */}
-                      {/* ======================================================== */}
-                      {researchReport && (
-                        <div className="mt-3 p-3.5 bg-indigo-50/40 border border-indigo-200 rounded-xl space-y-3">
-                          <div className="flex items-center justify-between border-b border-indigo-100 pb-2">
-                            <span className="flex items-center gap-1.5 font-bold text-indigo-900 text-[11px] uppercase tracking-wider">
-                              <BookOpen className="size-3.5 text-indigo-600" />
+                      <div className="flex-1 min-w-0 flex flex-col items-start">
+                        <div className="flex items-center gap-1.5 text-[10px] text-slate-500 uppercase font-semibold mb-1 ml-1">
+                          <Bot className="size-3.5 text-blue-600" />
+                          <span className="text-slate-900 font-bold">Answer</span>
+
+                        {msgMode === "deep_research" ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-800 border border-indigo-200 rounded text-[9px] font-bold">
+                            <BookOpen className="size-2.5" />
+                            Deep Research
+                          </span>
+                        ) : msgMode === "deep_think" ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-800 border border-purple-200 rounded text-[9px] font-bold">
+                            <Brain className="size-2.5" />
+                            Deep Think
+                          </span>
+                        ) : msgMode === "deep_extract" ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-sky-100 text-sky-800 border border-sky-200 rounded text-[9px] font-bold">
+                            <Table className="size-2.5" />
+                            Deep Extract
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-[9px] font-bold">
+                            <Sparkles className="size-2.5" />
+                            Standard
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="w-full bg-white/95 border border-slate-200/90 rounded-2xl rounded-tl-xs p-3.5 text-xs shadow-xs space-y-3">
+                        <div className="text-slate-800 leading-relaxed space-y-2 whitespace-pre-wrap">
+                          {renderFormattedAnswer(msg.content)}
+                        </div>
+
+                        {/* Structured Reports when present */}
+                        {researchReport && (
+                          <div className="mt-2.5 p-3 bg-indigo-50/40 border border-indigo-200 rounded-xl space-y-2 text-[11px]">
+                            <span className="font-bold text-indigo-900 uppercase tracking-wider block">
                               Multi-Source Research Report
                             </span>
-                            {researchReport.coverage_assessment && (
-                              <span className="px-2 py-0.5 text-[10px] font-medium bg-indigo-100 text-indigo-800 rounded-full border border-indigo-200">
-                                Coverage: {researchReport.coverage_assessment}
-                              </span>
-                            )}
+                            <div className="p-2 bg-white rounded border border-indigo-100 text-slate-800">
+                              {researchReport.executive_summary}
+                            </div>
                           </div>
+                        )}
 
-                          {/* Executive Summary */}
-                          <div className="p-2.5 bg-white rounded-lg border border-indigo-100 text-[11px] text-slate-800 leading-relaxed">
-                            <div className="font-bold text-indigo-950 mb-1">Executive Summary:</div>
-                            {researchReport.executive_summary}
-                          </div>
-
-                          {/* Report Sections */}
-                          {researchReport.sections && researchReport.sections.length > 0 && (
-                            <div className="space-y-2">
-                              {researchReport.sections.map((sec, sIdx) => (
-                                <div key={sIdx} className="p-2.5 bg-white rounded-lg border border-slate-200 text-[11px] space-y-1.5">
-                                  <div className="flex items-center justify-between">
-                                    <span className="font-bold text-slate-900">{sec.section_title}</span>
-                                    <div className="flex items-center gap-1 font-mono">
-                                      {sec.citation_labels.map((cl, cli) => (
-                                        <button
-                                          key={cli}
-                                          type="button"
-                                          onClick={() => handleCitationClick(cl)}
-                                          className="text-[10px] text-indigo-700 hover:underline"
-                                        >
-                                          [{cl}]
-                                        </button>
-                                      ))}
-                                    </div>
-                                  </div>
-                                  <div className="text-slate-700 leading-relaxed">{renderFormattedAnswer(sec.content)}</div>
-                                  {sec.key_takeaways && sec.key_takeaways.length > 0 && (
-                                    <div className="pt-1 border-t border-slate-100 text-[10px] text-slate-600 space-y-0.5">
-                                      <span className="font-semibold text-slate-700">Key Takeaways:</span>
-                                      {sec.key_takeaways.map((kt, kti) => (
-                                        <div key={kti} className="flex items-center gap-1 text-slate-600 pl-1">
-                                          <span>•</span>
-                                          <span>{kt}</span>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-
-                          {/* Cross-Source Corroboration */}
-                          {researchReport.cross_source_corroboration && researchReport.cross_source_corroboration.length > 0 && (
-                            <div className="p-2.5 bg-white rounded-lg border border-slate-200 text-[11px]">
-                              <div className="font-bold text-slate-900 mb-1">Cross-Source Corroboration:</div>
-                              <ul className="list-disc pl-4 space-y-0.5 text-slate-700 text-[10px]">
-                                {researchReport.cross_source_corroboration.map((c, ci) => (
-                                  <li key={ci}>{c}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-
-                          {/* Actionable Recommendations */}
-                          {researchReport.recommendations && researchReport.recommendations.length > 0 && (
-                            <div className="p-2.5 bg-indigo-100/50 rounded-lg border border-indigo-200 text-[11px]">
-                              <div className="font-bold text-indigo-950 mb-1">Successor Recommendations:</div>
-                              <ul className="list-disc pl-4 space-y-0.5 text-indigo-900 text-[10px]">
-                                {researchReport.recommendations.map((r, ri) => (
-                                  <li key={ri}>{r}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* ======================================================== */}
-                      {/* DEEP THINK CAUSAL REASONING                              */}
-                      {/* ======================================================== */}
-                      {deepThink && (
-                        <div className="mt-3 p-3.5 bg-purple-50/40 border border-purple-200 rounded-xl space-y-3">
-                          <div className="flex items-center gap-1.5 border-b border-purple-100 pb-2 font-bold text-purple-900 text-[11px] uppercase tracking-wider">
-                            <Brain className="size-3.5 text-purple-600" />
-                            Causal &amp; Architecture Reasoning Chain
-                          </div>
-
-                          {/* Core Hypothesis */}
-                          <div className="p-2.5 bg-white rounded-lg border border-purple-100 text-[11px] text-slate-800">
-                            <span className="font-bold text-purple-950">Core Hypothesis: </span>
-                            {deepThink.core_hypothesis}
-                          </div>
-
-                          {/* Causal Chain Steps */}
-                          {deepThink.causal_chain && deepThink.causal_chain.length > 0 && (
-                            <div className="space-y-2">
-                              <div className="text-[10px] font-bold text-purple-950 uppercase tracking-wider">
-                                Causal Progression:
-                              </div>
-                              {deepThink.causal_chain.map((step, stIdx) => (
-                                <div key={stIdx} className="p-2.5 bg-white rounded-lg border border-purple-100 text-[11px] space-y-1">
-                                  <div className="flex items-center justify-between">
-                                    <span className="inline-flex items-center gap-1 font-bold text-purple-900">
-                                      <span className="size-4 rounded-full bg-purple-100 text-purple-800 text-[10px] flex items-center justify-center font-bold">
-                                        {step.step_number}
-                                      </span>
-                                      {step.event_or_decision}
-                                    </span>
-                                    {step.actor_or_source && (
-                                      <span className="text-[10px] font-mono text-slate-500 bg-slate-50 px-1.5 py-0.5 rounded border border-slate-200">
-                                        {step.actor_or_source}
-                                      </span>
-                                    )}
-                                  </div>
-                                  {step.consequences && step.consequences.length > 0 && (
-                                    <div className="pl-5 text-[10px] text-slate-600 space-y-0.5">
-                                      <span className="font-semibold text-slate-700">Consequences:</span>
-                                      {step.consequences.map((c, ci) => (
-                                        <div key={ci} className="text-slate-600">→ {c}</div>
-                                      ))}
-                                    </div>
-                                  )}
-                                  {step.citation_labels && step.citation_labels.length > 0 && (
-                                    <div className="pl-5 flex items-center gap-1 font-mono text-[10px]">
-                                      <span className="text-slate-400">Supporting:</span>
-                                      {step.citation_labels.map((cl, cli) => (
-                                        <button
-                                          key={cli}
-                                          type="button"
-                                          onClick={() => handleCitationClick(cl)}
-                                          className="text-purple-700 hover:underline"
-                                        >
-                                          [{cl}]
-                                        </button>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-
-                          {/* Tradeoffs & Risks */}
-                          {deepThink.tradeoffs_and_risks && deepThink.tradeoffs_and_risks.length > 0 && (
-                            <div className="p-2.5 bg-amber-50/60 rounded-lg border border-amber-200 text-[11px]">
-                              <div className="font-bold text-amber-950 mb-1">Architectural Trade-offs &amp; Risks:</div>
-                              <ul className="list-disc pl-4 space-y-0.5 text-amber-900 text-[10px]">
-                                {deepThink.tradeoffs_and_risks.map((t, ti) => (
-                                  <li key={ti}>{t}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* ======================================================== */}
-                      {/* DEEP EXTRACT STRUCTURED TABULAR DATA                     */}
-                      {/* ======================================================== */}
-                      {deepExtract && (
-                        <div className="mt-3 p-3.5 bg-sky-50/40 border border-sky-200 rounded-xl space-y-3">
-                          <div className="flex items-center justify-between border-b border-sky-100 pb-2">
-                            <span className="flex items-center gap-1.5 font-bold text-sky-900 text-[11px] uppercase tracking-wider">
-                              <Table className="size-3.5 text-sky-600" />
-                              Structured Entity Extraction: {deepExtract.target_schema}
+                        {deepThink && (
+                          <div className="mt-2.5 p-3 bg-purple-50/40 border border-purple-200 rounded-xl space-y-2 text-[11px]">
+                            <span className="font-bold text-purple-900 uppercase tracking-wider block">
+                              Reasoning Chain
                             </span>
-                            <button
-                              type="button"
-                              onClick={() => handleCopyJson(deepExtract, msg.id)}
-                              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white hover:bg-sky-100 border border-sky-200 text-sky-800 text-[10px] font-semibold transition shadow-2xs"
-                              title="Copy structured records as JSON"
-                            >
-                              {copiedExtractId === msg.id ? (
-                                <>
-                                  <CheckCheck className="size-3 text-emerald-600" />
-                                  <span>Copied JSON</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Copy className="size-3" />
-                                  <span>Copy JSON</span>
-                                </>
-                              )}
-                            </button>
-                          </div>
-
-                          {/* Extracted Table */}
-                          {deepExtract.records && deepExtract.records.length > 0 && (
-                            <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-2xs">
-                              <table className="w-full text-left border-collapse text-[11px]">
-                                <thead>
-                                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold">
-                                    <th className="p-2">Entity</th>
-                                    <th className="p-2">Category</th>
-                                    <th className="p-2">Status</th>
-                                    <th className="p-2">Attributes &amp; Provenance</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                  {deepExtract.records.map((rec, rIdx) => (
-                                    <tr key={rIdx} className="hover:bg-slate-50/50">
-                                      <td className="p-2 font-semibold text-slate-900 whitespace-nowrap">{rec.entity_name}</td>
-                                      <td className="p-2 text-slate-600 whitespace-nowrap">
-                                        <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 text-[10px]">
-                                          {rec.category}
-                                        </span>
-                                      </td>
-                                      <td className="p-2 whitespace-nowrap">
-                                        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-200">
-                                          {rec.status_or_state || "Recorded"}
-                                        </span>
-                                      </td>
-                                      <td className="p-2 text-slate-700 space-y-1">
-                                        {Object.entries(rec.attributes || {}).map(([k, v], ki) => {
-                                          const cits = rec.field_citations?.[k] || [];
-                                          return (
-                                            <div key={ki} className="flex items-center gap-1.5">
-                                              <span className="font-semibold text-slate-600">{k}:</span>
-                                              <span>{String(v)}</span>
-                                              {cits.map((cl, cli) => (
-                                                <button
-                                                  key={cli}
-                                                  type="button"
-                                                  onClick={() => handleCitationClick(cl)}
-                                                  className="text-[10px] font-mono text-sky-700 hover:underline"
-                                                >
-                                                  [{cl}]
-                                                </button>
-                                              ))}
-                                            </div>
-                                          );
-                                        })}
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
+                            <div className="p-2 bg-white rounded border border-purple-100 text-slate-800">
+                              {deepThink.core_hypothesis}
                             </div>
-                          )}
+                          </div>
+                        )}
 
-                          {/* Missing Fields Notice */}
-                          {deepExtract.missing_fields && deepExtract.missing_fields.length > 0 && (
-                            <div className="p-2 bg-amber-50/70 border border-amber-200 rounded text-[10px] text-amber-900">
-                              <span className="font-bold">Missing Fields in Evidence: </span>
-                              {deepExtract.missing_fields.join(", ")}
+                        {deepExtract && deepExtract.records && (
+                          <div className="mt-2.5 p-3 bg-sky-50/40 border border-sky-200 rounded-xl space-y-2 text-[11px]">
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-sky-900 uppercase tracking-wider">
+                                Entity Extraction: {deepExtract.target_schema}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleCopyJson(deepExtract, msg.id)}
+                                className="px-2 py-0.5 rounded bg-white hover:bg-sky-100 border border-sky-200 text-sky-800 text-[9px] font-semibold"
+                              >
+                                {copiedExtractId === msg.id ? "Copied" : "Copy JSON"}
+                              </button>
                             </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Citation summary pills row */}
-                      {msg.citations && msg.citations.length > 0 && (
-                        <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center gap-1.5">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">
-                            Citations:
-                          </span>
-                          {msg.citations.map((c, i) => (
-                            <button
-                              key={i}
-                              type="button"
-                              onClick={() => handleCitationClick(c.citation_label)}
-                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold border transition ${
-                                activeCitationLabel === c.citation_label
-                                  ? "bg-emerald-600 text-white border-emerald-700 shadow-xs"
-                                  : "bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100"
-                              }`}
-                              title={c.source_title}
-                            >
-                              <span>[{c.citation_label}]</span>
-                              <span className="max-w-[120px] truncate">{c.source_provider}</span>
-                            </button>
-                          ))}
-                          <span className="text-[10px] text-slate-400 italic ml-1">
-                            (citations open source records)
-                          </span>
-                        </div>
-                      )}
-
-                      {/* INSUFFICIENT-EVIDENCE STATE ALERT (Zero Matches) */}
-                      {isInsufficient && (
-                        <div className="p-3 bg-amber-50/70 border border-dashed border-amber-300 rounded-lg text-amber-900 text-xs space-y-1">
-                          <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-[11px] text-amber-800">
-                            <AlertCircle className="size-3.5 text-amber-600" />
-                            INSUFFICIENT-EVIDENCE STATE
                           </div>
-                          <p className="text-[11px] text-amber-800/90 leading-relaxed">
-                            {msg.structured_payload_json?.uncertainty ||
-                              "Available project evidence does not support a fully authoritative answer. Zero fabrication enforced."}
-                          </p>
-                          {msg.structured_payload_json?.missing_information &&
-                            msg.structured_payload_json.missing_information.length > 0 && (
-                              <div className="text-[10px] text-amber-700 mt-1 pl-4 list-disc">
-                                {msg.structured_payload_json.missing_information.map((m, mi) => (
-                                  <div key={mi}>• Missing context: {m}</div>
-                                ))}
-                              </div>
-                            )}
-                        </div>
-                      )}
+                        )}
 
-                      {/* PARTIAL EVIDENCE & UNCERTAINTY DISCLOSURE */}
-                      {!isInsufficient && isPartial && (
-                        <div className="p-3 bg-teal-50/50 border border-teal-200 rounded-lg text-teal-950 text-xs space-y-1">
-                          <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-[11px] text-teal-800">
-                            <ShieldCheck className="size-3.5 text-teal-600" />
-                            PARTIAL EVIDENCE &amp; CONTEXT DISCLOSURE
+                        {/* Citation Badges */}
+                        {msg.citations && msg.citations.length > 0 && (
+                          <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center gap-1.5">
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">
+                              Sources:
+                            </span>
+                            {msg.citations.map((c, i) => (
+                              <button
+                                key={i}
+                                type="button"
+                                onClick={() => handleCitationClick(c.citation_label)}
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] font-mono font-bold border transition ${
+                                  activeCitationLabel === c.citation_label
+                                    ? "bg-blue-600 text-white border-blue-700 shadow-xs"
+                                    : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
+                                }`}
+                                title={c.source_title}
+                              >
+                                <span>[{c.citation_label}]</span>
+                                <span className="max-w-[120px] truncate">{c.source_provider}</span>
+                              </button>
+                            ))}
                           </div>
-                          <p className="text-[11px] text-teal-900/90 leading-relaxed">
-                            {msg.structured_payload_json?.uncertainty ||
-                              "The answer above synthesizes available project records. Some detailed parameters or specific formulas remain unverified or missing from current sources."}
-                          </p>
-                          {msg.structured_payload_json?.missing_information &&
-                            msg.structured_payload_json.missing_information.length > 0 && (
-                              <div className="text-[10px] text-teal-800 mt-1 pl-4 list-disc">
-                                {msg.structured_payload_json.missing_information.map((m, mi) => (
-                                  <div key={mi}>• Missing context: {m}</div>
-                                ))}
-                              </div>
-                            )}
-                        </div>
-                      )}
+                        )}
 
-                      {/* CONFLICTS WARNING ALERT */}
-                      {hasConflicts && (
-                        <div className="p-3 bg-rose-50/70 border border-rose-200 rounded-lg text-rose-900 text-xs space-y-1">
-                          <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-[11px] text-rose-800">
-                            <ShieldAlert className="size-3.5 text-rose-600" />
-                            DETECTED CONFLICTS BETWEEN SOURCES
+                        {/* States & Warnings */}
+                        {isInsufficient && (
+                          <div className="p-2.5 bg-amber-50/70 border border-dashed border-amber-300 rounded-lg text-amber-900 text-xs">
+                            <div className="font-bold text-[10px] uppercase text-amber-800">
+                              Insufficient Evidence
+                            </div>
+                            <p className="text-[11px] text-amber-800/90 mt-0.5">
+                              {msg.structured_payload_json?.uncertainty ||
+                                "Available project evidence does not support a fully authoritative answer."}
+                            </p>
                           </div>
-                          <div className="space-y-1 text-[11px] text-rose-800/90 pl-1">
+                        )}
+
+                        {!isInsufficient && isPartial && (
+                          <div className="p-2.5 bg-blue-50/50 border border-blue-200 rounded-lg text-blue-950 text-xs">
+                            <div className="font-bold text-[10px] uppercase text-blue-800">
+                              Partial Evidence
+                            </div>
+                            <p className="text-[11px] text-blue-900/90 mt-0.5">
+                              {msg.structured_payload_json?.uncertainty ||
+                                "The answer synthesizes verified records. Some detailed aspects remain unrecorded."}
+                            </p>
+                          </div>
+                        )}
+
+                        {hasConflicts && (
+                          <div className="p-2.5 bg-rose-50/70 border border-rose-200 rounded-lg text-rose-900 text-xs">
+                            <div className="font-bold text-[10px] uppercase text-rose-800">
+                              Conflicting Sources Detected
+                            </div>
                             {msg.structured_payload_json?.conflicts?.map((conf, ci) => (
-                              <div key={ci} className="flex items-start gap-1">
-                                <span>⚠️</span>
-                                <span>{conf}</span>
+                              <div key={ci} className="text-[11px] text-rose-800/90 mt-0.5">
+                                ⚠️ {conf}
                               </div>
                             ))}
                           </div>
-                        </div>
-                      )}
+                        )}
 
-                      {/* Factual Claims Accordion */}
-                      {claims.length > 0 && (
-                        <div className="pt-2 border-t border-slate-100">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExpandedClaims((prev) => ({ ...prev, [msg.id]: !prev[msg.id] }))
-                            }
-                            className="flex items-center justify-between w-full text-left text-[11px] font-semibold text-slate-600 hover:text-slate-900 py-1"
-                          >
-                            <span className="flex items-center gap-1.5">
-                              <ShieldCheck className="size-3.5 text-teal-600" />
-                              Factual Claims &amp; Confidence ({claims.length})
-                            </span>
-                            {isClaimsExpanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
-                          </button>
+                        {/* Verified Claims Accordion */}
+                        {claims.length > 0 && (
+                          <div className="pt-1.5 border-t border-slate-100">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedClaims((prev) => ({ ...prev, [msg.id]: !prev[msg.id] }))
+                              }
+                              className="flex items-center justify-between w-full text-left text-[11px] font-semibold text-slate-600 hover:text-slate-900 py-0.5"
+                            >
+                              <span className="flex items-center gap-1.5">
+                                <ShieldCheck className="size-3.5 text-blue-600" />
+                                Verified Facts &amp; Sources ({claims.length})
+                              </span>
+                              {isClaimsExpanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
+                            </button>
 
-                          {isClaimsExpanded && (
-                            <div className="mt-2 space-y-1.5 pl-2 border-l-2 border-teal-200">
-                              {claims.map((claim, ci) => (
-                                <div key={ci} className="p-2 bg-slate-50 rounded border border-slate-200 text-[11px]">
-                                  <div className="text-slate-800 leading-snug">{claim.claim_text}</div>
-                                  <div className="flex items-center justify-between text-[10px] text-slate-500 mt-1">
-                                    <div className="flex items-center gap-1">
-                                      <span className="font-semibold text-emerald-700">
-                                        {Math.round(claim.confidence * 100)}% conf
+                            {isClaimsExpanded && (
+                              <div className="mt-1.5 space-y-1.5 pl-2 border-l-2 border-blue-200">
+                                {claims.map((claim, ci) => (
+                                  <div key={ci} className="p-1.5 bg-slate-50 rounded border border-slate-200 text-[10px]">
+                                    <div className="text-slate-800">{claim.claim_text}</div>
+                                    <div className="flex items-center justify-between text-slate-500 mt-1">
+                                      <span className="font-semibold text-blue-700">
+                                        {Math.round(claim.confidence * 100)}% confidence
                                       </span>
-                                    </div>
-                                    <div className="flex items-center gap-1 font-mono">
-                                      {claim.citation_labels.map((cl, cli) => (
-                                        <button
-                                          key={cli}
-                                          type="button"
-                                          onClick={() => handleCitationClick(cl)}
-                                          className="text-teal-700 hover:underline"
-                                        >
-                                          [{cl}]
-                                        </button>
-                                      ))}
+                                      <div className="flex items-center gap-1 font-mono">
+                                        {claim.citation_labels.map((cl, cli) => (
+                                          <button
+                                            key={cli}
+                                            type="button"
+                                            onClick={() => handleCitationClick(cl)}
+                                            className="text-blue-700 hover:underline"
+                                          >
+                                            [{cl}]
+                                          </button>
+                                        ))}
+                                      </div>
                                     </div>
                                   </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Feedback Buttons */}
-                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
-                        <div className="text-[10px] text-slate-500 font-medium">
-                          AI Assistant
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] text-slate-400">Helpful?</span>
-                          <button
-                            type="button"
-                            onClick={() => handleFeedback(msg.id, "helpful")}
-                            disabled={Boolean(currentFeedback)}
-                            className={`p-1 rounded hover:bg-slate-100 transition ${
-                              currentFeedback === "helpful" ? "text-emerald-600 font-bold" : "text-slate-400"
-                            }`}
-                            title="Helpful response"
-                          >
-                            <ThumbsUp className="size-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleFeedback(msg.id, "unhelpful")}
-                            disabled={Boolean(currentFeedback)}
-                            className={`p-1 rounded hover:bg-slate-100 transition ${
-                              currentFeedback === "unhelpful" ? "text-rose-600 font-bold" : "text-slate-400"
-                            }`}
-                            title="Needs improvement"
-                          >
-                            <ThumbsDown className="size-3.5" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Suggested Follow-Up Questions */}
-                      {followups.length > 0 && (
-                        <div className="pt-2 border-t border-slate-100 space-y-1.5">
-                          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                            SUGGESTED FOLLOW-UP QUESTIONS
+                                ))}
+                              </div>
+                            )}
                           </div>
-                          <div className="flex flex-wrap gap-1.5">
+                        )}
+
+                        {/* Feedback */}
+                        <div className="pt-1.5 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
+                          <span className="text-[10px] text-slate-400">Grounded in Project Sources</span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-slate-400">Helpful?</span>
+                            <button
+                              type="button"
+                              onClick={() => handleFeedback(msg.id, "helpful")}
+                              disabled={Boolean(currentFeedback)}
+                              className={`p-1 rounded hover:bg-slate-100 transition ${
+                                currentFeedback === "helpful" ? "text-blue-600 font-bold" : "text-slate-400"
+                              }`}
+                            >
+                              <ThumbsUp className="size-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleFeedback(msg.id, "unhelpful")}
+                              disabled={Boolean(currentFeedback)}
+                              className={`p-1 rounded hover:bg-slate-100 transition ${
+                                currentFeedback === "unhelpful" ? "text-rose-600 font-bold" : "text-slate-400"
+                              }`}
+                            >
+                              <ThumbsDown className="size-3" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Follow-ups */}
+                        {followups.length > 0 && (
+                          <div className="pt-1.5 border-t border-slate-100 flex flex-wrap gap-1">
                             {followups.map((fq, fi) => (
                               <button
                                 key={fi}
                                 type="button"
                                 onClick={() => handleAsk(fq)}
                                 disabled={asking}
-                                className="px-2.5 py-1 text-[11px] rounded-full bg-slate-100 hover:bg-teal-50 hover:text-teal-900 border border-slate-200 hover:border-teal-300 text-slate-700 transition shadow-2xs text-left"
+                                className="px-2 py-0.5 text-[10px] rounded-full bg-slate-100 hover:bg-blue-50 hover:text-blue-900 border border-slate-200 text-slate-700 transition"
                               >
                                 {fq}
                               </button>
                             ))}
                           </div>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
-              })
-            )}
+              })}
 
-            {/* In-flight loading turn with live SSE progress & agent indicator */}
-            {asking && (
-              <div className="flex flex-col items-start w-full animate-fade-in space-y-3">
-                <AIAssistantThinking
-                  stage={liveInvestigationStage || "retrieving"}
-                  events={liveInvestigationEvents}
-                  elapsedSeconds={elapsedSeconds}
-                  className="w-full max-w-xl"
-                />
-
-                {/* Real-time streaming answer preview if available */}
-                {liveStreamingAnswer && (
-                  <div className="w-full bg-white border border-teal-200 rounded-2xl rounded-tl-xs p-4 text-xs text-slate-600 shadow-xs flex flex-col gap-2.5">
-                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 font-mono text-[11px] leading-relaxed max-h-40 overflow-y-auto whitespace-pre-wrap">
-                      {liveStreamingAnswer}
-                    </div>
+              {/* In-Flight Responding Turn (Small 3D Thinking Animation on the Left) */}
+              {asking && (
+                <div className="flex items-start gap-3 w-full animate-fade-in">
+                  {/* Small 3D Thinking Animation on the Left */}
+                  <div className="shrink-0 pt-0.5" title="Assistant Thinking">
+                    <AssistantThinking3D size="sm" isThinking={true} />
                   </div>
-                )}
 
-                  {/* Investigation activity breadcrumb stream */}
-                  {liveInvestigationEvents.length > 1 && (
-                    <div className="flex flex-wrap gap-1 mt-1 pt-2 border-t border-slate-100">
-                      {liveInvestigationEvents.slice(-4).map((ev, i) => (
-                        <span
-                          key={i}
-                          className="px-2 py-0.5 text-[10px] bg-slate-100 text-slate-600 rounded-md border border-slate-200 flex items-center gap-1"
-                        >
-                          <CheckCircle2 className="size-2.5 text-teal-600" />
-                          {ev}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-            )}
-
-            <div ref={messagesEndRef} />
-          </div>
-
-          {/* Bottom Question Input Bar */}
-          <div className="p-3 bg-white border-t border-slate-200 space-y-2">
-            {/* Filter controls and Mode Selector row */}
-            <div className="flex flex-wrap items-center justify-between text-xs gap-2 pt-1 pb-1">
-              {/* Intelligent Mode Selector Tabs */}
-              <div className="flex items-center gap-1 p-0.5 bg-slate-100 rounded-lg">
-                <button
-                  type="button"
-                  onClick={() => setResponseMode("standard")}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
-                    responseMode === "standard"
-                      ? "bg-white text-teal-900 shadow-2xs"
-                      : "text-slate-600 hover:text-slate-900"
-                  }`}
-                  title="Direct hybrid RAG answer with atomic citations"
-                >
-                  <Sparkles className="size-3 text-teal-600" />
-                  <span>Standard</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setResponseMode("deep_research")}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
-                    responseMode === "deep_research"
-                      ? "bg-white text-indigo-900 shadow-2xs"
-                      : "text-slate-600 hover:text-slate-900"
-                  }`}
-                  title="Comprehensive multi-source research report with recommendations"
-                >
-                  <BookOpen className="size-3 text-indigo-600" />
-                  <span>Deep Research</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setResponseMode("deep_think")}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
-                    responseMode === "deep_think"
-                      ? "bg-white text-purple-900 shadow-2xs"
-                      : "text-slate-600 hover:text-slate-900"
-                  }`}
-                  title="Causal and dependency reasoning with trade-offs"
-                >
-                  <Brain className="size-3 text-purple-600" />
-                  <span>Deep Think</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setResponseMode("deep_extract")}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
-                    responseMode === "deep_extract"
-                      ? "bg-white text-sky-900 shadow-2xs"
-                      : "text-slate-600 hover:text-slate-900"
-                  }`}
-                  title="Structured schema extraction into tables with JSON export"
-                >
-                  <Table className="size-3 text-sky-600" />
-                  <span>Deep Extract</span>
-                </button>
-              </div>
-
-              {/* Domain & Search Mode Selectors */}
-              <div className="flex items-center gap-2">
-                <div className="flex items-center gap-1">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase">Domain:</span>
-                  <select
-                    value={selectedDomain}
-                    onChange={(e) => setSelectedDomain(e.target.value)}
-                    className="text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-0.5 text-slate-700 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
-                  >
-                    {DOMAINS_LIST.map((d) => (
-                      <option key={d.id} value={d.id}>
-                        {d.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="flex items-center gap-1">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase">Search:</span>
-                  <select
-                    value={retrievalMode}
-                    onChange={(e) => setRetrievalMode(e.target.value as "hybrid" | "keyword" | "semantic")}
-                    className="text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-0.5 text-slate-700 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
-                  >
-                    <option value="hybrid">Hybrid (Vector + FTS)</option>
-                    <option value="keyword">Keyword (FTS)</option>
-                    <option value="semantic">Semantic (Vector)</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            {/* Input field and send button */}
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleAsk();
-              }}
-              className="flex items-center gap-2"
-            >
-              <input
-                type="text"
-                placeholder="Ask a question about the project (e.g. architecture, ownership, decisions)..."
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                disabled={asking}
-                className="flex-1 px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 text-slate-900 placeholder-slate-400 transition"
-              />
-              <ButtonLoader
-                type="submit"
-                disabled={!inputValue.trim() || asking}
-                isLoading={asking}
-                loadingText="Investigating..."
-                variant="teal"
-                icon={<Send className="size-3.5" />}
-                className="px-4 py-2 text-xs font-semibold rounded-lg shadow-xs"
-              >
-                Send
-              </ButtonLoader>
-            </form>
-          </div>
-        </div>
-
-        {/* ============================================================ */}
-        {/* PANEL 3: RETRIEVED EVIDENCE (Right Panel)                    */}
-        {/* ============================================================ */}
-        <div className="lg:col-span-4 bg-white border border-slate-200 rounded-xl shadow-xs flex flex-col overflow-hidden h-[760px]">
-          {/* Header */}
-          <div className="bg-[#1e293b] text-white px-4 py-2.5 flex items-center justify-between">
-            <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-2">
-              <FileText className="size-3.5 text-emerald-400" />
-              3 RETRIEVED EVIDENCE
-            </span>
-            <span className="text-[11px] font-mono text-slate-300 bg-slate-800 px-2 py-0.5 rounded-full">
-              {activeCitations.length} sources
-            </span>
-          </div>
-
-          {/* Sub-tabs by category (Jira Tasks, GitHub Commits, Documents, Related Findings) */}
-          <div className="flex border-b border-slate-200 bg-slate-50 px-2 pt-2 gap-1 overflow-x-auto text-xs">
-            <button
-              type="button"
-              onClick={() => setEvidenceFilterTab("all")}
-              className={`px-2.5 py-1.5 rounded-t-lg font-semibold border-t border-x text-[11px] whitespace-nowrap transition ${
-                evidenceFilterTab === "all"
-                  ? "bg-white border-slate-200 text-teal-900"
-                  : "border-transparent text-slate-500 hover:text-slate-800"
-              }`}
-            >
-              All ({countsByProvider.all})
-            </button>
-            <button
-              type="button"
-              onClick={() => setEvidenceFilterTab("jira")}
-              className={`px-2.5 py-1.5 rounded-t-lg font-semibold border-t border-x text-[11px] whitespace-nowrap transition ${
-                evidenceFilterTab === "jira"
-                  ? "bg-white border-slate-200 text-teal-900"
-                  : "border-transparent text-slate-500 hover:text-slate-800"
-              }`}
-            >
-              Jira Tasks ({countsByProvider.jira})
-            </button>
-            <button
-              type="button"
-              onClick={() => setEvidenceFilterTab("github")}
-              className={`px-2.5 py-1.5 rounded-t-lg font-semibold border-t border-x text-[11px] whitespace-nowrap transition ${
-                evidenceFilterTab === "github"
-                  ? "bg-white border-slate-200 text-teal-900"
-                  : "border-transparent text-slate-500 hover:text-slate-800"
-              }`}
-            >
-              GitHub ({countsByProvider.github})
-            </button>
-            <button
-              type="button"
-              onClick={() => setEvidenceFilterTab("documents")}
-              className={`px-2.5 py-1.5 rounded-t-lg font-semibold border-t border-x text-[11px] whitespace-nowrap transition ${
-                evidenceFilterTab === "documents"
-                  ? "bg-white border-slate-200 text-teal-900"
-                  : "border-transparent text-slate-500 hover:text-slate-800"
-              }`}
-            >
-              Docs ({countsByProvider.documents})
-            </button>
-            <button
-              type="button"
-              onClick={() => setEvidenceFilterTab("findings")}
-              className={`px-2.5 py-1.5 rounded-t-lg font-semibold border-t border-x text-[11px] whitespace-nowrap transition ${
-                evidenceFilterTab === "findings"
-                  ? "bg-white border-slate-200 text-teal-900"
-                  : "border-transparent text-slate-500 hover:text-slate-800"
-              }`}
-            >
-              Findings ({countsByProvider.findings})
-            </button>
-          </div>
-
-          {/* Evidence Cards List */}
-          <div className="flex-1 p-3.5 overflow-y-auto space-y-3">
-            {asking && filteredCitations.length === 0 ? (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 p-2.5 rounded-xl bg-teal-50/70 border border-teal-200 text-teal-800 text-xs">
-                  <Loader2 className="size-3.5 animate-spin text-teal-600 shrink-0" />
-                  <div className="min-w-0 flex-1">
-                    <p className="font-semibold text-[11px] truncate">Retrieving Supporting Evidence...</p>
-                    <p className="text-[10px] text-teal-600 truncate">Scanning vector index & project documents</p>
-                  </div>
-                </div>
-                {[1, 2, 3].map((n) => (
-                  <div
-                    key={n}
-                    className="p-3.5 rounded-xl border border-slate-200 bg-white shadow-2xs space-y-2.5 animate-pulse"
-                  >
+                  {/* Responding Assistant Bubble on the Right */}
+                  <div className="flex-1 min-w-0 bg-white/95 border border-blue-200/90 rounded-2xl rounded-tl-xs p-3.5 shadow-xs space-y-2.5">
                     <div className="flex items-center justify-between">
-                      <div className="h-4 w-12 bg-slate-200 rounded" />
-                      <div className="h-4 w-20 bg-slate-200 rounded" />
-                    </div>
-                    <div className="h-3.5 bg-slate-200 rounded w-4/5" />
-                    <div className="space-y-1.5 pt-1">
-                      <div className="h-2.5 bg-slate-100 rounded w-full" />
-                      <div className="h-2.5 bg-slate-100 rounded w-11/12" />
-                      <div className="h-2.5 bg-slate-100 rounded w-3/4" />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : filteredCitations.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center p-6 text-center text-slate-400">
-                <Database className="size-8 text-slate-300 mb-2" />
-                <div className="text-xs font-semibold text-slate-600">No Retrieved Evidence</div>
-                <p className="text-[11px] text-slate-400 max-w-xs mt-1">
-                  Ask a question in the center panel. Authorized supporting records will populate here with full provenance and direct quotations.
-                </p>
-              </div>
-            ) : (
-              filteredCitations.map((citation, idx) => {
-                const isSelected = activeCitationLabel === citation.citation_label;
-                const isGitHub = citation.source_provider?.toLowerCase().includes("github");
-                const isJira = citation.source_provider?.toLowerCase().includes("jira");
-                const isDoc = citation.source_provider?.toLowerCase().includes("document");
-
-                return (
-                  <div
-                    key={idx}
-                    ref={(el) => {
-                      citationRefs.current[citation.citation_label] = el;
-                    }}
-                    onClick={() => setActiveCitationLabel(citation.citation_label)}
-                    className={`p-3.5 rounded-xl border text-xs transition-all space-y-2.5 cursor-pointer ${
-                      isSelected
-                        ? "bg-emerald-50/50 border-emerald-500 ring-2 ring-emerald-500/30 shadow-xs"
-                        : "bg-white border-slate-200 hover:border-slate-300 shadow-2xs"
-                    }`}
-                  >
-                    {/* Top row: Label badge and Provider badge */}
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5">
-                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-bold bg-emerald-600 text-white shadow-2xs">
-                          [{citation.citation_label}]
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-900">
+                          Project Knowledge Assistant
                         </span>
-                        <span
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border ${
-                            isGitHub
-                              ? "bg-purple-50 text-purple-800 border-purple-200"
-                              : isJira
-                              ? "bg-blue-50 text-blue-800 border-blue-200"
-                              : isDoc
-                              ? "bg-teal-50 text-teal-800 border-teal-200"
-                              : "bg-slate-100 text-slate-700 border-slate-200"
-                          }`}
-                        >
-                          {isGitHub ? (
-                            <GitCommit className="size-2.5" />
-                          ) : isDoc ? (
-                            <FileText className="size-2.5" />
-                          ) : (
-                            <Database className="size-2.5" />
-                          )}
-                          {citation.source_provider}
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200/60 rounded-full">
+                          <span className="size-1.5 rounded-full bg-blue-500 animate-ping" />
+                          Answering...
                         </span>
                       </div>
-
-                      {citation.is_verified && (
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
-                          <CheckCircle2 className="size-2.5 text-emerald-600" />
-                          Human-Verified
-                        </span>
-                      )}
                     </div>
 
-                    {/* Source Title */}
-                    <div className="font-bold text-slate-900 text-xs leading-snug break-words">
-                      {citation.source_title}
+                    {/* Contextual progress stage */}
+                    <div className="flex items-center gap-2 text-xs text-slate-600 font-medium">
+                      <span className="size-1.5 rounded-full bg-blue-600 animate-pulse" />
+                      <span>
+                        {liveInvestigationStage === "planning"
+                          ? "Searching project knowledge..."
+                          : liveInvestigationStage === "retrieving"
+                          ? "Reviewing relevant evidence..."
+                          : liveInvestigationStage === "synthesizing"
+                          ? "Preparing your answer..."
+                          : "Understanding your question..."}
+                      </span>
                     </div>
 
-                    {/* Section or page info */}
-                    {(citation.section_title || citation.page_number) && (
-                      <div className="text-[10px] text-slate-500 font-medium">
-                        {citation.section_title && <span>Section: {citation.section_title}</span>}
-                        {citation.page_number && <span className="ml-1.5">· Page {citation.page_number}</span>}
+                    {/* Live Streaming Answer or Shimmer */}
+                    {liveStreamingAnswer ? (
+                      <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-[11px] leading-relaxed max-h-48 overflow-y-auto whitespace-pre-wrap text-slate-800">
+                        {liveStreamingAnswer}
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5 pt-1 animate-pulse" aria-hidden="true">
+                        <div className="h-2.5 bg-blue-100/70 rounded w-5/6" />
+                        <div className="h-2.5 bg-slate-100 rounded w-full" />
+                        <div className="h-2.5 bg-slate-100 rounded w-3/4" />
                       </div>
                     )}
-
-                    {/* Author & Timestamp */}
-                    <div className="flex items-center gap-2 text-[10px] text-slate-400">
-                      {citation.author && (
-                        <span className="truncate">By: {citation.author}</span>
-                      )}
-                      {citation.source_timestamp && (
-                        <>
-                          <span>·</span>
-                          <span>{new Date(citation.source_timestamp).toLocaleDateString()}</span>
-                        </>
-                      )}
-                    </div>
-
-                    {/* Direct Excerpt */}
-                    <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200 text-slate-700 text-[11px] italic leading-relaxed whitespace-pre-wrap">
-                      &quot;{citation.excerpt}&quot;
-                    </div>
-
-                    {/* Action link */}
-                    <div className="flex items-center justify-end pt-1">
-                      {citation.source_url ? (
-                        <a
-                          href={citation.source_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-[10px] font-semibold text-teal-700 hover:text-teal-900 hover:underline"
-                        >
-                          <span>Open Source Record</span>
-                          <ExternalLink className="size-2.5" />
-                        </a>
-                      ) : (
-                        <Link
-                          href={`/evidence?id=${citation.evidence_id}`}
-                          className="inline-flex items-center gap-1 text-[10px] font-semibold text-teal-700 hover:text-teal-900 hover:underline"
-                        >
-                          <span>View in Evidence Center</span>
-                          <ChevronRight className="size-2.5" />
-                        </Link>
-                      )}
-                    </div>
                   </div>
-                );
-              })
-            )}
-          </div>
-        </div>
+                </div>
+              )}
+
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* DOCKED CHAT BOX FOR ACTIVE CONVERSATION */}
+              <div className="p-3 bg-white/70 backdrop-blur-md border-t border-blue-100/60 shrink-0">
+                {renderComposer()}
+              </div>
+            </div>
+          )}
+        </main>
+
+        {/* ============================================================ */}
+        {/* DOCKED RIGHT PANEL: Retrieved Evidence                       */}
+        {/* ============================================================ */}
+        <aside
+          className={`relative z-20 h-full flex flex-col bg-white/85 backdrop-blur-xl border border-white/90 shadow-[0_8px_30px_rgb(0,0,0,0.04)] rounded-2xl transition-all duration-300 ease-in-out shrink-0 overflow-hidden ${
+            rightPanelOpen
+              ? "w-76 xl:w-88 opacity-100"
+              : "w-0 p-0 m-0 border-0 opacity-0 pointer-events-none"
+          }`}
+          aria-hidden={!rightPanelOpen}
+        >
+          {rightPanelOpen && (
+            <>
+              {/* Panel Header */}
+              <div className="p-3 border-b border-blue-50 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-2">
+                  <FileText className="size-3.5 text-blue-600" />
+                  <span className="text-xs font-bold text-slate-900">Retrieved Evidence</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-slate-400 font-medium">
+                    {activeCitations.length} sources
+                  </span>
+                  <button
+                    onClick={() => setRightPanelOpen(false)}
+                    className="p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition"
+                    title="Close panel"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Category Tabs: Only render when citations exist to prevent empty horizontal scrollbar */}
+              {activeCitations.length > 0 && (
+                <div className="flex border-b border-slate-100 px-3 pt-1 gap-1 text-[10px] bg-slate-50/50 overflow-x-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setEvidenceFilterTab("all")}
+                    className={`pb-1 px-1.5 font-semibold border-b-2 transition ${
+                      evidenceFilterTab === "all"
+                        ? "border-blue-600 text-blue-600"
+                        : "border-transparent text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    All ({countsByProvider.all})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEvidenceFilterTab("jira")}
+                    className={`pb-1 px-1.5 font-semibold border-b-2 transition ${
+                      evidenceFilterTab === "jira"
+                        ? "border-blue-600 text-blue-600"
+                        : "border-transparent text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    Jira ({countsByProvider.jira})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEvidenceFilterTab("github")}
+                    className={`pb-1 px-1.5 font-semibold border-b-2 transition ${
+                      evidenceFilterTab === "github"
+                        ? "border-blue-600 text-blue-600"
+                        : "border-transparent text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    GitHub ({countsByProvider.github})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEvidenceFilterTab("documents")}
+                    className={`pb-1 px-1.5 font-semibold border-b-2 transition ${
+                      evidenceFilterTab === "documents"
+                        ? "border-blue-600 text-blue-600"
+                        : "border-transparent text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    Docs ({countsByProvider.documents})
+                  </button>
+                </div>
+              )}
+
+              {/* Evidence Content */}
+              <div className="flex-1 p-3 overflow-y-auto space-y-2">
+                {filteredCitations.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center p-6 text-center text-slate-400">
+                    <div className="size-14 rounded-2xl bg-blue-50/70 border border-blue-100 flex items-center justify-center text-blue-500 mb-2.5 shadow-2xs">
+                      <FileText className="size-7 stroke-[1.5]" />
+                    </div>
+                    <div className="text-xs font-bold text-slate-800">No Retrieved Evidence</div>
+                    <p className="text-[11px] text-slate-400 max-w-xs mt-1 leading-relaxed">
+                      Ask a question in the center panel. Authorized supporting records will appear here with full provenance and direct quotations.
+                    </p>
+                  </div>
+                ) : (
+                  filteredCitations.map((citation, idx) => {
+                    const isSelected = activeCitationLabel === citation.citation_label;
+                    const isGitHub = citation.source_provider?.toLowerCase().includes("github");
+                    const isJira = citation.source_provider?.toLowerCase().includes("jira");
+                    const isDoc = citation.source_provider?.toLowerCase().includes("document");
+
+                    return (
+                      <div
+                        key={idx}
+                        ref={(el) => {
+                          citationRefs.current[citation.citation_label] = el;
+                        }}
+                        onClick={() => setActiveCitationLabel(citation.citation_label)}
+                        className={`p-2.5 rounded-xl border text-xs transition-all space-y-1.5 cursor-pointer ${
+                          isSelected
+                            ? "bg-blue-50/70 border-blue-500 ring-2 ring-blue-500/20 shadow-xs"
+                            : "bg-white/80 border-slate-200/80 hover:border-slate-300 shadow-2xs"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-mono font-bold bg-blue-600 text-white shadow-2xs">
+                              [{citation.citation_label}]
+                            </span>
+                            <span
+                              className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-semibold border ${
+                                isGitHub
+                                  ? "bg-purple-50 text-purple-800 border-purple-200"
+                                  : isJira
+                                  ? "bg-blue-50 text-blue-800 border-blue-200"
+                                  : isDoc
+                                  ? "bg-teal-50 text-teal-800 border-teal-200"
+                                  : "bg-slate-100 text-slate-700 border-slate-200"
+                              }`}
+                            >
+                              {isGitHub ? (
+                                <GitCommit className="size-2.5" />
+                              ) : isDoc ? (
+                                <FileText className="size-2.5" />
+                              ) : (
+                                <Database className="size-2.5" />
+                              )}
+                              {citation.source_provider}
+                            </span>
+                          </div>
+                          {citation.is_verified && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                              <CheckCircle2 className="size-2.5 text-emerald-600" />
+                              Verified
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="font-bold text-slate-900 text-xs leading-snug break-words">
+                          {citation.source_title}
+                        </div>
+
+                        <div className="p-2 bg-slate-50/80 rounded-lg border border-slate-200/80 text-slate-700 text-[10px] italic leading-relaxed whitespace-pre-wrap">
+                          &quot;{citation.excerpt}&quot;
+                        </div>
+
+                        <div className="flex items-center justify-end pt-0.5">
+                          {citation.source_url ? (
+                            <a
+                              href={citation.source_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-[10px] font-semibold text-blue-600 hover:text-blue-800 hover:underline"
+                            >
+                              <span>Open Source Record</span>
+                              <ExternalLink className="size-2.5" />
+                            </a>
+                          ) : (
+                            <Link
+                              href={`/evidence?id=${citation.evidence_id}`}
+                              className="inline-flex items-center gap-1 text-[10px] font-semibold text-blue-600 hover:text-blue-800 hover:underline"
+                            >
+                              <span>View in Evidence Center</span>
+                              <ChevronRight className="size-2.5" />
+                            </Link>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* Edge Collapse Button */}
+              <button
+                onClick={() => setRightPanelOpen(false)}
+                className="absolute -left-3 top-1/2 -translate-y-1/2 size-6 rounded-full bg-white border border-slate-200 shadow-md flex items-center justify-center text-slate-400 hover:text-blue-600 transition z-40 hidden lg:flex"
+                title="Collapse Evidence panel"
+              >
+                <ChevronRight className="size-3.5" />
+              </button>
+            </>
+          )}
+        </aside>
       </div>
     </div>
   );
 }
+
+export default AssistantWorkspaceView;

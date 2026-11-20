@@ -288,6 +288,61 @@ class TestSupabaseAuthExchangeService:
         assert res.user.id == unlinked_user.id
         mock_user_repo.link_supabase_auth_id.assert_called_once()
 
+    def test_case_b_relinks_stale_supabase_auth_id_safely(
+        self,
+        mock_settings: Settings,
+    ) -> None:
+        mock_user_repo = MagicMock()
+        mock_refresh_repo = MagicMock()
+        mock_rbac_repo = MagicMock()
+        mock_db = MagicMock()
+        mock_verifier = MagicMock()
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        user_with_stale_sub = User(
+            id=uuid.uuid4(),
+            full_name="Re-linked User",
+            email="relink@example.com",
+            supabase_auth_id="old-stale-sub-111",
+            status=UserStatus.ACTIVE.value,
+            is_email_verified=True,
+            created_at=now,
+            updated_at=now,
+        )
+        # sub does not match any user directly
+        mock_user_repo.get_by_supabase_auth_id.return_value = None
+        mock_user_repo.get_by_email.return_value = user_with_stale_sub
+        mock_rbac_repo.get_user_platform_roles_and_permissions.return_value = (
+            [RoleName.STANDARD_USER.value],
+            ["workspace.overview.read"],
+        )
+
+        mock_verifier.verify_token.return_value = VerifiedSupabaseIdentity(
+            supabase_user_id="new-active-sub-222",
+            email="relink@example.com",
+            is_email_verified=True,
+            full_name="Re-linked User",
+        )
+
+        service = AuthService(
+            settings=mock_settings,
+            db_session=mock_db,
+            user_repository=mock_user_repo,
+            refresh_repository=mock_refresh_repo,
+            rbac_repository=mock_rbac_repo,
+            supabase_verifier=mock_verifier,
+        )
+
+        res, refresh_token = service.exchange_supabase_token(access_token="fake-token")
+
+        assert res.user.id == user_with_stale_sub.id
+        mock_user_repo.link_supabase_auth_id.assert_called_once_with(
+            user_with_stale_sub,
+            "new-active-sub-222",
+            mark_email_verified=True,
+            verified_at=pytest.approx(now, abs=datetime.timedelta(seconds=5)),
+        )
+
     def test_case_b_refuses_linking_unverified_email(
         self,
         mock_settings: Settings,

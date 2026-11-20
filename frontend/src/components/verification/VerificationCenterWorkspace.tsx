@@ -17,8 +17,31 @@ import { ChangeImpactFeed } from "./ChangeImpactFeed";
 import { KnowledgeQualityPanel } from "./KnowledgeQualityPanel";
 
 export function VerificationCenterWorkspace() {
-  const { activeProject, members } = useLiveApp();
+  const { activeProject, members, user } = useLiveApp();
   const projectId = activeProject?.id ?? null;
+
+  const canReview = React.useMemo(() => {
+    if (!activeProject) return false;
+    if (activeProject.effective_permissions?.includes("project.knowledge.review")) {
+      return true;
+    }
+    const projectRole = (activeProject.my_project_role ?? "").toLowerCase();
+    if (projectRole === "project_manager" || projectRole === "reviewer") {
+      return true;
+    }
+    if (user?.id) {
+      const me = members.find((m) => m.user_id === user.id);
+      const memberRole = (me?.role_name ?? "").toLowerCase();
+      if (memberRole === "project_manager" || memberRole === "reviewer") {
+        return true;
+      }
+    }
+    const userRoles = (user?.roles ?? []).map((r) => r.toLowerCase());
+    if (userRoles.includes("org_owner") || userRoles.includes("org_admin")) {
+      return true;
+    }
+    return false;
+  }, [activeProject, members, user]);
 
   // ── State ────────────────────────────────────────────────────────────────
   const [summary, setSummary] = useState<VerificationSummary | null>(null);
@@ -210,19 +233,20 @@ export function VerificationCenterWorkspace() {
         availablePeople={availablePeople}
         members={members}
         actionBusy={actionBusy}
+        canReview={canReview}
         onSync={handleSync}
         statusNotice={statusNotice}
         errorMsg={errorMsg}
       />
 
       {/* Sub-navigation workspace tabs */}
-      <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-2">
+      <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
         <button
           onClick={() => setActiveWorkspaceTab("queue")}
-          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition ${
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition cursor-pointer ${
             activeWorkspaceTab === "queue"
               ? "bg-indigo-600 text-white shadow-xs"
-              : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+              : "text-slate-600 hover:bg-slate-100"
           }`}
         >
           <CheckSquare className="w-3.5 h-3.5" />
@@ -230,10 +254,10 @@ export function VerificationCenterWorkspace() {
         </button>
         <button
           onClick={() => setActiveWorkspaceTab("change_impact")}
-          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition ${
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition cursor-pointer ${
             activeWorkspaceTab === "change_impact"
               ? "bg-indigo-600 text-white shadow-xs"
-              : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+              : "text-slate-600 hover:bg-slate-100"
           }`}
         >
           <Activity className="w-3.5 h-3.5" />
@@ -241,10 +265,10 @@ export function VerificationCenterWorkspace() {
         </button>
         <button
           onClick={() => setActiveWorkspaceTab("quality")}
-          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition ${
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition cursor-pointer ${
             activeWorkspaceTab === "quality"
               ? "bg-indigo-600 text-white shadow-xs"
-              : "text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+              : "text-slate-600 hover:bg-slate-100"
           }`}
         >
           <Scale className="w-3.5 h-3.5" />
@@ -280,6 +304,7 @@ export function VerificationCenterWorkspace() {
           selectedCaseId={selectedCaseId}
           onSelectCase={setSelectedCaseId}
           loading={queueLoading}
+          canReview={canReview}
         />
 
         {/* Right — Main Review Workspace */}

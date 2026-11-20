@@ -17,7 +17,7 @@ export async function GET(request: Request) {
   }
 
   if (code) {
-    const supabase = await createClient()
+    const supabase = await createClient(request)
     if (!supabase) {
       const msg = encodeURIComponent('Supabase client is not configured on the server.')
       return NextResponse.redirect(`${origin}/login?oauth_error=${msg}`)
@@ -27,6 +27,13 @@ export async function GET(request: Request) {
     if (!exchangeError) {
       // Direct browser to callback completion page or target route with flag
       return NextResponse.redirect(`${origin}${safeNext}?supabase_auth=success`)
+    }
+
+    // Fallback: If server exchange failed (e.g. PKCE verifier cookie was only stored client-side or dropped during cross-origin redirect),
+    // let the browser-side Supabase client attempt the exchange using its local storage/cookies.
+    const isClientAttempt = searchParams.get('client_attempt') === '1'
+    if (!isClientAttempt) {
+      return NextResponse.redirect(`${origin}${safeNext}?supabase_code=${encodeURIComponent(code)}`)
     }
 
     const errorMsg = encodeURIComponent(exchangeError.message || 'Failed to exchange authorization code')

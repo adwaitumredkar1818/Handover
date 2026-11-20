@@ -21,7 +21,6 @@ import {
   Sparkles,
   Users,
 } from "lucide-react";
-import { AppLayout } from "../layout/AppLayout";
 import { Card, CardHeader, Button, Badge } from "../ui";
 import { PageSkeleton } from "../loading";
 import { useLiveApp } from "../../context/LiveAppContext";
@@ -273,7 +272,6 @@ export function SuccessorOnboardingWorkspace({
   };
 
   return (
-    <AppLayout>
       <div className="space-y-6">
         {/* Header */}
         <div className="flex flex-col justify-between gap-4 rounded-2xl border border-line bg-white p-5 shadow-2xs sm:flex-row sm:items-center">
@@ -702,6 +700,5 @@ export function SuccessorOnboardingWorkspace({
           </div>
         )}
       </div>
-    </AppLayout>
   );
 }

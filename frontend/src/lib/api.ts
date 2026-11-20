@@ -1652,9 +1652,18 @@ export const api = {
   },
   knowledgeIntelligence: {
     async getQuality(projectId: string): Promise<{
+      project_id?: string;
       dimension_scores: Record<string, number>;
-      overall_score: number;
-      gaps: Array<{
+      overall_quality_score?: number;
+      overall_score?: number;
+      identified_gaps?: Array<{
+        type: string;
+        severity: string;
+        title: string;
+        description: string;
+        recommendation: string;
+      }>;
+      gaps?: Array<{
         type: string;
         severity: string;
         title: string;
@@ -1662,6 +1671,9 @@ export const api = {
         recommendation: string;
       }>;
       total_items: number;
+      verified_items?: number;
+      stale_items?: number;
+      recommendation_count?: number;
     }> {
       return request(`/projects/${projectId}/knowledge-intelligence/quality`);
     },

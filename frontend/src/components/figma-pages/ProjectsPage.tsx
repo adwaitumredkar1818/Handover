@@ -244,13 +244,13 @@ export function ProjectsList() {
             <tbody>
               {isCreatingProject && (
                 <tr className="animate-pulse bg-brand/5 border-b border-line">
-                  <Td colSpan={7}>
+                  <td colSpan={7} className="px-4 py-3">
                     <div className="flex items-center gap-3 py-2">
                       <Loader2 className="size-4 animate-spin text-brand" />
                       <span className="font-medium text-navy text-[13px]">Creating project workspace...</span>
                       <span className="text-xs text-muted">Provisioning isolated repository & knowledge indexes</span>
                     </div>
-                  </Td>
+                  </td>
                 </tr>
               )}
               {list.map((p) => (

@@ -25,6 +25,7 @@ interface VerificationOverviewBarProps {
   availablePeople: string[];
   members: ProjectMember[];
   actionBusy: boolean;
+  canReview?: boolean;
   onSync: () => void;
   statusNotice: string | null;
   errorMsg: string | null;
@@ -40,6 +41,7 @@ export function VerificationOverviewBar({
   availablePeople,
   members,
   actionBusy,
+  canReview = true,
   onSync,
   statusNotice,
   errorMsg,
@@ -72,15 +74,27 @@ export function VerificationOverviewBar({
           </p>
         </div>
 
-        <button
-          type="button"
-          disabled={actionBusy}
-          onClick={onSync}
-          className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 disabled:opacity-50 transition-colors"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${actionBusy ? "animate-spin" : ""}`} />
-          Sync &amp; Run Checks
-        </button>
+        <div className="flex flex-col items-end gap-1">
+          <button
+            type="button"
+            disabled={actionBusy || !canReview}
+            title={
+              canReview
+                ? "Sync findings from Knowledge Intelligence and run automated checks"
+                : "Requires Project Manager or Reviewer role to sync and run checks"
+            }
+            onClick={onSync}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${actionBusy ? "animate-spin" : ""}`} />
+            Sync &amp; Run Checks
+          </button>
+          {!canReview && (
+            <span className="text-[11px] text-slate-500">
+              View-only · Reviewer or Project Manager role required to run checks
+            </span>
+          )}
+        </div>
       </div>
 
       {/* 6 Status pills — clickable to filter */}

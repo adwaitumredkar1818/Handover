@@ -924,21 +924,17 @@ class AuthService:
                     code="UNVERIFIED_EMAIL",
                 )
 
-            # Check if existing user already has a different supabase_auth_id linked
+            # If existing user has a different supabase_auth_id, safely update/re-link it
+            # since the email ownership is cryptographically verified by the identity provider.
             if user_by_email.supabase_auth_id and user_by_email.supabase_auth_id != identity.supabase_user_id:
                 log_security_event(
-                    event_type="auth.supabase.exchange",
-                    outcome="denied",
+                    event_type="auth.supabase.relink",
+                    outcome="success",
                     actor_user_id=str(user_by_email.id),
                     message=(
-                        f"Account '{user_by_email.id}' is already linked to another identity "
-                        f"'{user_by_email.supabase_auth_id}'."
+                        f"Re-linked verified Supabase identity from '{user_by_email.supabase_auth_id}' "
+                        f"to '{identity.supabase_user_id}' for user '{user_by_email.id}' ({user_by_email.email})."
                     ),
-                    level=logging.WARNING,
-                )
-                raise ConflictError(
-                    "This account is already linked to a different identity provider account.",
-                    code="IDENTITY_CONFLICT",
                 )
 
             # Safely link account

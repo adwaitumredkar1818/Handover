@@ -1056,7 +1056,7 @@ function DashboardContent() {
   }
 
   const currentLiveProj = liveProject || (liveProjects && liveProjects.length > 0 ? liveProjects[0] : null)
-  const storeProj = s.currentProject?.workspaceId === activeOrg?.id ? s.currentProject : null
+  const storeProj = (s.currentProject?.workspaceId === activeOrg?.id ? s.currentProject : null) ?? null
   const p: Project | null = (currentLiveProj ? {
     id: currentLiveProj.id,
     workspaceId: currentLiveProj.organisation_id || activeOrg?.id || s.workspaceId || 'workspace',
@@ -1073,7 +1073,7 @@ function DashboardContent() {
     startDate: currentLiveProj.start_date || '2026-10-01',
     endDate: currentLiveProj.target_completion_date || currentLiveProj.target_handover_date || '',
     color: '#0f766e',
-  } : null) || storeProj
+  } : null) || storeProj || null
 
   const loading = useFakeLoading(450, [p?.id, s.workspaceId])
   const displayName = user?.full_name?.split(' ')[0] || user?.email?.split('@')[0] || 'there'

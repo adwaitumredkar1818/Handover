@@ -439,12 +439,34 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
           return;
         }
 
-        // 2. Only if unauthenticated, check if there's an active Supabase OAuth session to exchange
+        // 2. Only if unauthenticated, check if there's an active Supabase OAuth session or fallback code to exchange
         try {
           const supabase = createSupabaseClient();
           if (supabase) {
-            const { data } = await supabase.auth.getSession();
-            const sbToken = data?.session?.access_token;
+            const urlParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+            const supabaseCode = urlParams?.get("supabase_code");
+            let sbToken: string | undefined;
+
+            if (supabaseCode) {
+              const { data: codeData, error: codeErr } = await supabase.auth.exchangeCodeForSession(supabaseCode);
+              if (!codeErr && codeData?.session?.access_token) {
+                sbToken = codeData.session.access_token;
+                if (typeof window !== "undefined" && window.history?.replaceState) {
+                  const cleanUrl = window.location.pathname;
+                  window.history.replaceState({}, document.title, cleanUrl);
+                }
+              } else if (codeErr) {
+                console.warn("Client fallback code exchange failed:", codeErr);
+                window.location.href = `/login?oauth_error=${encodeURIComponent(codeErr.message)}`;
+                return;
+              }
+            }
+
+            if (!sbToken) {
+              const { data } = await supabase.auth.getSession();
+              sbToken = data?.session?.access_token;
+            }
+
             if (sbToken) {
               try {
                 const exchangeRes = await api.auth.exchangeSupabaseToken(sbToken);
@@ -459,6 +481,12 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
                 return;
               } catch (exchangeErr) {
                 console.warn("Supabase token exchange skipped:", exchangeErr);
+                if (typeof window !== "undefined" && (window.location.search.includes("supabase_auth=success") || supabaseCode)) {
+                  const errorMsg = exchangeErr instanceof Error ? exchangeErr.message : "Failed to verify workspace session";
+                  await supabase.auth.signOut().catch(() => {});
+                  window.location.href = `/login?oauth_error=${encodeURIComponent(errorMsg)}`;
+                  return;
+                }
               }
             }
           }
@@ -514,7 +542,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       const supabase = createSupabaseClient();
       if (supabase) {
         const { data: authListener } = supabase.auth.onAuthStateChange(
-          async (event, session) => {
+          async (event: string, session: any) => {
             if ((event === "SIGNED_IN" || event === "TOKEN_REFRESHED") && session?.access_token) {
               const existingStored =
                 typeof window !== "undefined" ? localStorage.getItem("handover_access_token") : null;
@@ -539,6 +567,11 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
                 setIsLoadingAuth(false);
               } catch (err) {
                 console.warn("Failed to exchange Supabase session on auth state change:", err);
+                if (typeof window !== "undefined" && window.location.search.includes("supabase_auth=success")) {
+                  const errorMsg = err instanceof Error ? err.message : "Failed to verify workspace session";
+                  await supabase.auth.signOut().catch(() => {});
+                  window.location.href = `/login?oauth_error=${encodeURIComponent(errorMsg)}`;
+                }
               }
             } else if (event === "SIGNED_OUT") {
               setStoredToken(null);

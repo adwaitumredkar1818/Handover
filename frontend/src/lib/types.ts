@@ -1182,7 +1182,7 @@ export type AssistantAnswerStatus =
 
 export type AssistantResponseMode = "standard" | "deep_research" | "deep_think" | "deep_extract";
 
-export type AssistantSenderType = "user" | "assistant";
+export type AssistantSenderType = "user" | "assistant" | "system";
 
 export interface ResearchReportSection {
   section_title: string;

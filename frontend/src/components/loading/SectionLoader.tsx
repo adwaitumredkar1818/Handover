@@ -5,6 +5,7 @@ import { Loader2 } from "lucide-react";
 
 export interface SectionLoaderProps {
   label?: string;
+  description?: string;
   size?: "sm" | "md" | "lg";
   className?: string;
   overlay?: boolean;
@@ -12,6 +13,7 @@ export interface SectionLoaderProps {
 
 export function SectionLoader({
   label = "Loading...",
+  description,
   size = "md",
   className = "",
   overlay = false,
@@ -41,6 +43,11 @@ export function SectionLoader({
       {label && (
         <span className={`font-medium text-[#69778D] tracking-tight ${sizeMap[size].split(" ")[1]}`}>
           {label}
+        </span>
+      )}
+      {description && (
+        <span className="text-xs text-muted max-w-xs">
+          {description}
         </span>
       )}
     </div>

@@ -3,7 +3,7 @@
 import React from "react";
 
 export interface AssistantThinking3DProps {
-  size?: "sm" | "md" | "lg";
+  size?: "xs" | "sm" | "md" | "lg";
   isThinking?: boolean;
   label?: string;
   className?: string;
@@ -15,11 +15,19 @@ export function AssistantThinking3D({
   label,
   className = "",
 }: AssistantThinking3DProps) {
-  // Dimension mappings
+  // Proportional, compact dimensions to avoid excessive vertical space
   const dimensions = {
-    sm: { width: 120, height: 90, viewBox: "0 0 240 180" },
-    md: { width: 180, height: 135, viewBox: "0 0 240 180" },
-    lg: { width: 240, height: 180, viewBox: "0 0 240 180" },
+    xs: { width: 44, height: 34, viewBox: "0 0 240 180" },
+    sm: { width: 72, height: 54, viewBox: "0 0 240 180" },
+    md: { width: 130, height: 98, viewBox: "0 0 240 180" },
+    lg: { width: 160, height: 115, viewBox: "0 0 240 180" },
+  }[size];
+
+  const glowClass = {
+    xs: isThinking ? "w-12 h-9 bg-blue-500/20 blur-md" : "w-10 h-7 bg-blue-400/15 blur-sm",
+    sm: isThinking ? "w-20 h-14 bg-blue-500/25 blur-lg" : "w-16 h-12 bg-blue-400/20 blur-md",
+    md: isThinking ? "w-32 h-20 bg-blue-500/25 blur-xl" : "w-24 h-16 bg-blue-400/20 blur-md",
+    lg: isThinking ? "w-36 h-24 bg-blue-500/25 blur-2xl" : "w-28 h-20 bg-blue-400/20 blur-xl",
   }[size];
 
   return (
@@ -30,12 +38,8 @@ export function AssistantThinking3D({
       >
         {/* Soft Ambient Radial Glow Behind Stack */}
         <div
-          className={`absolute rounded-full pointer-events-none transition-all duration-1000 ${
-            isThinking
-              ? "w-44 h-32 bg-blue-500/25 blur-2xl animate-pulse"
-              : "w-36 h-28 bg-blue-400/20 blur-xl"
-          }`}
-          style={{ top: "35%", left: "50%", transform: "translate(-50%, -50%)" }}
+          className={`absolute rounded-full pointer-events-none transition-all duration-1000 ${glowClass}`}
+          style={{ top: "40%", left: "50%", transform: "translate(-50%, -50%)" }}
         />
 
         {/* 3D Glass Layer Stack with Orbit Ring & Particle */}
@@ -43,7 +47,7 @@ export function AssistantThinking3D({
           viewBox={dimensions.viewBox}
           width="100%"
           height="100%"
-          className="relative z-10 overflow-visible"
+          className="relative z-10"
           fill="none"
           xmlns="http://www.w3.org/2000/svg"
         >
@@ -100,7 +104,7 @@ export function AssistantThinking3D({
 
             {/* Orbit Glow Filter */}
             <filter id="glowParticle" x="-50%" y="-50%" width="200%" height="200%">
-              <feGaussianBlur in="SourceGraphic" stdDeviation="3.5" result="blur" />
+              <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur" />
               <feMerge>
                 <feMergeNode in="blur" />
                 <feMergeNode in="SourceGraphic" />
@@ -109,49 +113,46 @@ export function AssistantThinking3D({
 
             {/* Plate Drop Shadow Filter */}
             <filter id="layerShadow" x="-20%" y="-20%" width="140%" height="160%">
-              <feDropShadow dx="0" dy="6" stdDeviation="5" floodColor="#0F2D6B" floodOpacity="0.25" />
+              <feDropShadow dx="0" dy="5" stdDeviation="4" floodColor="#0F2D6B" floodOpacity="0.22" />
             </filter>
             <filter id="bottomGlow" x="-30%" y="-30%" width="160%" height="160%">
               <feGaussianBlur stdDeviation="8" result="blur" />
             </filter>
+
+            {/* Full Standard SVG Path for Motion Tracking (Never detached to 0,0) */}
+            <path
+              id="orbitMotionPath"
+              d="M 28 116 A 92 24 0 1 0 212 116 A 92 24 0 1 0 28 116 Z"
+              fill="none"
+            />
           </defs>
 
           {/* Bottom Ambient Ground Reflection */}
-          <ellipse cx="120" cy="148" rx="60" ry="16" fill="#3B82F6" opacity="0.35" filter="url(#bottomGlow)" />
+          <ellipse cx="120" cy="148" rx="55" ry="14" fill="#3B82F6" opacity="0.3" filter="url(#bottomGlow)" />
 
-          {/* Orbital Ring - Back Section (Under Middle & Top Plates) */}
-          <g opacity="0.6">
+          {/* Orbital Ring - Back Section */}
+          <g opacity="0.5">
             <path
               d="M 28 116 C 28 92, 212 92, 212 116"
               stroke="#93C5FD"
               strokeWidth="1.5"
               strokeDasharray="3 3"
-              opacity="0.4"
+              opacity="0.35"
             />
           </g>
 
           {/* ========================================================= */}
-          {/* LAYER 3: BOTTOM GLASS PLATE (Floating Phase 1)            */}
+          {/* LAYER 3: BOTTOM GLASS PLATE                               */}
           {/* ========================================================= */}
           <g
-            className="transition-transform duration-700 ease-out"
             style={{
               animation: "assistantFloat 4.2s ease-in-out infinite",
               animationDelay: "0.25s",
               transformOrigin: "120px 135px",
             }}
           >
-            {/* Left Edge Bevel */}
-            <path
-              d="M 62 120 L 120 148 L 120 156 L 62 128 Z"
-              fill="url(#botPlateLeftEdge)"
-            />
-            {/* Right Edge Bevel */}
-            <path
-              d="M 120 148 L 178 120 L 178 128 L 120 156 Z"
-              fill="url(#botPlateRightEdge)"
-            />
-            {/* Top Surface */}
+            <path d="M 62 120 L 120 148 L 120 156 L 62 128 Z" fill="url(#botPlateLeftEdge)" />
+            <path d="M 120 148 L 178 120 L 178 128 L 120 156 Z" fill="url(#botPlateRightEdge)" />
             <path
               d="M 120 96 C 123 94.5 127 94.5 130 96 L 174 116 C 177 117.5 178.5 120 177 122 L 126 147 C 123 148.5 117 148.5 114 147 L 63 122 C 61.5 120 63 117.5 66 116 Z"
               fill="url(#botPlateSurface)"
@@ -163,27 +164,17 @@ export function AssistantThinking3D({
           </g>
 
           {/* ========================================================= */}
-          {/* LAYER 2: MIDDLE GLASS PLATE (Floating Phase 2)            */}
+          {/* LAYER 2: MIDDLE GLASS PLATE                               */}
           {/* ========================================================= */}
           <g
-            className="transition-transform duration-700 ease-out"
             style={{
               animation: "assistantFloat 4.2s ease-in-out infinite",
               animationDelay: "0.12s",
               transformOrigin: "120px 105px",
             }}
           >
-            {/* Left Edge Bevel */}
-            <path
-              d="M 62 90 L 120 118 L 120 126 L 62 98 Z"
-              fill="url(#midPlateLeftEdge)"
-            />
-            {/* Right Edge Bevel */}
-            <path
-              d="M 120 118 L 178 90 L 178 98 L 120 126 Z"
-              fill="url(#midPlateRightEdge)"
-            />
-            {/* Top Surface */}
+            <path d="M 62 90 L 120 118 L 120 126 L 62 98 Z" fill="url(#midPlateLeftEdge)" />
+            <path d="M 120 118 L 178 90 L 178 98 L 120 126 Z" fill="url(#midPlateRightEdge)" />
             <path
               d="M 120 66 C 123 64.5 127 64.5 130 66 L 174 86 C 177 87.5 178.5 90 177 92 L 126 117 C 123 118.5 117 118.5 114 117 L 63 92 C 61.5 90 63 87.5 66 86 Z"
               fill="url(#midPlateSurface)"
@@ -194,38 +185,28 @@ export function AssistantThinking3D({
             />
           </g>
 
-          {/* Orbital Ring - Front Section (Wraps over Bottom & Mid, Under Top) */}
+          {/* Orbital Ring - Front Section */}
           <g>
             <path
               d="M 212 116 C 212 140, 28 140, 28 116"
               stroke="#BAE6FD"
-              strokeWidth="1.8"
+              strokeWidth="1.6"
               opacity="0.85"
             />
           </g>
 
           {/* ========================================================= */}
-          {/* LAYER 1: TOP GLOSSY GLASS PLATE (Floating Phase 3)        */}
+          {/* LAYER 1: TOP GLOSSY GLASS PLATE                           */}
           {/* ========================================================= */}
           <g
-            className="transition-transform duration-700 ease-out"
             style={{
               animation: "assistantFloat 4.2s ease-in-out infinite",
               animationDelay: "0s",
               transformOrigin: "120px 75px",
             }}
           >
-            {/* Left Edge Bevel */}
-            <path
-              d="M 62 60 L 120 88 L 120 96 L 62 68 Z"
-              fill="url(#topPlateLeftEdge)"
-            />
-            {/* Right Edge Bevel */}
-            <path
-              d="M 120 88 L 178 60 L 178 68 L 120 96 Z"
-              fill="url(#topPlateRightEdge)"
-            />
-            {/* Top Surface */}
+            <path d="M 62 60 L 120 88 L 120 96 L 62 68 Z" fill="url(#topPlateLeftEdge)" />
+            <path d="M 120 88 L 178 60 L 178 68 L 120 96 Z" fill="url(#topPlateRightEdge)" />
             <path
               d="M 120 36 C 123 34.5 127 34.5 130 36 L 174 56 C 177 57.5 178.5 60 177 62 L 126 87 C 123 88.5 117 88.5 114 87 L 63 62 C 61.5 60 63 57.5 66 56 Z"
               fill="url(#topPlateSurface)"
@@ -233,7 +214,6 @@ export function AssistantThinking3D({
               strokeWidth="1.5"
               filter="url(#layerShadow)"
             />
-            {/* Gloss Reflection Highlights on Top Plate */}
             <path
               d="M 120 38 L 155 54 C 152 57 135 63 118 63 C 105 63 85 58 85 54 Z"
               fill="url(#topGlossReflect)"
@@ -242,37 +222,25 @@ export function AssistantThinking3D({
           </g>
 
           {/* ========================================================= */}
-          {/* ORBITING GLOWING PARTICLE                                 */}
+          {/* ORBITING GLOWING PARTICLE (Anchored along valid path)      */}
           {/* ========================================================= */}
           <g>
-            {/* Elliptical Path Motion for the Particle */}
-            <ellipse
-              cx="120"
-              cy="116"
-              rx="92"
-              ry="24"
-              fill="none"
-              stroke="transparent"
-              id="orbitTrack"
-            />
-            {/* Animated Particle */}
-            <circle r="4.5" fill="#38BDF8" filter="url(#glowParticle)">
+            <circle cx="0" cy="0" r="4" fill="#38BDF8" filter="url(#glowParticle)">
               <animateMotion
-                dur={isThinking ? "2.6s" : "4.8s"}
+                dur={isThinking ? "2.2s" : "4.8s"}
                 repeatCount="indefinite"
                 rotate="auto"
               >
-                <mpath href="#orbitTrack" />
+                <mpath href="#orbitMotionPath" />
               </animateMotion>
             </circle>
-            {/* Hot Center Core for Particle */}
-            <circle r="2" fill="#FFFFFF">
+            <circle cx="0" cy="0" r="1.8" fill="#FFFFFF">
               <animateMotion
-                dur={isThinking ? "2.6s" : "4.8s"}
+                dur={isThinking ? "2.2s" : "4.8s"}
                 repeatCount="indefinite"
                 rotate="auto"
               >
-                <mpath href="#orbitTrack" />
+                <mpath href="#orbitMotionPath" />
               </animateMotion>
             </circle>
           </g>
@@ -281,9 +249,9 @@ export function AssistantThinking3D({
 
       {/* Optional Contextual Loading Label */}
       {label && (
-        <div className="mt-3 text-center animate-fade-in">
-          <div className="text-xs font-semibold text-slate-700 flex items-center justify-center gap-2">
-            <span className="size-2 rounded-full bg-blue-500 animate-ping" />
+        <div className="mt-2 text-center animate-fade-in">
+          <div className="text-xs font-semibold text-slate-700 flex items-center justify-center gap-1.5">
+            <span className="size-1.5 rounded-full bg-blue-500 animate-ping" />
             <span>{label}</span>
           </div>
           <p className="text-[10px] text-slate-400 mt-0.5">Searching authorized project sources with zero fabrication</p>
@@ -291,14 +259,14 @@ export function AssistantThinking3D({
       )}
 
       {/* Embedded CSS for smooth floating motion */}
-      <style jsx>{`
+      <style>{`
         @keyframes assistantFloat {
           0%,
           100% {
             transform: translateY(0px) rotateX(0deg);
           }
           50% {
-            transform: translateY(-8px) rotateX(1deg);
+            transform: translateY(-6px) rotateX(1deg);
           }
         }
       `}</style>
