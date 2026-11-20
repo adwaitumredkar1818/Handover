@@ -288,12 +288,19 @@ def get_knowledge_quality_assessment(
         Depends(require_project_permission("project.read")),
     ],
     session: Annotated[Session, Depends(get_db_session)],
+    sync_findings: Annotated[
+        bool,
+        Query(
+            description="Materialize latest findings before computing quality metrics",
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Calculate transparent 9-dimension knowledge completeness and surface actionable gaps."""
     engine = KnowledgeQualityEngine(session)
     return engine.assess_project_quality(
         project_id=project_ctx.project.id,
         user_id=project_ctx.user_id,
+        sync_findings=sync_findings,
     )
 
 

@@ -65,10 +65,15 @@ Your objective is to provide a clear, comprehensive, evidence-grounded answer to
 
 {_BASE_SAFEGUARDS}
 
-4. STRUCTURED OUTPUT FORMAT:
+4. PRESENTATION & STRUCTURED OUTPUT:
+- Write your "answer" as a direct, natural, conversational response from an AI assistant.
+- Use clean, standard markdown formatting (paragraphs, bullet points, bold headers, code blocks).
+- Do NOT insert bracketed citation tags like [S1] or [S2] into the visible "answer" text. Write natural, flowing prose.
+- Populate any supporting evidence citation labels solely inside the structured "claims" array.
+
 Respond with a valid JSON object matching the requested schema:
 {{
-  "answer": "Comprehensive answer text citing [S1], [S2]...",
+  "answer": "Direct, natural answer text in clean markdown without [S#] brackets...",
   "answer_status": "answered" | "partially_answered" | "insufficient_evidence" | "conflicted_evidence" | "outdated_evidence",
   "response_mode": "standard",
   "claims": [
@@ -253,6 +258,34 @@ class AssistantLLMReasoner:
         """Generate structured answer with claims, citations, and epistemic status across intelligent modes."""
         # Check if evidence is completely empty
         if not evidence_prompt.strip():
+            # Check if this is a conversational greeting or query (e.g. "hi", "hello", "hey", etc.)
+            q_clean = question.strip().lower().rstrip("?!.,")
+            if q_clean in {"hi", "hello", "hey", "greetings", "good morning", "good afternoon", "good evening", "who are you", "what can you do", "help"}:
+                payload = AssistantAnswerPayload(
+                    answer=(
+                        "Hello! I am The Handover Project Knowledge Assistant. I can help you investigate "
+                        "and answer questions about this project's architecture, key decisions and rationale, "
+                        "component ownership, blockers, dependencies, and handover status. How can I assist you today?"
+                    ),
+                    answer_status=AssistantAnswerStatus.ANSWERED,
+                    response_mode=response_mode,
+                    claims=[],
+                    uncertainty=None,
+                    conflicts=[],
+                    missing_information=[],
+                    suggested_followup_questions=[
+                        "What is the current status of the handover process?",
+                        "Can you explain the architecture of the platform?",
+                        "What are the key decisions made during the project?",
+                    ],
+                )
+                return payload, {
+                    "model_name": self.llm_client.model_name,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "duration_ms": 0,
+                }
+
             payload = AssistantAnswerPayload(
                 answer=(
                     "I cannot find any authorized project evidence or reconstructed knowledge "
@@ -306,8 +339,8 @@ class AssistantLLMReasoner:
         user_prompt_parts.append("\n---\n")
         user_prompt_parts.append(f"### USER INQUIRY (MODE: {response_mode.value.upper()}):\n{question.strip()}")
         user_prompt_parts.append(
-            "\nRemember: Synthesize and ground your response strictly using the evidence above. "
-            "If the evidence is partial, explain what IS documented, explain what is missing, and cite [S#] tags."
+            "\nRemember: Synthesize and ground your response strictly using the authorized evidence above. "
+            "Deliver a direct, natural, and helpful response in clean markdown prose. Do not put bracketed citation tags like [S1] or [S2] in your answer text; include any citation references solely in the claims array."
         )
 
         full_user_prompt = "\n".join(user_prompt_parts)

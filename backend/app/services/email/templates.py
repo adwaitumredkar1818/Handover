@@ -45,7 +45,8 @@ def _wrap_html_layout(*, preheader: str, heading: str, body_html: str) -> str:
           <tr>
             <td style="background-color:#F8FAF9;padding:20px 32px;border-top:1px solid #E6ECE8;font-size:12px;line-height:1.5;color:#5A6B65;">
               <strong style="color:#2D3B36;">The Handover</strong> · Intelligent Project Knowledge Reconstruction &amp; Handover Platform<br/>
-              Prevent Critical Knowledge From Leaving With People.
+              Prevent Critical Knowledge From Leaving With People.<br/>
+              <span style="color:#8A9B94;font-size:11px;">Sent from notifications@the-sapiens.xyz</span>
             </td>
           </tr>
         </table>
@@ -268,5 +269,85 @@ def render_password_reset(
         "Security notice: If you did not request a password reset, you can safely ignore this email. "
         "Your password will remain unchanged.\n"
     )
+    return RenderedEmailTemplate(subject=subject, html_body=html_body, text_body=text_body)
+
+
+def render_platform_notification(
+    *,
+    recipient_name: str,
+    notification_title: str,
+    message_body: str,
+    action_url: str | None = None,
+    action_label: str = "View in Handover",
+    project_name: str | None = None,
+) -> RenderedEmailTemplate:
+    """Render platform notification email (task completions, source sync, handover events)."""
+    subject = f"[Handover] {notification_title}"
+    if project_name:
+        subject = f"[{project_name}] {notification_title} · Handover"
+
+    safe_name = html.escape(recipient_name or "there")
+    safe_title = html.escape(notification_title)
+    safe_body = html.escape(message_body)
+    safe_project = html.escape(project_name) if project_name else None
+
+    project_badge = (
+        f'<div style="font-size:12px;color:#245C4F;font-weight:600;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.05em;">Project: {safe_project}</div>'
+        if safe_project
+        else ""
+    )
+
+    action_button = ""
+    if action_url:
+        safe_url = html.escape(action_url, quote=True)
+        safe_action_label = html.escape(action_label)
+        action_button = f"""
+        <table role="presentation" cellspacing="0" cellpadding="0" style="margin:24px 0;">
+          <tr>
+            <td style="border-radius:8px;background-color:#245C4F;">
+              <a href="{safe_url}" target="_blank" rel="noopener noreferrer" style="display:inline-block;padding:13px 26px;font-size:15px;font-weight:600;color:#FFFFFF;text-decoration:none;">
+                {safe_action_label}
+              </a>
+            </td>
+          </tr>
+        </table>
+        <p style="margin:20px 0 6px;font-size:12px;color:#5A6B65;">If the button above does not work, copy and paste this link into your browser:</p>
+        <p style="margin:0;font-size:12px;line-height:1.5;word-break:break-all;color:#1E5288;">{safe_url}</p>
+        """
+
+    body_html = f"""
+      {project_badge}
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.6;">Hello {safe_name},</p>
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.6;">{safe_body}</p>
+      {action_button}
+      <p style="margin:16px 0 0;font-size:13px;line-height:1.6;color:#4B5B55;">
+        You received this notification because you are a registered participant or collaborator on The Handover.
+      </p>
+    """
+
+    html_body = _wrap_html_layout(
+        preheader=f"{notification_title} - The Handover",
+        heading=safe_title,
+        body_html=body_html,
+    )
+
+    text_lines = [
+        f"Hello {recipient_name or 'there'},",
+        "",
+        message_body,
+    ]
+    if project_name:
+        text_lines.insert(0, f"Project: {project_name}")
+    if action_url:
+        text_lines.extend(["", f"{action_label}: {action_url}"])
+    text_lines.extend([
+        "",
+        "---",
+        "The Handover · Intelligent Project Knowledge Reconstruction & Handover Platform",
+        "Prevent Critical Knowledge From Leaving With People.",
+        "Delivered by notifications@the-sapiens.xyz",
+    ])
+    text_body = "\n".join(text_lines)
+
     return RenderedEmailTemplate(subject=subject, html_body=html_body, text_body=text_body)
 

@@ -196,6 +196,8 @@ export function AssistantWorkspaceView() {
   );
 
   useEffect(() => {
+    setActiveConversationId(null);
+    setMessages([]);
     loadConversations(true);
   }, [activeProject?.id]);
 
@@ -209,10 +211,28 @@ export function AssistantWorkspaceView() {
         const filtered = (detail?.messages || []).filter(
           (m) => m.sender_type !== "system" && !m.content?.startsWith("Investigation Checkpoint:")
         );
-        setMessages(filtered);
-      } catch (err) {
-        console.error("Failed to load conversation detail:", err);
-        setMessages([]);
+        setMessages((prev) => {
+          // If we have an optimistic pending user message not yet returned by DB, preserve it
+          const dbUserContents = new Set(
+            filtered.filter((m) => m.sender_type === "user").map((m) => m.content.trim())
+          );
+          const pendingOptimistic = prev.filter(
+            (m) => m.id?.startsWith("temp-user-") && !dbUserContents.has(m.content.trim())
+          );
+          return [...pendingOptimistic, ...filtered];
+        });
+      } catch (err: unknown) {
+        // If the conversation does not exist in this project (stale ID or project switched), reset gracefully
+        const isNotFound =
+          err instanceof Error &&
+          (err.message.includes("not found") || (err as { status?: number }).status === 404);
+        if (isNotFound) {
+          setActiveConversationId(null);
+          setMessages([]);
+        } else {
+          console.warn("Failed to load conversation detail:", err);
+          setMessages([]);
+        }
       } finally {
         setLoadingMessages(false);
       }
@@ -292,8 +312,8 @@ export function AssistantWorkspaceView() {
 
     let targetConvId = activeConversationId;
 
-    // Auto-create thread if none exists
-    if (!targetConvId) {
+    // Auto-create thread if none exists or if active conversation is not in current project
+    if (!targetConvId || (conversations.length > 0 && !conversations.some((c) => c.id === targetConvId))) {
       try {
         const threadTitle = q.length > 40 ? q.slice(0, 37) + "..." : q;
         const newConv = await api.assistant.createConversation(activeProject.id, threadTitle);
@@ -463,7 +483,20 @@ export function AssistantWorkspaceView() {
               created_at: new Date().toISOString(),
             };
 
-            setMessages((prev) => [...prev, assistantMsg]);
+            setMessages((prev) => {
+              if (
+                prev.some(
+                  (m) =>
+                    m.id === assistantMsg.id ||
+                    (m.sender_type === "assistant" && m.content.trim() === assistantMsg.content.trim())
+                )
+              ) {
+                return prev;
+              }
+              return [...prev, assistantMsg];
+            });
+            // Re-sync with backend to get persisted user & assistant message records
+            loadMessages(targetConvId);
             if (mappedCitations.length > 0 && mappedCitations[0]) {
               setActiveCitationLabel(mappedCitations[0].citation_label);
             }
@@ -510,7 +543,19 @@ export function AssistantWorkspaceView() {
         created_at: answerRes.created_at,
       };
 
-      setMessages((prev) => [...prev, assistantMsg]);
+      setMessages((prev) => {
+        if (
+          prev.some(
+            (m) =>
+              m.id === assistantMsg.id ||
+              (m.sender_type === "assistant" && m.content.trim() === assistantMsg.content.trim())
+          )
+        ) {
+          return prev;
+        }
+        return [...prev, assistantMsg];
+      });
+      loadMessages(targetConvId);
 
       if (answerRes.citations && answerRes.citations.length > 0 && answerRes.citations[0]) {
         setActiveCitationLabel(answerRes.citations[0].citation_label);
@@ -625,32 +670,10 @@ export function AssistantWorkspaceView() {
     };
   }, [activeCitations]);
 
-  // Render formatted answer with interactive [S1] chips
+  // Render formatted answer cleanly for direct, natural AI response (stripping citation bracket tags)
   const renderFormattedAnswer = (text: string) => {
-    const parts = text.split(/(\[S?\d+\])/g);
-    return parts.map((part, idx) => {
-      const match = part.match(/^\[(S?\d+)\]$/);
-      if (match && match[1]) {
-        const label = match[1];
-        const isActive = activeCitationLabel === label;
-        return (
-          <button
-            key={idx}
-            type="button"
-            onClick={() => handleCitationClick(label)}
-            className={`inline-flex items-center mx-0.5 px-1.5 py-0.2 rounded text-[11px] font-mono font-bold transition-all shadow-2xs ${
-              isActive
-                ? "bg-blue-600 text-white ring-2 ring-blue-400 scale-105"
-                : "bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200"
-            }`}
-            title={`View evidence record [${label}]`}
-          >
-            {part}
-          </button>
-        );
-      }
-      return <span key={idx}>{part}</span>;
-    });
+    if (!text) return "";
+    return text.replace(/\[S?\d+\]/g, "").replace(/[^\S\r\n]{2,}/g, " ").trim();
   };
 
   const handleCopyJson = (data: unknown, id: string) => {
@@ -1219,22 +1242,35 @@ export function AssistantWorkspaceView() {
               <div className="flex-1 overflow-y-auto space-y-3 p-2 sm:p-3">
                 {messages
                   .filter((m) => m.sender_type !== "system" && !m.content?.startsWith("Investigation Checkpoint:"))
+                  .filter((msg, idx, arr) => {
+                    // Prevent consecutive identical duplicate assistant messages
+                    if (idx > 0 && msg.sender_type === "assistant") {
+                      const prev = arr[idx - 1];
+                      if (prev && prev.sender_type === "assistant" && prev.content?.trim() === msg.content?.trim()) {
+                        return false;
+                      }
+                    }
+                    return true;
+                  })
                   .map((msg, index) => {
                   if (msg.sender_type === "user") {
                     return (
-                      <div key={msg.id || index} className="flex flex-col items-end">
+                      <div key={msg.id || index} className="flex flex-col items-end w-full animate-fade-in">
                         <div className="flex items-center gap-1.5 text-[10px] text-slate-400 uppercase font-semibold mb-1 mr-1">
-                          <User className="size-3" />
-                          <span>Question</span>
+                          <User className="size-3 text-blue-600" />
+                          <span>You</span>
                         </div>
-                        <div className="max-w-[85%] bg-blue-50/90 border border-blue-200 text-slate-900 rounded-2xl rounded-tr-xs px-3.5 py-2.5 text-xs leading-relaxed shadow-2xs">
+                        <div className="max-w-[85%] bg-blue-600 text-white rounded-2xl rounded-tr-xs px-4 py-2.5 text-xs leading-relaxed shadow-sm">
                           {msg.content}
                         </div>
                       </div>
                     );
                   }
 
-                  const isInsufficient = msg.answer_status === "insufficient_evidence";
+                  const isGreeting =
+                    /^(hello|hi|hey|greetings|welcome)/i.test(msg.content?.trim() || "") &&
+                    (!msg.citations || msg.citations.length === 0);
+                  const isInsufficient = msg.answer_status === "insufficient_evidence" && !isGreeting;
                   const isPartial =
                     msg.answer_status === "partially_answered" ||
                     Boolean(msg.structured_payload_json?.uncertainty);
@@ -1333,127 +1369,31 @@ export function AssistantWorkspaceView() {
                           </div>
                         )}
 
-                        {/* Citation Badges */}
-                        {msg.citations && msg.citations.length > 0 && (
-                          <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center gap-1.5">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">
-                              Sources:
-                            </span>
-                            {msg.citations.map((c, i) => (
-                              <button
-                                key={i}
-                                type="button"
-                                onClick={() => handleCitationClick(c.citation_label)}
-                                className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] font-mono font-bold border transition ${
-                                  activeCitationLabel === c.citation_label
-                                    ? "bg-blue-600 text-white border-blue-700 shadow-xs"
-                                    : "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
-                                }`}
-                                title={c.source_title}
-                              >
-                                <span>[{c.citation_label}]</span>
-                                <span className="max-w-[120px] truncate">{c.source_provider}</span>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-
-                        {/* States & Warnings */}
-                        {isInsufficient && (
-                          <div className="p-2.5 bg-amber-50/70 border border-dashed border-amber-300 rounded-lg text-amber-900 text-xs">
-                            <div className="font-bold text-[10px] uppercase text-amber-800">
-                              Insufficient Evidence
-                            </div>
-                            <p className="text-[11px] text-amber-800/90 mt-0.5">
-                              {msg.structured_payload_json?.uncertainty ||
-                                "Available project evidence does not support a fully authoritative answer."}
-                            </p>
-                          </div>
-                        )}
-
-                        {!isInsufficient && isPartial && (
-                          <div className="p-2.5 bg-blue-50/50 border border-blue-200 rounded-lg text-blue-950 text-xs">
-                            <div className="font-bold text-[10px] uppercase text-blue-800">
-                              Partial Evidence
-                            </div>
-                            <p className="text-[11px] text-blue-900/90 mt-0.5">
-                              {msg.structured_payload_json?.uncertainty ||
-                                "The answer synthesizes verified records. Some detailed aspects remain unrecorded."}
-                            </p>
-                          </div>
-                        )}
-
-                        {hasConflicts && (
-                          <div className="p-2.5 bg-rose-50/70 border border-rose-200 rounded-lg text-rose-900 text-xs">
-                            <div className="font-bold text-[10px] uppercase text-rose-800">
-                              Conflicting Sources Detected
-                            </div>
-                            {msg.structured_payload_json?.conflicts?.map((conf, ci) => (
-                              <div key={ci} className="text-[11px] text-rose-800/90 mt-0.5">
-                                ⚠️ {conf}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        {/* Verified Claims Accordion */}
-                        {claims.length > 0 && (
-                          <div className="pt-1.5 border-t border-slate-100">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setExpandedClaims((prev) => ({ ...prev, [msg.id]: !prev[msg.id] }))
-                              }
-                              className="flex items-center justify-between w-full text-left text-[11px] font-semibold text-slate-600 hover:text-slate-900 py-0.5"
-                            >
-                              <span className="flex items-center gap-1.5">
-                                <ShieldCheck className="size-3.5 text-blue-600" />
-                                Verified Facts &amp; Sources ({claims.length})
-                              </span>
-                              {isClaimsExpanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
-                            </button>
-
-                            {isClaimsExpanded && (
-                              <div className="mt-1.5 space-y-1.5 pl-2 border-l-2 border-blue-200">
-                                {claims.map((claim, ci) => (
-                                  <div key={ci} className="p-1.5 bg-slate-50 rounded border border-slate-200 text-[10px]">
-                                    <div className="text-slate-800">{claim.claim_text}</div>
-                                    <div className="flex items-center justify-between text-slate-500 mt-1">
-                                      <span className="font-semibold text-blue-700">
-                                        {Math.round(claim.confidence * 100)}% confidence
-                                      </span>
-                                      <div className="flex items-center gap-1 font-mono">
-                                        {claim.citation_labels.map((cl, cli) => (
-                                          <button
-                                            key={cli}
-                                            type="button"
-                                            onClick={() => handleCitationClick(cl)}
-                                            className="text-blue-700 hover:underline"
-                                          >
-                                            [{cl}]
-                                          </button>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
+                        {/* Attribution & Feedback */}
+                        <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
+                          <span className="flex items-center gap-1.5 text-[10px]">
+                            {msg.citations && msg.citations.length > 0 ? (
+                              <>
+                                <ShieldCheck className="size-3 text-emerald-600" />
+                                <span className="text-slate-600 font-medium">Grounded in Project Sources ({msg.citations.length})</span>
+                              </>
+                            ) : (
+                              <>
+                                <Bot className="size-3 text-blue-500" />
+                                <span className="text-slate-500 font-medium">Project Knowledge Assistant</span>
+                              </>
                             )}
-                          </div>
-                        )}
-
-                        {/* Feedback */}
-                        <div className="pt-1.5 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
-                          <span className="text-[10px] text-slate-400">Grounded in Project Sources</span>
+                          </span>
                           <div className="flex items-center gap-1.5">
                             <span className="text-[10px] text-slate-400">Helpful?</span>
                             <button
                               type="button"
                               onClick={() => handleFeedback(msg.id, "helpful")}
                               disabled={Boolean(currentFeedback)}
-                              className={`p-1 rounded hover:bg-slate-100 transition ${
-                                currentFeedback === "helpful" ? "text-blue-600 font-bold" : "text-slate-400"
+                              className={`p-1 rounded hover:bg-slate-100 transition cursor-pointer ${
+                                currentFeedback === "helpful" ? "text-blue-600 font-bold" : "text-slate-400 hover:text-slate-600"
                               }`}
+                              title="Helpful response"
                             >
                               <ThumbsUp className="size-3" />
                             </button>
@@ -1461,9 +1401,10 @@ export function AssistantWorkspaceView() {
                               type="button"
                               onClick={() => handleFeedback(msg.id, "unhelpful")}
                               disabled={Boolean(currentFeedback)}
-                              className={`p-1 rounded hover:bg-slate-100 transition ${
-                                currentFeedback === "unhelpful" ? "text-rose-600 font-bold" : "text-slate-400"
+                              className={`p-1 rounded hover:bg-slate-100 transition cursor-pointer ${
+                                currentFeedback === "unhelpful" ? "text-rose-600 font-bold" : "text-slate-400 hover:text-slate-600"
                               }`}
+                              title="Unhelpful response"
                             >
                               <ThumbsDown className="size-3" />
                             </button>
@@ -1472,18 +1413,23 @@ export function AssistantWorkspaceView() {
 
                         {/* Follow-ups */}
                         {followups.length > 0 && (
-                          <div className="pt-1.5 border-t border-slate-100 flex flex-wrap gap-1">
-                            {followups.map((fq, fi) => (
-                              <button
-                                key={fi}
-                                type="button"
-                                onClick={() => handleAsk(fq)}
-                                disabled={asking}
-                                className="px-2 py-0.5 text-[10px] rounded-full bg-slate-100 hover:bg-blue-50 hover:text-blue-900 border border-slate-200 text-slate-700 transition"
-                              >
-                                {fq}
-                              </button>
-                            ))}
+                          <div className="pt-2 border-t border-slate-100 flex flex-col gap-1.5">
+                            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                              Suggested Questions:
+                            </span>
+                            <div className="flex flex-wrap gap-1.5">
+                              {followups.map((fq, fi) => (
+                                <button
+                                  key={fi}
+                                  type="button"
+                                  onClick={() => handleAsk(fq)}
+                                  disabled={asking}
+                                  className="px-2.5 py-1 text-[11px] rounded-full bg-slate-50 hover:bg-blue-50 hover:text-blue-700 hover:border-blue-200 border border-slate-200 text-slate-700 transition font-medium cursor-pointer"
+                                >
+                                  {fq}
+                                </button>
+                              ))}
+                            </div>
                           </div>
                         )}
                       </div>

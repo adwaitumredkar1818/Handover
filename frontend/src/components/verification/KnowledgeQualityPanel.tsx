@@ -108,7 +108,7 @@ export function KnowledgeQualityPanel({ projectId }: KnowledgeQualityPanelProps)
       setError(null);
 
       try {
-        const res = await api.knowledgeIntelligence.getQuality(projectId);
+        const res = await api.knowledgeIntelligence.getQuality(projectId, isRefresh);
         const overall =
           typeof res.overall_quality_score === "number"
             ? res.overall_quality_score
@@ -140,13 +140,15 @@ export function KnowledgeQualityPanel({ projectId }: KnowledgeQualityPanelProps)
     loadQuality();
   }, [loadQuality]);
 
-  const getScoreColor = (score: number) => {
+  const getScoreColor = (score: number, totalItems: number = 1) => {
+    if (totalItems === 0) return "text-slate-400 bg-slate-100";
     if (score >= 80) return "text-emerald-600 bg-emerald-500";
     if (score >= 60) return "text-amber-600 bg-amber-500";
     return "text-rose-600 bg-rose-500";
   };
 
-  const getBarBg = (score: number) => {
+  const getBarBg = (score: number, totalItems: number = 1) => {
+    if (totalItems === 0) return "bg-slate-200";
     if (score >= 80) return "bg-emerald-500";
     if (score >= 60) return "bg-amber-500";
     return "bg-rose-500";
@@ -211,7 +213,7 @@ export function KnowledgeQualityPanel({ projectId }: KnowledgeQualityPanelProps)
                   Overall Knowledge Quality Score
                 </span>
                 <div className="flex items-baseline gap-2">
-                  <span className={`text-3xl font-extrabold ${getScoreColor(data.overall_score).split(" ")[0]}`}>
+                  <span className={`text-3xl font-extrabold ${getScoreColor(data.overall_score, data.total_items).split(" ")[0]}`}>
                     {Math.round(data.overall_score)}%
                   </span>
                   <span className="text-xs text-slate-500">
@@ -219,7 +221,9 @@ export function KnowledgeQualityPanel({ projectId }: KnowledgeQualityPanelProps)
                   </span>
                 </div>
                 <p className="text-xs text-slate-600 max-w-xl">
-                  {data.overall_score >= 80
+                  {data.total_items === 0
+                    ? "No evaluated findings or extracted knowledge records detected for this project. Connect external sources or upload documents in Evidence Center to calculate real-time knowledge quality."
+                    : data.overall_score >= 80
                     ? "Excellent quality baseline. Project knowledge is well-grounded, verified, and ready for transition."
                     : data.overall_score >= 60
                     ? "Adequate baseline with gaps. Address unverified claims or unowned components before final handover sign-off."
@@ -234,7 +238,7 @@ export function KnowledgeQualityPanel({ projectId }: KnowledgeQualityPanelProps)
                 </div>
                 <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
                   <div
-                    className={`h-full ${getBarBg(data.overall_score)} transition-all duration-500`}
+                    className={`h-full ${getBarBg(data.overall_score, data.total_items)} transition-all duration-500`}
                     style={{ width: `${Math.min(100, Math.max(0, data.overall_score))}%` }}
                   ></div>
                 </div>
@@ -274,13 +278,13 @@ export function KnowledgeQualityPanel({ projectId }: KnowledgeQualityPanelProps)
                       <div className="space-y-1 pt-2 border-t border-slate-100">
                         <div className="flex items-center justify-between text-xs">
                           <span className="text-slate-500">Completeness</span>
-                          <span className={`font-bold ${getScoreColor(score).split(" ")[0]}`}>
+                          <span className={`font-bold ${getScoreColor(score, data.total_items).split(" ")[0]}`}>
                             {score}%
                           </span>
                         </div>
                         <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
                           <div
-                            className={`h-full ${getBarBg(score)} transition-all duration-300`}
+                            className={`h-full ${getBarBg(score, data.total_items)} transition-all duration-300`}
                             style={{ width: `${Math.min(100, Math.max(0, score))}%` }}
                           ></div>
                         </div>

@@ -35,7 +35,7 @@ EmailDispatchResult = EmailDeliveryResult
 
 
 class EmailProviderProtocol(Protocol):
-    """Pluggable provider interface allowing Gmail SMTP, mock, or future SMTP/SES backends."""
+    """Pluggable provider interface for transactional email delivery (Resend, mock, disabled)."""
 
     @property
     def provider_name(self) -> str:
@@ -43,7 +43,11 @@ class EmailProviderProtocol(Protocol):
         ...
 
     def send(self, message: EmailMessage) -> EmailDeliveryResult:
-        """Submit an outbound email message and return an explicit delivery status."""
+        """Submit an outbound email message synchronously and return an explicit delivery status."""
+        ...
+
+    async def send_async(self, message: EmailMessage) -> EmailDeliveryResult:
+        """Submit an outbound email message asynchronously and return an explicit delivery status."""
         ...
 
     def send_email(

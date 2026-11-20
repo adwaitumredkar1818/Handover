@@ -1651,7 +1651,7 @@ export const api = {
 
   },
   knowledgeIntelligence: {
-    async getQuality(projectId: string): Promise<{
+    async getQuality(projectId: string, refresh: boolean = false): Promise<{
       project_id?: string;
       dimension_scores: Record<string, number>;
       overall_quality_score?: number;
@@ -1675,7 +1675,8 @@ export const api = {
       stale_items?: number;
       recommendation_count?: number;
     }> {
-      return request(`/projects/${projectId}/knowledge-intelligence/quality`);
+      const q = refresh ? "?sync_findings=true" : "";
+      return request(`/projects/${projectId}/knowledge-intelligence/quality${q}`);
     },
 
     async getGraph(

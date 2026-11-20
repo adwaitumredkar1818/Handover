@@ -1124,7 +1124,7 @@ class AuthService:
         )
 
         # In development/local environments (APP_ENV!=production), expose the reset_token
-        # so developers and automated tests can complete the reset flow without an SMTP relay.
+        # so developers and automated tests can complete the reset flow without an external email provider.
         is_dev = self._settings.app_env.lower() in ("development", "test", "testing", "local")
         return ForgotPasswordResponse(
             message=generic_message,

@@ -1,18 +1,22 @@
-"""Transactional email provider implementations (Gmail SMTP, Mock, Disabled)."""
+"""Transactional email provider implementations (Resend REST API, Mock, Disabled)."""
 
 from __future__ import annotations
 
-import email.utils
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.utils import formatdate, make_msgid
 import logging
-import socket
-import ssl
-import smtplib
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+import re
 import uuid
 from typing import Any
+
+import resend
+from resend.exceptions import (
+    ApplicationError,
+    InvalidApiKeyError,
+    MissingApiKeyError,
+    MissingRequiredFieldsError,
+    RateLimitError,
+    ResendError,
+    ValidationError,
+)
 
 from app.services.email.base import EmailDeliveryResult, EmailMessage
 from app.services.email.errors import (
@@ -20,10 +24,19 @@ from app.services.email.errors import (
     EmailConfigurationError,
     EmailConnectionTimeoutError,
     EmailProviderError,
+    EmailRateLimitError,
     EmailRecipientRejectedError,
+    EmailValidationError,
 )
 
 logger = logging.getLogger("app.services.email.providers")
+
+_SENSITIVE_PATTERN = re.compile(r"(re_[a-zA-Z0-9_-]{20,}|Bearer\s+[a-zA-Z0-9._-]+)", re.IGNORECASE)
+
+
+def _sanitize_string(text: str) -> str:
+    """Scrub potential API keys or tokens from error text."""
+    return _SENSITIVE_PATTERN.sub("[REDACTED]", text)
 
 
 class DisabledEmailProvider:
@@ -39,6 +52,9 @@ class DisabledEmailProvider:
             provider=self.provider_name,
             error_message="Outbound email delivery is disabled or not configured.",
         )
+
+    async def send_async(self, message: EmailMessage) -> EmailDeliveryResult:
+        return self.send(message)
 
     def send_email(
         self,
@@ -84,23 +100,8 @@ class MockEmailProvider:
             provider_message_id=f"mock-{uuid.uuid4()}",
         )
 
-    def send_email(
-        self,
-        to_email: str,
-        subject: str,
-        html_content: str,
-        text_content: str | None = None,
-    ) -> EmailDeliveryResult:
-        """Convenience adapter adhering to functional interface contract."""
-        return self.send(
-            EmailMessage(
-                to_email=to_email,
-                subject=subject,
-                html_body=html_content,
-                text_body=text_content or html_content,
-            )
-        )
-
+    async def send_async(self, message: EmailMessage) -> EmailDeliveryResult:
+        return self.send(message)
 
     def send_email(
         self,
@@ -120,119 +121,176 @@ class MockEmailProvider:
         )
 
 
-class GmailSMTPEmailProvider:
-    """Gmail SMTP provider dispatching via smtp.gmail.com:587 with STARTTLS and Google App Passwords."""
+class ResendEmailProvider:
+    """Centralized transactional email delivery via the official Resend Python SDK.
+
+    Uses sending domain the-sapiens.xyz and identity 'Handover <notifications@the-sapiens.xyz>'.
+    Provides both synchronous and asynchronous sending with rigorous error sanitization.
+    """
 
     def __init__(
         self,
         *,
-        host: str = "smtp.gmail.com",
-        port: int = 587,
-        username: str | None = None,
-        app_password: str | None = None,
-        use_tls: bool = True,
-        from_address: str = "noreply@handover.local",
-        from_name: str = "The Handover",
+        api_key: str | None = None,
+        from_address: str = "notifications@the-sapiens.xyz",
+        from_name: str | None = "Handover",
+        sending_domain: str = "the-sapiens.xyz",
         timeout_seconds: float = 10.0,
-        smtp_client_factory: Any | None = None,
+        resend_client: Any | None = None,
     ) -> None:
-        self._host = (host or "smtp.gmail.com").strip()
-        self._port = port
-        self._username = (username or "").strip()
-        self._app_password = (app_password or "").strip()
-        self._use_tls = use_tls
-        self._from_address = (from_address or "noreply@handover.local").strip()
-        self._from_name = (from_name or "The Handover").strip()
+        self._api_key = (api_key or "").strip()
+        self._from_address = (from_address or "notifications@the-sapiens.xyz").strip()
+        self._from_name = (from_name or "").strip()
+        self._sending_domain = (sending_domain or "the-sapiens.xyz").strip()
         self._timeout_seconds = float(timeout_seconds)
-        self._smtp_client_factory = smtp_client_factory
-        self._executor = ThreadPoolExecutor(
-            max_workers=4,
-            thread_name_prefix="smtp-worker",
-        )
+        self._resend_client = resend_client
+
+        if self._api_key:
+            resend.api_key = self._api_key
 
     @property
     def provider_name(self) -> str:
-        return "gmail_smtp"
+        return "resend"
 
-    def _build_mime_message(self, message: EmailMessage) -> MIMEMultipart:
-        mime_msg = MIMEMultipart("alternative")
-        from_header = (
-            f"{self._from_name} <{self._from_address}>"
-            if self._from_name
-            else self._from_address
-        )
-        mime_msg["From"] = from_header
-        mime_msg["To"] = message.to_email
-        mime_msg["Subject"] = message.subject
-        mime_msg["Date"] = formatdate(localtime=True)
-        mime_msg["Message-ID"] = make_msgid()
+    @property
+    def sender_identity(self) -> str:
+        if self._from_name:
+            return f"{self._from_name} <{self._from_address}>"
+        return self._from_address
+
+    @property
+    def from_address(self) -> str:
+        return self._from_address
+
+    @property
+    def from_name(self) -> str:
+        return self._from_name
+
+    @property
+    def sending_domain(self) -> str:
+        return self._sending_domain
+
+    def _build_params(self, message: EmailMessage) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "from": self.sender_identity,
+            "to": [message.to_email] if isinstance(message.to_email, str) else list(message.to_email),
+            "subject": message.subject,
+            "html": message.html_body,
+            "text": message.text_body or message.html_body,
+        }
         if message.reply_to:
-            mime_msg["Reply-To"] = message.reply_to
+            params["reply_to"] = message.reply_to
+        if message.tags:
+            params["tags"] = [{"name": str(k), "value": str(v)} for k, v in message.tags.items()]
+        return params
 
-        # Plain text alternative attached first
-        part_text = MIMEText(message.text_body or message.html_body, "plain", "utf-8")
-        mime_msg.attach(part_text)
+    def _extract_message_id(self, response: Any) -> str:
+        if isinstance(response, dict):
+            return str(response.get("id") or response.get("message_id") or uuid.uuid4())
+        if hasattr(response, "id"):
+            return str(response.id)
+        return str(response)
 
-        # HTML alternative attached second (preferred by HTML email clients)
-        part_html = MIMEText(message.html_body or message.text_body, "html", "utf-8")
-        mime_msg.attach(part_html)
+    def _handle_exception(
+        self,
+        exc: Exception,
+        recipient_domain: str,
+        raise_exceptions: bool = False,
+    ) -> EmailDeliveryResult:
+        if isinstance(exc, (InvalidApiKeyError, MissingApiKeyError)):
+            err_msg = "Resend API authentication failed: invalid or missing API key."
+            logger.warning("Resend delivery failed for recipient domain '@%s': %s", recipient_domain, err_msg)
+            if raise_exceptions:
+                raise EmailAuthenticationError(err_msg) from exc
+            return EmailDeliveryResult(status="failed", provider=self.provider_name, error_message=err_msg)
 
-        return mime_msg
+        if isinstance(exc, RateLimitError):
+            err_msg = "Resend API rate limit exceeded. Please retry after backoff."
+            logger.warning("Resend delivery rate limited for recipient domain '@%s': %s", recipient_domain, err_msg)
+            if raise_exceptions:
+                raise EmailRateLimitError(err_msg) from exc
+            return EmailDeliveryResult(status="failed", provider=self.provider_name, error_message=err_msg)
 
-    def _send_sync(
+        if isinstance(exc, (ValidationError, MissingRequiredFieldsError)):
+            safe_detail = _sanitize_string(str(exc))
+            err_msg = f"Resend validation error: {safe_detail}"
+            logger.warning(
+                "Resend delivery rejected invalid payload for recipient domain '@%s': %s",
+                recipient_domain,
+                err_msg,
+            )
+            if raise_exceptions:
+                raise EmailValidationError(err_msg) from exc
+            return EmailDeliveryResult(status="failed", provider=self.provider_name, error_message=err_msg)
+
+        if isinstance(exc, (TimeoutError,)):
+            err_msg = f"Resend request timed out after {self._timeout_seconds}s."
+            logger.warning("Resend delivery timed out for recipient domain '@%s': %s", recipient_domain, err_msg)
+            if raise_exceptions:
+                raise EmailConnectionTimeoutError(err_msg) from exc
+            return EmailDeliveryResult(status="failed", provider=self.provider_name, error_message=err_msg)
+
+        safe_msg = _sanitize_string(str(exc))
+        if "domain" in safe_msg.lower() and ("verify" in safe_msg.lower() or "not verified" in safe_msg.lower()):
+            err_msg = f"Resend domain verification required for '{self._sending_domain}': {safe_msg}"
+            logger.warning(
+                "Resend delivery failed: domain '%s' requires verification in Resend dashboard: %s",
+                self._sending_domain,
+                safe_msg,
+            )
+            if raise_exceptions:
+                raise EmailConfigurationError(err_msg) from exc
+            return EmailDeliveryResult(status="failed", provider=self.provider_name, error_message=err_msg)
+
+        err_msg = f"Resend delivery failed: {safe_msg}"
+        logger.warning("Resend delivery failed for recipient domain '@%s': %s", recipient_domain, err_msg)
+        if raise_exceptions:
+            raise EmailProviderError(err_msg) from exc
+        return EmailDeliveryResult(status="failed", provider=self.provider_name, error_message=err_msg)
+
+    def send(
         self,
         message: EmailMessage,
         *,
         raise_exceptions: bool = False,
     ) -> EmailDeliveryResult:
+        """Submit outbound email synchronously via Resend REST API."""
         recipient_domain = message.to_email.split("@")[-1] if "@" in message.to_email else "unknown"
+
+        if not self._api_key and not self._resend_client:
+            err_msg = "Resend API key is not configured (RESEND_API_KEY required)."
+            logger.warning("Resend delivery skipped: %s", err_msg)
+            if raise_exceptions:
+                raise EmailConfigurationError(err_msg)
+            return EmailDeliveryResult(status="failed", provider=self.provider_name, error_message=err_msg)
+
+        params = self._build_params(message)
+
         try:
-            if not self._username or not self._app_password:
-                raise EmailConfigurationError(
-                    "Gmail SMTP configuration is incomplete: username or app password is not configured."
-                )
-
-            mime_msg = self._build_mime_message(message)
-            msg_id = mime_msg["Message-ID"]
-
-            if self._smtp_client_factory is not None:
-                try:
-                    client = self._smtp_client_factory(
-                        self._host, self._port, timeout=self._timeout_seconds
-                    )
-                except TypeError:
-                    client = self._smtp_client_factory(self._host, self._port)
-            elif self._port == 465:
-                context = ssl.create_default_context()
-                client = smtplib.SMTP_SSL(self._host, self._port, timeout=self._timeout_seconds, context=context)
+            if self._resend_client is not None:
+                if hasattr(self._resend_client, "send"):
+                    resp = self._resend_client.send(params)
+                elif hasattr(self._resend_client, "Emails"):
+                    resp = self._resend_client.Emails.send(params)
+                else:
+                    resp = self._resend_client(params)
             else:
-                client = smtplib.SMTP(self._host, self._port, timeout=self._timeout_seconds)
+                resend.api_key = self._api_key
+                resp = resend.Emails.send(params)
 
-            try:
-                client.ehlo()
-                if self._use_tls and self._port != 465:
-                    context = ssl.create_default_context()
-                    client.starttls(context=context)
-                    client.ehlo()
-                client.login(self._username, self._app_password)
-                refused = client.send_message(
-                    mime_msg,
-                    from_addr=self._from_address,
-                    to_addrs=[message.to_email],
+            if isinstance(resp, dict) and "error" in resp and resp["error"]:
+                err_dict = resp["error"]
+                safe_err = _sanitize_string(str(err_dict.get("message") or err_dict))
+                logger.warning("Resend API rejected email for recipient domain '@%s': %s", recipient_domain, safe_err)
+                return EmailDeliveryResult(
+                    status="failed",
+                    provider=self.provider_name,
+                    error_message=f"Resend rejected email: {safe_err}",
                 )
-                if refused:
-                    raise smtplib.SMTPRecipientsRefused(refused)
-            finally:
-                try:
-                    client.quit()
-                except Exception:
-                    try:
-                        client.close()
-                    except Exception:
-                        pass
 
+            msg_id = self._extract_message_id(resp)
             logger.info(
-                "Gmail SMTP email submitted successfully (message_id=%s, recipient_domain=@%s).",
+                "Resend email submitted successfully (message_id=%s, recipient_domain=@%s).",
                 msg_id,
                 recipient_domain,
             )
@@ -241,174 +299,62 @@ class GmailSMTPEmailProvider:
                 provider=self.provider_name,
                 provider_message_id=msg_id,
             )
-        except EmailConfigurationError as exc:
-            logger.warning("Gmail SMTP delivery skipped: username or app password is not configured.")
-            if raise_exceptions:
-                raise
-            return EmailDeliveryResult(
-                status="failed",
-                provider=self.provider_name,
-                error_message=str(exc),
-            )
-        except smtplib.SMTPAuthenticationError as exc:
-            err_msg = (
-                "Gmail SMTP authentication failed. Please verify your Google account email and "
-                "16-character App Password (2-Step Verification required)."
-            )
-            logger.warning(
-                "Gmail SMTP delivery failed for recipient domain '@%s': %s",
-                recipient_domain,
-                err_msg,
-            )
-            if raise_exceptions:
-                raise EmailAuthenticationError(err_msg) from exc
-            return EmailDeliveryResult(
-                status="failed",
-                provider=self.provider_name,
-                error_message=err_msg,
-            )
-        except (socket.timeout, TimeoutError) as exc:
-            err_msg = f"Gmail SMTP connection timed out after {self._timeout_seconds}s."
-            logger.warning(
-                "Gmail SMTP delivery failed for recipient domain '@%s': %s",
-                recipient_domain,
-                err_msg,
-            )
-            if raise_exceptions:
-                raise EmailConnectionTimeoutError(err_msg) from exc
-            return EmailDeliveryResult(
-                status="failed",
-                provider=self.provider_name,
-                error_message=err_msg,
-            )
-        except (smtplib.SMTPConnectError, ConnectionRefusedError, smtplib.SMTPServerDisconnected) as exc:
-            err_msg = f"Gmail SMTP failed to connect to {self._host}:{self._port}."
-            logger.warning(
-                "Gmail SMTP delivery failed for recipient domain '@%s': %s",
-                recipient_domain,
-                err_msg,
-            )
-            if raise_exceptions:
-                raise EmailProviderError(err_msg) from exc
-            return EmailDeliveryResult(
-                status="failed",
-                provider=self.provider_name,
-                error_message=err_msg,
-            )
-        except smtplib.SMTPRecipientsRefused as exc:
-            details = []
-            for addr, resp in exc.recipients.items():
-                if isinstance(resp, tuple) and len(resp) >= 2:
-                    code, msg = resp[0], resp[1]
-                    msg_str = msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else str(msg)
-                    details.append(f"{code} {msg_str.strip()}")
-                else:
-                    details.append(str(resp))
-            sanitized_detail = "; ".join(details) if details else "server refused recipient"
-            err_msg = f"Gmail SMTP rejected recipient address: {sanitized_detail}."
-            logger.warning(
-                "Gmail SMTP delivery failed for recipient domain '@%s': %s",
-                recipient_domain,
-                err_msg,
-            )
-            if raise_exceptions:
-                raise EmailRecipientRejectedError(err_msg) from exc
-            return EmailDeliveryResult(
-                status="failed",
-                provider=self.provider_name,
-                error_message=err_msg,
-            )
-        except smtplib.SMTPSenderRefused as exc:
-            err_msg = "Gmail SMTP sender address refused by server."
-            logger.warning(
-                "Gmail SMTP delivery failed for recipient domain '@%s': %s",
-                recipient_domain,
-                err_msg,
-            )
-            if raise_exceptions:
-                raise EmailProviderError(err_msg) from exc
-            return EmailDeliveryResult(
-                status="failed",
-                provider=self.provider_name,
-                error_message=err_msg,
-            )
-        except (ssl.SSLError, smtplib.SMTPNotSupportedError) as exc:
-            err_msg = "Gmail SMTP TLS negotiation failed."
-            logger.warning(
-                "Gmail SMTP delivery failed for recipient domain '@%s': %s",
-                recipient_domain,
-                err_msg,
-            )
-            if raise_exceptions:
-                raise EmailProviderError(err_msg) from exc
-            return EmailDeliveryResult(
-                status="failed",
-                provider=self.provider_name,
-                error_message=err_msg,
-            )
-        except (smtplib.SMTPException, OSError) as exc:
-            err_msg = f"Gmail SMTP network communication error: {type(exc).__name__}."
-            logger.warning(
-                "Gmail SMTP delivery failed for recipient domain '@%s': %s",
-                recipient_domain,
-                err_msg,
-            )
-            if raise_exceptions:
-                raise EmailProviderError(err_msg) from exc
-            return EmailDeliveryResult(
-                status="failed",
-                provider=self.provider_name,
-                error_message=err_msg,
-            )
-
-    def send(self, message: EmailMessage) -> EmailDeliveryResult:
-        """Submit outbound email asynchronously via bounded thread pool with hard timeout."""
-        if not self._username or not self._app_password:
-            logger.warning("Gmail SMTP delivery skipped: username or app password is not configured.")
-            return EmailDeliveryResult(
-                status="failed",
-                provider=self.provider_name,
-                error_message="Gmail SMTP configuration is incomplete: username or app password is not configured.",
-            )
-
-        try:
-            future = self._executor.submit(self._send_sync, message)
-            return future.result(timeout=self._timeout_seconds)
-        except FutureTimeoutError:
-            recipient_domain = message.to_email.split("@")[-1] if "@" in message.to_email else "unknown"
-            err_msg = f"Gmail SMTP connection timed out after {self._timeout_seconds}s."
-            logger.warning(
-                "Gmail SMTP delivery failed for recipient domain '@%s': %s",
-                recipient_domain,
-                err_msg,
-            )
-            return EmailDeliveryResult(
-                status="failed",
-                provider=self.provider_name,
-                error_message=err_msg,
-            )
         except Exception as exc:
-            recipient_domain = message.to_email.split("@")[-1] if "@" in message.to_email else "unknown"
-            err_msg = f"Gmail SMTP unexpected error: {type(exc).__name__}."
-            logger.warning(
-                "Gmail SMTP delivery failed for recipient domain '@%s': %s",
-                recipient_domain,
-                err_msg,
-            )
-            return EmailDeliveryResult(
-                status="failed",
-                provider=self.provider_name,
-                error_message=err_msg,
-            )
+            return self._handle_exception(exc, recipient_domain, raise_exceptions=raise_exceptions)
 
-    def send_sync(
+    async def send_async(
         self,
         message: EmailMessage,
         *,
         raise_exceptions: bool = False,
     ) -> EmailDeliveryResult:
-        """Direct synchronous invocation (primarily for testing and specialized synchronous pipelines)."""
-        return self._send_sync(message, raise_exceptions=raise_exceptions)
+        """Submit outbound email asynchronously via Resend REST API SDK."""
+        recipient_domain = message.to_email.split("@")[-1] if "@" in message.to_email else "unknown"
+
+        if not self._api_key and not self._resend_client:
+            err_msg = "Resend API key is not configured (RESEND_API_KEY required)."
+            logger.warning("Resend delivery skipped: %s", err_msg)
+            if raise_exceptions:
+                raise EmailConfigurationError(err_msg)
+            return EmailDeliveryResult(status="failed", provider=self.provider_name, error_message=err_msg)
+
+        params = self._build_params(message)
+
+        try:
+            if self._resend_client is not None:
+                if hasattr(self._resend_client, "send_async"):
+                    resp = await self._resend_client.send_async(params)
+                elif hasattr(self._resend_client, "Emails") and hasattr(self._resend_client.Emails, "send_async"):
+                    resp = await self._resend_client.Emails.send_async(params)
+                else:
+                    return self.send(message, raise_exceptions=raise_exceptions)
+            else:
+                resend.api_key = self._api_key
+                resp = await resend.Emails.send_async(params)
+
+            if isinstance(resp, dict) and "error" in resp and resp["error"]:
+                err_dict = resp["error"]
+                safe_err = _sanitize_string(str(err_dict.get("message") or err_dict))
+                logger.warning("Resend API rejected email for recipient domain '@%s': %s", recipient_domain, safe_err)
+                return EmailDeliveryResult(
+                    status="failed",
+                    provider=self.provider_name,
+                    error_message=f"Resend rejected email: {safe_err}",
+                )
+
+            msg_id = self._extract_message_id(resp)
+            logger.info(
+                "Resend email submitted successfully (async, message_id=%s, recipient_domain=@%s).",
+                msg_id,
+                recipient_domain,
+            )
+            return EmailDeliveryResult(
+                status="submitted",
+                provider=self.provider_name,
+                provider_message_id=msg_id,
+            )
+        except Exception as exc:
+            return self._handle_exception(exc, recipient_domain, raise_exceptions=raise_exceptions)
 
     def send_email(
         self,
@@ -428,12 +374,5 @@ class GmailSMTPEmailProvider:
         )
 
     def close(self) -> None:
-        """Shut down internal thread pool executor."""
-        self._executor.shutdown(wait=False)
-
-    def __del__(self) -> None:
-        try:
-            self._executor.shutdown(wait=False)
-        except Exception:
-            pass
-
+        """No-op for HTTP-based provider, kept for lifecycle compatibility."""
+        pass
