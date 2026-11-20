@@ -81,6 +81,23 @@ class AssistantAnswerValidator:
 
         # If no evidence was available
         if not citations_manifest:
+            # If the response is a conversational greeting/intro or already answered without claims
+            if payload.answer_status == AssistantAnswerStatus.ANSWERED and not payload.claims:
+                return ValidatedAssistantAnswer(
+                    answer=payload.answer,
+                    answer_status=AssistantAnswerStatus.ANSWERED,
+                    claims=[],
+                    validated_citations=[],
+                    uncertainty=None,
+                    conflicts=[],
+                    missing_information=[],
+                    suggested_followup_questions=payload.suggested_followup_questions,
+                    response_mode=payload.response_mode,
+                    research_report=payload.research_report,
+                    deep_think=payload.deep_think,
+                    deep_extract=payload.deep_extract,
+                )
+
             return ValidatedAssistantAnswer(
                 answer=payload.answer,
                 answer_status=AssistantAnswerStatus.INSUFFICIENT_EVIDENCE,
@@ -116,12 +133,9 @@ class AssistantAnswerValidator:
                     )
                 )
 
-        # 3. Clean up hallucinated citation tags from answer text
-        cleaned_answer = payload.answer
-        for label in mentioned_in_text:
-            if label not in valid_labels:
-                # Remove hallucinated citation tag [S99]
-                cleaned_answer = cleaned_answer.replace(f"[{label}]", "")
+        # 3. Clean up citation tags from visible answer text so it reads as direct clean prose
+        cleaned_answer = re.sub(r"\[S\d+\]", "", payload.answer)
+        cleaned_answer = re.sub(r"  +", " ", cleaned_answer).strip()
 
         # 4. Resolve final validated citations
         # Include all citations that were directly cited, plus any top evidence if none were explicitly tagged

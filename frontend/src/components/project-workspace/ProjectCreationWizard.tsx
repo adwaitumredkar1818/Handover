@@ -26,6 +26,7 @@ import {
   cn,
 } from "../ui";
 import { SourceIcon, type BrandSourceType } from "../brand/brand";
+import { ButtonLoader, ListSkeleton } from "../loading";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { api } from "../../lib/api";
 import type { Project, OrganisationMember } from "../../lib/types";
@@ -412,7 +413,7 @@ export function ProjectCreationWizard({
                 <Field
                   label="Description"
                   className="sm:col-span-2"
-                  hint="Helps the Qwen3 8B model scope knowledge reconstruction and boundary detection."
+                  hint="Helps AI knowledge reconstruction and boundary detection scope project context."
                 >
                   <Textarea
                     value={description}
@@ -492,9 +493,8 @@ export function ProjectCreationWizard({
               </p>
 
               {isLoadingMembers ? (
-                <div className="flex items-center justify-center p-8 text-xs text-muted gap-2">
-                  <Loader2 className="size-4 animate-spin text-brand" />
-                  <span>Loading organisation members...</span>
+                <div className="p-3 space-y-2 rounded-xl border border-line bg-white" role="status" aria-live="polite">
+                  <ListSkeleton variant="activity" count={4} />
                 </div>
               ) : orgMembers.length === 0 ? (
                 <div className="rounded-xl border border-line bg-slate-50/50 p-6 text-center">
@@ -557,7 +557,7 @@ export function ProjectCreationWizard({
           {step === 2 && (
             <div>
               <p className="mb-4 text-xs text-muted leading-relaxed">
-                Select authoritative source providers to connect to this project workspace. Handover isolates each project into a dedicated vector collection in ChromaDB.
+                Select authoritative source providers to connect to this project workspace. Handover isolates each project with strict access controls and dedicated project indexing.
               </p>
 
               <div className="grid gap-3 sm:grid-cols-2">
@@ -627,21 +627,15 @@ export function ProjectCreationWizard({
                 Continue
               </Button>
             ) : (
-              <Button
+              <ButtonLoader
                 variant="primary"
-                icon={CheckCircle2}
+                icon={<CheckCircle2 className="size-4" />}
                 onClick={handleCreate}
-                disabled={isSubmitting}
+                isLoading={isSubmitting}
+                loadingText="Creating project..."
               >
-                {isSubmitting ? (
-                  <span className="flex items-center gap-2">
-                    <Loader2 className="size-3.5 animate-spin" />
-                    <span>Creating project...</span>
-                  </span>
-                ) : (
-                  "Create Project Workspace"
-                )}
-              </Button>
+                Create Project Workspace
+              </ButtonLoader>
             )}
           </div>
         </Card>

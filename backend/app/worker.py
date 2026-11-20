@@ -276,10 +276,14 @@ def build_worker_service(
     *,
     worker_id: str | None = None,
     storage_http_transport: httpx.BaseTransport | None = None,
+    engine: Engine | None = None,
+    session_factory: sessionmaker[Session] | None = None,
 ) -> tuple[CompositeWorkerService, Engine]:
     """Assemble isolated engine, storage, encryption, OCR adapter, and composite workers."""
-    engine = create_db_engine(settings)
-    session_factory = create_session_factory(engine)
+    if engine is None:
+        engine = create_db_engine(settings)
+    if session_factory is None:
+        session_factory = create_session_factory(engine)
 
     try:
         from app.repositories.job import BackgroundJobRepository

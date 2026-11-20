@@ -3,6 +3,7 @@
 import React, { useState, useRef } from "react";
 import { X, UploadCloud, Shield, ArrowRight, AlertCircle, CheckCircle2 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
+import { UploadProgress, ButtonLoader, type UploadProcessingStatus } from "../loading";
 
 export function UploadDocumentModal() {
   const { isUploadModalOpen, setIsUploadModalOpen, uploadDocument, activeProject } = useLiveApp();
@@ -11,6 +12,7 @@ export function UploadDocumentModal() {
   const [docCategory, setDocCategory] = useState<"team_roster" | "meeting_notes" | "project_document">("project_document");
   const [docSubtype, setDocSubtype] = useState("prd");
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadStage, setUploadStage] = useState<UploadProcessingStatus>("selected");
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -45,15 +47,28 @@ export function UploadDocumentModal() {
     }
     setError(null);
     setIsUploading(true);
+    setUploadStage("uploading");
     try {
+      // Simulate stage transition to encrypting & extracting
+      const stageTimer = setTimeout(() => {
+        setUploadStage("encrypting");
+      }, 700);
+
       await uploadDocument(selectedFile, customTitle.trim() || undefined, {
         documentCategory: docCategory,
         documentSubtype: docCategory === "project_document" ? docSubtype : undefined,
       });
-      setSelectedFile(null);
-      setCustomTitle("");
-      setDocCategory("project_document");
+      clearTimeout(stageTimer);
+      setUploadStage("completed");
+      setTimeout(() => {
+        setSelectedFile(null);
+        setCustomTitle("");
+        setDocCategory("project_document");
+        setUploadStage("selected");
+        setIsUploadModalOpen(false);
+      }, 1000);
     } catch (err: unknown) {
+      setUploadStage("failed");
       setError(err instanceof Error ? err.message : "Failed to upload document");
     } finally {
       setIsUploading(false);
@@ -229,30 +244,50 @@ export function UploadDocumentModal() {
             />
           </div>
 
+          {/* Upload Progress Pipeline (when active or complete) */}
+          {(isUploading || uploadStage === "completed" || uploadStage === "failed") && selectedFile && (
+            <div className="pt-2">
+              <UploadProgress
+                fileName={selectedFile.name}
+                fileSizeBytes={selectedFile.size}
+                status={uploadStage}
+                errorMessage={error || undefined}
+                onRetry={() => {
+                  setError(null);
+                  setUploadStage("selected");
+                }}
+              />
+            </div>
+          )}
+
           {/* Security Notice */}
           <div className="p-3 rounded-lg bg-emerald-50/60 border border-emerald-200/60 flex items-start gap-2.5 text-emerald-950 text-[11px] leading-relaxed">
             <Shield className="w-4 h-4 text-[#249E91] shrink-0 mt-0.5" />
             <div>
-              <span className="font-semibold">Client-Side Envelope Encryption:</span> All original documents are encrypted with AES-256-GCM before storage and indexed with Nomics 768-dim embeddings in project-isolated vector collections.
+              <span className="font-semibold">End-to-End Encryption &amp; Isolation:</span> All original documents are encrypted before storage and indexed in project-isolated, private knowledge collections.
             </div>
           </div>
 
           <div className="pt-2 flex items-center justify-end gap-3 border-t border-[#DCE3EB]">
             <button
               type="button"
+              disabled={isUploading}
               onClick={() => setIsUploadModalOpen(false)}
-              className="px-4 py-2 rounded-lg border border-[#DCE3EB] text-xs font-semibold text-[#69778D] hover:bg-[#F4F6F9]"
+              className="px-4 py-2 rounded-lg border border-[#DCE3EB] text-xs font-semibold text-[#69778D] hover:bg-[#F4F6F9] disabled:opacity-50"
             >
               Cancel
             </button>
-            <button
+            <ButtonLoader
               type="submit"
-              disabled={isUploading || !selectedFile}
-              className="px-4 py-2 rounded-lg bg-[#249E91] hover:bg-[#1D8277] text-white text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+              disabled={!selectedFile || isUploading}
+              isLoading={isUploading}
+              loadingText="Ingesting Evidence..."
+              variant="teal"
+              icon={<ArrowRight className="w-3.5 h-3.5" />}
+              className="px-4 py-2 rounded-lg text-xs font-semibold"
             >
-              <span>{isUploading ? "Ingesting & Encrypting..." : "Upload & Ingest Evidence"}</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
+              Upload &amp; Ingest Evidence
+            </ButtonLoader>
           </div>
         </form>
       </div>

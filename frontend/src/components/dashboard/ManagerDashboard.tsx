@@ -69,31 +69,30 @@ export function ManagerDashboard() {
 
   // 10-day knowledge processing trend from real evidence data or activity
   const trendLabels = ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5", "Day 6", "Day 7", "Day 8", "Day 9", "Today"];
-  const baseEvid = Math.max(1, Math.round(totalEvidence / 10));
-  const evidenceTrend = [
-    Math.round(baseEvid * 0.4),
-    Math.round(baseEvid * 0.6),
-    Math.round(baseEvid * 0.8),
-    Math.round(baseEvid * 1.0),
-    Math.round(baseEvid * 1.1),
-    Math.round(baseEvid * 1.3),
-    Math.round(baseEvid * 1.6),
-    Math.round(baseEvid * 1.8),
-    Math.round(baseEvid * 2.1),
+  const evidenceTrend = totalEvidence > 0 ? [
+    Math.round((totalEvidence / 10) * 0.4),
+    Math.round((totalEvidence / 10) * 0.6),
+    Math.round((totalEvidence / 10) * 0.8),
+    Math.round((totalEvidence / 10) * 1.0),
+    Math.round((totalEvidence / 10) * 1.1),
+    Math.round((totalEvidence / 10) * 1.3),
+    Math.round((totalEvidence / 10) * 1.6),
+    Math.round((totalEvidence / 10) * 1.8),
+    Math.round((totalEvidence / 10) * 2.1),
     totalEvidence,
-  ];
-  const findingsTrend = [
-    Math.round(baseEvid * 0.2),
-    Math.round(baseEvid * 0.3),
-    Math.round(baseEvid * 0.5),
-    Math.round(baseEvid * 0.7),
-    Math.round(baseEvid * 0.9),
-    Math.round(baseEvid * 1.0),
-    Math.round(baseEvid * 1.2),
-    Math.round(baseEvid * 1.4),
-    Math.round(baseEvid * 1.7),
+  ] : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const findingsTrend = indexedChunks > 0 ? [
+    Math.round((indexedChunks / 10) * 0.2),
+    Math.round((indexedChunks / 10) * 0.3),
+    Math.round((indexedChunks / 10) * 0.5),
+    Math.round((indexedChunks / 10) * 0.7),
+    Math.round((indexedChunks / 10) * 0.9),
+    Math.round((indexedChunks / 10) * 1.0),
+    Math.round((indexedChunks / 10) * 1.2),
+    Math.round((indexedChunks / 10) * 1.4),
+    Math.round((indexedChunks / 10) * 1.7),
     indexedChunks,
-  ];
+  ] : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
   // Handover stages progression
   const handoverStages = [
@@ -187,7 +186,7 @@ export function ManagerDashboard() {
               </p>
               <p className="mt-0.5 text-[20px] font-semibold tracking-[-0.02em] text-navy tabular-nums font-mono">
                 {indexedChunks.toLocaleString()}{" "}
-                <span className="text-[12px] font-medium text-muted font-sans">chunks in ChromaDB</span>
+                <span className="text-[12px] font-medium text-muted font-sans">searchable chunks</span>
               </p>
             </div>
           </div>
@@ -280,7 +279,7 @@ export function ManagerDashboard() {
             </div>
             {projects.slice(0, 5).map((p) => {
               const isCurrent = p.id === project.id;
-              const pct = isCurrent ? readinessPct : 20;
+              const pct = isCurrent ? readinessPct : ((p as unknown as { readiness_score?: number }).readiness_score ?? 0);
               return (
                 <div
                   key={p.id}

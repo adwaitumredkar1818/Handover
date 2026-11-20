@@ -1255,3 +1255,28 @@ class HandoverSignoffWorkspaceResponse(BaseModel):
     eligible_recipients: list[ResponsibilityParticipantSummary] = Field(default_factory=list)
     signoff_history: list[HandoverSignoffResponse] = Field(default_factory=list)
     activity_history: list[HandoverStage5ActivityItem] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Project Successor Onboarding Progress Schemas
+# ---------------------------------------------------------------------------
+
+
+class UpdateOnboardingStepRequest(BaseModel):
+    is_completed: bool = Field(default=True, description="Whether the step is completed")
+
+
+class OnboardingStepProgressItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    step_id: str
+    is_completed: bool
+    completed_at: datetime | None = None
+
+
+class OnboardingProgressResponse(BaseModel):
+    project_id: uuid.UUID
+    user_id: uuid.UUID
+    completed_steps: dict[str, bool] = Field(default_factory=dict)
+    items: list[OnboardingStepProgressItem] = Field(default_factory=list)
+

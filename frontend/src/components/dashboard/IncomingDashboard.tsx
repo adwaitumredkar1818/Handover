@@ -35,6 +35,7 @@ export function IncomingDashboard() {
     notifications,
     members,
     user,
+    handoverCases,
   } = useLiveApp();
 
   const project = activeProject ?? projects[0] ?? null;
@@ -84,7 +85,7 @@ export function IncomingDashboard() {
         items={[
           {
             label: "Received handover",
-            value: "1 active",
+            value: handoverCases && handoverCases.length > 0 ? `${handoverCases.length} active` : "0 active",
             hint: `${project.name}`,
             tone: "blue",
             onClick: () => router.push("/handover"),

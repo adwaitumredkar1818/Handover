@@ -36,6 +36,7 @@ import {
   Textarea,
   cn,
 } from '../figma-ui/index'
+import { ListSkeleton } from '../loading'
 import { api } from '../../lib/api'
 import type {
   HandoverChecklistGroupDetail,
@@ -369,15 +370,9 @@ export function TransitionChecklistsPanel({
 
   if (isLoading && !workspace) {
     return (
-      <Card className="p-10">
-        <div className="flex flex-col items-center justify-center gap-3 text-center">
-          <Loader2 className="size-7 animate-spin text-brand" />
-          <p className="text-sm font-semibold text-navy">Loading transition checklists…</p>
-          <p className="text-xs text-muted">
-            Retrieving persisted mandatory gates, assignments, reviewer verification states, and audit history.
-          </p>
-        </div>
-      </Card>
+      <div className="p-4 space-y-4" role="status" aria-live="polite">
+        <ListSkeleton count={5} />
+      </div>
     )
   }
 

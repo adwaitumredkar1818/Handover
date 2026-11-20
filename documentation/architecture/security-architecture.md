@@ -76,7 +76,7 @@ The platform aggregates sensitive internal engineering and operational context (
 - **Hashed Single-Use Invitations (`organisation_invitations`)**:
   - Tokens (`secrets.token_urlsafe(48)`) are stored strictly as 64-character SHA-256 hex digests (`token_hash`) and never emitted to logs or audit metadata.
   - Acceptance requires active Bearer authentication matching the invited lowercase email (`403 INVITATION_EMAIL_MISMATCH`), single-use `pending` state, unexpired timestamp (`410 INVITATION_EXPIRED`), active parent organisation, and live re-verification that the inviter still holds invitation authority for the target role.
-  - With transactional email delivery integrated (via `gmail_smtp` in development or `resend` in production), creation responses report `invitation_delivery: "sent"` (or `"failed"` with sanitized diagnostics), while `invitation_delivery: "not_configured"` is returned when delivery is disabled. To guarantee security, `development_invitation_token` is strictly omitted (`null`) whenever `APP_ENV=production` or `EMAIL_DELIVERY_ENABLED=true`.
+  - With transactional email delivery integrated (via centralized Resend transactional delivery), creation responses report `invitation_delivery: "sent"` (or `"failed"` with sanitized diagnostics), while `invitation_delivery: "not_configured"` is returned when delivery is disabled. To guarantee security, `development_invitation_token` is strictly omitted (`null`) whenever `APP_ENV=production` or `EMAIL_DELIVERY_ENABLED=true`.
 
 ---
 

@@ -12,12 +12,14 @@ from app.services.email.errors import (
     EmailConfigurationError,
     EmailConnectionTimeoutError,
     EmailProviderError,
+    EmailRateLimitError,
     EmailRecipientRejectedError,
+    EmailValidationError,
 )
 from app.services.email.providers import (
     DisabledEmailProvider,
-    GmailSMTPEmailProvider,
     MockEmailProvider,
+    ResendEmailProvider,
 )
 from app.services.email.service import TransactionalEmailService, build_email_provider
 
@@ -32,9 +34,11 @@ __all__ = [
     "EmailMessage",
     "EmailProviderError",
     "EmailProviderProtocol",
+    "EmailRateLimitError",
     "EmailRecipientRejectedError",
-    "GmailSMTPEmailProvider",
+    "EmailValidationError",
     "MockEmailProvider",
+    "ResendEmailProvider",
     "TransactionalEmailService",
     "build_email_provider",
 ]

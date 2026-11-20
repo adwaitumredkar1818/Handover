@@ -508,6 +508,14 @@ class VerificationReviewService:
         user_id, has_manage = self._verify_viewer_access(project_ctx)
 
         cases = self.repo.list_project_cases_for_acl(project_id)
+        if not cases:
+            from app.services.verification_engine import VerificationEngine
+
+            engine = VerificationEngine(self.session)
+            sync_res = engine.sync_project_findings(project_id)
+            if sync_res.get("cases_created", 0) > 0:
+                self.session.commit()
+                cases = self.repo.list_project_cases_for_acl(project_id)
         acl_map, fallback_target_evs = self._batch_evaluate_cases_acl(
             cases, project_id=project_id, user_id=user_id, has_manage=has_manage
         )
@@ -595,6 +603,18 @@ class VerificationReviewService:
             sort_by=sort_by,
             sort_dir=sort_dir,
         )
+        if not all_project_cases:
+            from app.services.verification_engine import VerificationEngine
+
+            engine = VerificationEngine(self.session)
+            sync_res = engine.sync_project_findings(project_id)
+            if sync_res.get("cases_created", 0) > 0:
+                self.session.commit()
+                all_project_cases = self.repo.list_project_cases_for_acl(
+                    project_id,
+                    sort_by=sort_by,
+                    sort_dir=sort_dir,
+                )
         acl_map, fallback_target_evs = self._batch_evaluate_cases_acl(
             all_project_cases, project_id=project_id, user_id=user_id, has_manage=has_manage
         )
@@ -618,7 +638,13 @@ class VerificationReviewService:
                 continue
             visible_cases.append((case, accessible_refs, restricted_cnt))
             if case.domain:
-                facet_domains.add(case.domain)
+                from app.services.knowledge_domains import resolve_canonical_domain
+
+                try:
+                    canon = resolve_canonical_domain(case.domain)
+                    facet_domains.add(canon.value)
+                except (ValueError, KeyError):
+                    facet_domains.add(case.domain)
             if case.source_provider and restricted_cnt == 0:
                 facet_sources.add(case.source_provider)
             elif accessible_refs:
@@ -638,8 +664,25 @@ class VerificationReviewService:
         for case, accessible_refs, restricted_cnt in visible_cases:
             if status and case.case_status != status:
                 continue
-            if domain and case.domain != domain:
-                continue
+            if domain:
+                from app.services.knowledge_domains import (
+                    canonical_domain_to_legacy_category,
+                    resolve_canonical_domain,
+                )
+
+                dom_clean = domain.strip()
+                allowed_doms: set[str] = {dom_clean, dom_clean.lower(), dom_clean.upper()}
+                try:
+                    c_dom = resolve_canonical_domain(dom_clean)
+                    allowed_doms.add(c_dom.value)
+                    allowed_doms.add(c_dom.value.lower())
+                    leg_cat = canonical_domain_to_legacy_category(c_dom)
+                    allowed_doms.add(leg_cat)
+                    allowed_doms.add(leg_cat.upper())
+                except (ValueError, KeyError):
+                    pass
+                if case.domain not in allowed_doms and (case.domain or "").lower() not in allowed_doms:
+                    continue
             if source and case.source_provider != source:
                 continue
             if reviewer_id and case.assigned_reviewer_id != reviewer_id:

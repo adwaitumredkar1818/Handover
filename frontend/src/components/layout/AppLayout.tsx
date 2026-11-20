@@ -6,7 +6,8 @@ import { Sidebar, RoleBadge } from "./Sidebar";
 import { TopNav } from "./TopNav";
 import { CommandPalette } from "./CommandPalette";
 import { ToastContainer } from "../common/ToastContainer";
-import { Logo, BrandLoadingScreen } from "../brand";
+import { Logo } from "../brand";
+import { AppLoadingScreen, PageLoadingBar } from "../loading";
 import { CreateOrganisationModal } from "../modals/CreateOrganisationModal";
 import { CreateProjectModal } from "../modals/CreateProjectModal";
 import { UploadDocumentModal } from "../modals/UploadDocumentModal";
@@ -82,7 +83,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
     pathname?.startsWith("/invitations/") ||
     pathname?.startsWith("/auth/");
 
-  const isPublicRoute = pathname === "/" || pathname === "/landing" || isAuthPage;
+  const isPublicRoute =
+    pathname === "/" ||
+    pathname === "/landing" ||
+    pathname === "/developers" ||
+    isAuthPage;
 
   // Protect all non-public routes by cleanly redirecting unauthenticated users to /login
   useEffect(() => {
@@ -117,6 +122,12 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex h-dvh overflow-hidden bg-canvas font-sans antialiased text-navy">
+      {/* Top Route Navigation Bar */}
+      <PageLoadingBar />
+
+      {/* Full-Screen Application Bootstrap Loader */}
+      <AppLoadingScreen isLoading={!isMounted || !user || isLoadingAuth} />
+
       {/* Desktop Persistent Sidebar & Mobile Drawer */}
       <Sidebar
         collapsed={collapsed}
@@ -140,8 +151,6 @@ export function AppLayout({ children }: { children: ReactNode }) {
               : "overflow-y-auto"
           }`}
         >
-          <BrandLoadingScreen isLoading={!isMounted || !user || isLoadingAuth} />
-
           <div
             className={`animate-fade mx-auto w-full px-4 sm:px-6 lg:px-8 ${
               isVerificationViewportRoute

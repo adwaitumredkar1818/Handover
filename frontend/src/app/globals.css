@@ -375,3 +375,411 @@
   .no-print { display: none !important; }
   body { background: white; }
 }
+
+/* ==========================================================================
+   Handover Developer Page — Developer Card (Uiverse.io by Smit-Prajapati)
+   & Cyan Energy Effect (Uiverse.io by alexs_8179)
+   ========================================================================== */
+
+/* Keyframe animations for Cyan Energy Platform (Uiverse.io by Juanes200122 / alexs_8179) */
+@keyframes devEnergyBounce {
+  0%, 100% {
+    transform: translate(0px, 0px) rotate(45deg);
+  }
+  50% {
+    transform: translate(0px, 10px) rotate(45deg);
+  }
+}
+
+@keyframes devEnergyBounce2 {
+  0%, 100% {
+    transform: translate(0px, 0px) rotate(45deg);
+  }
+  50% {
+    transform: translate(0px, 20px) rotate(45deg);
+  }
+}
+
+@keyframes devEnergyUmbral {
+  0% {
+    stop-color: rgba(0, 242, 254, 0);
+  }
+  50% {
+    stop-color: rgba(0, 242, 254, 0.55);
+  }
+  100% {
+    stop-color: rgba(0, 242, 254, 0);
+  }
+}
+
+@keyframes devEnergyParticles {
+  0%, 100% {
+    transform: translate(0px, 0px) rotate(45deg);
+  }
+  50% {
+    transform: translate(0px, -15px) rotate(45deg);
+  }
+}
+
+.dev-energy-animated-stop {
+  animation: devEnergyUmbral 2.5s ease-in-out infinite;
+}
+
+.dev-energy-particles {
+  animation: devEnergyParticles 3.5s ease-in-out infinite;
+  transform-origin: 100px 100px;
+}
+
+.dev-energy-bounce {
+  animation: devEnergyBounce 2s ease-in-out infinite;
+  transform-origin: 100px 100px;
+}
+
+.dev-energy-bounce2 {
+  animation: devEnergyBounce2 2s ease-in-out infinite;
+  animation-delay: 0.35s;
+  transform-origin: 100px 100px;
+}
+
+/* Developer Card Base */
+.dev-card {
+  width: 340px !important;
+  height: 440px !important;
+  background: #ffffff !important;
+  border-radius: 36px !important;
+  padding: 4px !important;
+  position: relative !important;
+  border: 1px solid #d9e1f0;
+  box-shadow: 0 16px 36px -12px rgba(32, 54, 83, 0.14), 0 20px 36px -8px rgba(0, 242, 254, 0.32);
+  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1);
+  overflow: hidden;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.dev-card:hover,
+.dev-card[data-expanded="true"] {
+  border-top-left-radius: 46px !important;
+  box-shadow: 0 24px 48px -12px rgba(49, 95, 186, 0.28), 0 26px 44px -6px rgba(0, 242, 254, 0.48);
+}
+
+/* Developer Card Top-Right Mail Action */
+.dev-card-mail {
+  position: absolute;
+  right: 1.25rem;
+  top: 1.15rem;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(217, 225, 240, 0.9);
+  border-radius: 50%;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  transition: all 0.25s ease;
+  text-decoration: none;
+}
+
+.dev-card-mail svg {
+  width: 15px;
+  height: 15px;
+  stroke: #7997be;
+  stroke-width: 2.2px;
+  transition: all 0.25s ease;
+}
+
+.dev-card-mail:hover {
+  background: #ffffff;
+  transform: scale(1.08);
+  box-shadow: 0 4px 10px rgba(32, 54, 83, 0.16);
+}
+
+.dev-card-mail:hover svg {
+  stroke: #315fba;
+}
+
+/* Developer Profile Picture Container (Full Card Illustration) */
+.dev-card-profile-pic {
+  position: absolute !important;
+  width: calc(100% - 8px) !important;
+  height: calc(100% - 8px) !important;
+  top: 4px !important;
+  left: 4px !important;
+  border-radius: 32px !important;
+  z-index: 1 !important;
+  overflow: hidden !important;
+  background: #f6f8fc;
+  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1);
+}
+
+.dev-card-profile-pic img {
+  object-fit: cover !important;
+  width: 100% !important;
+  height: 100% !important;
+  object-position: center top !important;
+  transition: transform 0.5s ease-in-out;
+}
+
+.dev-card:hover .dev-card-profile-pic img,
+.dev-card[data-expanded="true"] .dev-card-profile-pic img {
+  transform: scale(1.04);
+}
+
+/* Expanding Bottom Section */
+.dev-card-bottom {
+  position: absolute !important;
+  bottom: 4px !important;
+  left: 4px !important;
+  right: 4px !important;
+  background: linear-gradient(150deg, rgba(16, 26, 42, 0.94) 0%, rgba(24, 40, 64, 0.96) 50%, rgba(32, 56, 92, 0.98) 100%) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  top: 73% !important;
+  border-radius: 28px !important;
+  z-index: 3 !important;
+  box-shadow: rgba(17, 32, 52, 0.3) 0px 4px 12px 0px inset, 0 -2px 10px rgba(0, 242, 254, 0.15);
+  overflow: hidden;
+  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1);
+  padding: 10px 14px 10px 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+/* Default State Preview: Developer name & role clearly visible without hovering */
+.dev-card-default-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  opacity: 1;
+  transition: opacity 0.3s ease;
+  pointer-events: auto;
+}
+
+.dev-card-default-name {
+  font-size: 1.08rem;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: -0.02em;
+  line-height: 1.22;
+}
+
+.dev-card-default-role {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #38bdf8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Expanded Content Container */
+.dev-card-content {
+  opacity: 0;
+  transform: translateY(14px);
+  pointer-events: none;
+  height: 0;
+  overflow: hidden;
+  transition: opacity 0.35s ease 0.1s, transform 0.35s ease 0.1s;
+}
+
+/* Expanded Header: Avatar badge on left, name & role on right */
+.dev-card-expanded-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dev-card-avatar-thumb {
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2.5px solid #ffffff;
+  box-shadow: 0 0 14px rgba(0, 242, 254, 0.4);
+  flex-shrink: 0;
+  background: #112034;
+}
+
+.dev-card-header-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.dev-card-name {
+  display: block;
+  font-size: 1.2rem;
+  color: #ffffff;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.dev-card-role-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #38bdf8;
+  margin-top: 0.25rem;
+  background: rgba(56, 189, 248, 0.14);
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  width: fit-content;
+}
+
+.dev-card-divider {
+  width: 100%;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.12);
+  margin: 10px 0 10px 0;
+}
+
+/* Full description clearly readable without any truncation or ellipsis */
+.dev-card-about {
+  display: block !important;
+  overflow: visible !important;
+  font-size: 0.81rem;
+  line-height: 1.58;
+  color: rgba(241, 245, 249, 0.94);
+  margin: 0 0 10px 0;
+  font-weight: 400;
+}
+
+.dev-card-email-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: #38bdf8;
+  text-decoration: none;
+  transition: color 0.2s ease;
+  margin-bottom: 8px;
+  width: fit-content;
+}
+
+.dev-card-email-link:hover {
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+/* Bottom Actions Container */
+.dev-card-bottom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.dev-card-social-links {
+  display: flex;
+  gap: 0.85rem;
+  align-items: center;
+}
+
+.dev-card-social-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  transition: all 0.25s ease;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
+  text-decoration: none;
+}
+
+.dev-card-social-link svg {
+  width: 17px;
+  height: 17px;
+  fill: currentColor;
+  transition: all 0.25s ease;
+}
+
+.dev-card-social-link:hover {
+  color: #38bdf8;
+  transform: scale(1.2);
+}
+
+.dev-card-contact-btn {
+  background: #ffffff;
+  color: #203653;
+  border: none;
+  border-radius: 20px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 0.4rem 0.85rem;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.18);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  text-decoration: none;
+  transition: all 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+  cursor: pointer;
+}
+
+.dev-card-contact-btn:hover {
+  background: #315fba;
+  color: #ffffff;
+  box-shadow: 0 6px 16px rgba(49, 95, 186, 0.35);
+  transform: translateY(-1px);
+}
+
+/* Card Hover & Expanded Transition Behaviors */
+.dev-card:hover .dev-card-bottom,
+.dev-card[data-expanded="true"] .dev-card-bottom {
+  top: 4px !important;
+  border-radius: 32px !important;
+  background: linear-gradient(160deg, rgba(14, 22, 36, 0.98) 0%, rgba(19, 32, 52, 0.98) 50%, rgba(27, 48, 80, 0.99) 100%) !important;
+  backdrop-filter: blur(24px);
+  padding: 16px 16px 14px 16px !important;
+  transition: all 0.5s cubic-bezier(0.645, 0.045, 0.355, 1);
+}
+
+.dev-card:hover .dev-card-default-preview,
+.dev-card[data-expanded="true"] .dev-card-default-preview {
+  opacity: 0;
+  height: 0;
+  margin: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.dev-card:hover .dev-card-content,
+.dev-card[data-expanded="true"] .dev-card-content {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+  height: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: visible;
+  transition: opacity 0.4s ease 0.2s, transform 0.4s ease 0.2s;
+}
+
+/* Reduced Motion Handling */
+@media (prefers-reduced-motion: reduce) {
+  .dev-card,
+  .dev-card-profile-pic,
+  .dev-card-bottom,
+  .dev-card-profile-pic img,
+  .dev-card-content,
+  .dev-card-social-link,
+  .dev-card-contact-btn,
+  .dev-card-mail,
+  .dev-energy-animated-stop,
+  .dev-energy-particles,
+  .dev-energy-bounce,
+  .dev-energy-bounce2 {
+    transition: none !important;
+    animation: none !important;
+  }
+}

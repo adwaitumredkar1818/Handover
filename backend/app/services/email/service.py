@@ -9,13 +9,14 @@ from app.core.config import Settings
 from app.services.email.base import EmailDeliveryResult, EmailMessage, EmailProviderProtocol
 from app.services.email.providers import (
     DisabledEmailProvider,
-    GmailSMTPEmailProvider,
     MockEmailProvider,
+    ResendEmailProvider,
 )
 from app.services.email.templates import (
     render_email_verification,
     render_organisation_invitation,
     render_password_reset,
+    render_platform_notification,
     render_project_invitation,
 )
 
@@ -38,21 +39,18 @@ def build_email_provider(settings: Settings) -> EmailProviderProtocol:
         return DisabledEmailProvider()
     if email_cfg.provider == "mock":
         return MockEmailProvider()
-    if email_cfg.provider == "gmail_smtp":
-        app_password = (
-            email_cfg.smtp_app_password.get_secret_value()
-            if email_cfg.smtp_app_password is not None
+    if email_cfg.provider == "resend":
+        api_key = (
+            email_cfg.resend_api_key.get_secret_value()
+            if email_cfg.resend_api_key is not None
             else None
         )
-        return GmailSMTPEmailProvider(
-            host=email_cfg.smtp_host,
-            port=email_cfg.smtp_port,
-            username=email_cfg.smtp_username,
-            app_password=app_password,
-            use_tls=email_cfg.smtp_use_tls,
+        return ResendEmailProvider(
+            api_key=api_key,
             from_address=email_cfg.from_address,
             from_name=email_cfg.from_name,
-            timeout_seconds=email_cfg.smtp_timeout_seconds,
+            sending_domain=email_cfg.sending_domain,
+            timeout_seconds=email_cfg.http_timeout_seconds,
         )
     return DisabledEmailProvider()
 
@@ -272,3 +270,115 @@ class TransactionalEmailService:
             result.status,
         )
         return result
+
+    def send_platform_notification_email(
+        self,
+        *,
+        to_email: str,
+        recipient_name: str,
+        notification_title: str,
+        message_body: str,
+        action_url: str | None = None,
+        action_label: str = "View in Handover",
+        project_name: str | None = None,
+    ) -> EmailDeliveryResult:
+        """Render and send platform notification email without leaking internal IDs."""
+        if not self._settings.email.delivery_enabled:
+            return EmailDeliveryResult(status="not_configured", provider="none")
+
+        rendered = render_platform_notification(
+            recipient_name=recipient_name,
+            notification_title=notification_title,
+            message_body=message_body,
+            action_url=action_url,
+            action_label=action_label,
+            project_name=project_name,
+        )
+        result = self._provider.send(
+            EmailMessage(
+                to_email=to_email,
+                subject=rendered.subject,
+                html_body=rendered.html_body,
+                text_body=rendered.text_body,
+                tags={"category": "platform_notification"},
+            )
+        )
+        logger.info(
+            "Platform notification email dispatch completed: provider=%s status=%s",
+            result.provider,
+            result.status,
+        )
+        return result
+
+    async def send_verification_email_async(
+        self,
+        *,
+        to_email: str,
+        recipient_name: str,
+        raw_token: str,
+    ) -> EmailDeliveryResult:
+        """Asynchronous variant of send_verification_email."""
+        if not self._settings.email.delivery_enabled:
+            return EmailDeliveryResult(status="not_configured", provider="none")
+
+        base_url = self._validated_frontend_base_url()
+        if base_url is None:
+            return EmailDeliveryResult(
+                status="failed",
+                provider=self._provider.provider_name,
+                error_message="Frontend base URL configuration is invalid.",
+            )
+
+        query = urlencode({"token": raw_token})
+        verification_url = f"{base_url}/verify-email?{query}"
+        rendered = render_email_verification(
+            verification_url=verification_url,
+            recipient_name=recipient_name,
+            expires_hours=24,
+        )
+        return await self._provider.send_async(
+            EmailMessage(
+                to_email=to_email,
+                subject=rendered.subject,
+                html_body=rendered.html_body,
+                text_body=rendered.text_body,
+                tags={"category": "email_verification"},
+            )
+        )
+
+    async def send_password_reset_email_async(
+        self,
+        *,
+        to_email: str,
+        recipient_name: str,
+        raw_token: str,
+        expires_in_minutes: int = 30,
+    ) -> EmailDeliveryResult:
+        """Asynchronous variant of send_password_reset_email."""
+        if not self._settings.email.delivery_enabled:
+            return EmailDeliveryResult(status="not_configured", provider="none")
+
+        base_url = self._validated_frontend_base_url()
+        if base_url is None:
+            return EmailDeliveryResult(
+                status="failed",
+                provider=self._provider.provider_name,
+                error_message="Frontend base URL configuration is invalid.",
+            )
+
+        query = urlencode({"token": raw_token})
+        reset_url = f"{base_url}/reset-password?{query}"
+        rendered = render_password_reset(
+            reset_url=reset_url,
+            recipient_name=recipient_name,
+            expires_in_minutes=expires_in_minutes,
+        )
+        return await self._provider.send_async(
+            EmailMessage(
+                to_email=to_email,
+                subject=rendered.subject,
+                html_body=rendered.html_body,
+                text_body=rendered.text_body,
+                tags={"category": "password_reset"},
+            )
+        )

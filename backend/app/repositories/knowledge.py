@@ -732,25 +732,51 @@ class KnowledgeRepository:
             filters.append(KnowledgeItem.is_stale.is_(False))
 
         if domain is not None and domain.strip():
-            dom_upper = domain.strip().upper()
-            dom_lower = domain.strip().lower()
+            from app.services.knowledge_domains import (
+                canonical_domain_to_legacy_category,
+                resolve_canonical_domain,
+            )
+
+            dom_clean = domain.strip()
+            allowed_values: set[str] = {dom_clean, dom_clean.upper(), dom_clean.lower()}
+            try:
+                canon_dom = resolve_canonical_domain(dom_clean)
+                allowed_values.add(canon_dom.value)
+                allowed_values.add(canon_dom.value.lower())
+                legacy_cat = canonical_domain_to_legacy_category(canon_dom)
+                allowed_values.add(legacy_cat)
+                allowed_values.add(legacy_cat.upper())
+            except (ValueError, KeyError):
+                pass
+
             filters.append(
                 or_(
-                    KnowledgeItem.primary_domain == dom_upper,
-                    KnowledgeItem.primary_domain == dom_lower,
-                    KnowledgeItem.category == domain.strip(),
-                    KnowledgeItem.category == dom_lower,
+                    KnowledgeItem.primary_domain.in_(allowed_values),
+                    KnowledgeItem.category.in_(allowed_values),
                 )
             )
         elif category is not None and category.strip():
+            from app.services.knowledge_domains import (
+                canonical_domain_to_legacy_category,
+                resolve_canonical_domain,
+            )
+
             cat_clean = category.strip()
-            cat_upper = cat_clean.upper()
-            cat_lower = cat_clean.lower()
+            allowed_values = {cat_clean, cat_clean.upper(), cat_clean.lower()}
+            try:
+                canon_dom = resolve_canonical_domain(cat_clean)
+                allowed_values.add(canon_dom.value)
+                allowed_values.add(canon_dom.value.lower())
+                legacy_cat = canonical_domain_to_legacy_category(canon_dom)
+                allowed_values.add(legacy_cat)
+                allowed_values.add(legacy_cat.upper())
+            except (ValueError, KeyError):
+                pass
+
             filters.append(
                 or_(
-                    KnowledgeItem.category == cat_clean,
-                    KnowledgeItem.category == cat_lower,
-                    KnowledgeItem.primary_domain == cat_upper,
+                    KnowledgeItem.category.in_(allowed_values),
+                    KnowledgeItem.primary_domain.in_(allowed_values),
                 )
             )
         if epistemic_status is not None:

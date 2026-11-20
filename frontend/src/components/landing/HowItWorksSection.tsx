@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useReveal } from "./hooks/useReveal";
 import { useElementScrollProgress } from "./motion/useElementScrollProgress";
+import { useReducedMotion } from "./motion/useReducedMotion";
 
 const STEPS = [
   {
@@ -236,9 +237,10 @@ function StepPreview({ index }: { index: number }) {
 
 export function HowItWorksSection() {
   const revealRef = useReveal<HTMLDivElement>();
+  const reducedMotion = useReducedMotion();
   const { ref: scrollRef, progress: scrollProgress } = useElementScrollProgress<HTMLElement>({
-    startOffset: 0.85,
-    endOffset: 0.2,
+    mode: "pinned",
+    navOffset: 64,
   });
 
   const scrollDerivedStep = Math.min(4, Math.floor(scrollProgress * 5));
@@ -252,26 +254,41 @@ export function HowItWorksSection() {
     <section
       ref={scrollRef}
       id="how"
-      className="scroll-mt-20 bg-white py-24 sm:py-32 overflow-x-clip border-b border-[#D9E1F0]/70"
+      className="scroll-mt-20 bg-white overflow-x-clip border-b border-[#D9E1F0]/70 py-16 lg:py-0 lg:h-[320vh] motion-reduce:py-24 motion-reduce:sm:py-32 motion-reduce:lg:h-auto"
     >
-      <div ref={revealRef} className="mx-auto w-full max-w-[1240px] px-5 sm:px-8">
-        {/* Header */}
-        <div className="grid gap-6 lg:grid-cols-[1fr_auto] lg:items-end">
-          <div>
-            <div className="reveal">
-              <p className="flex items-center gap-2 text-[12.5px] font-semibold uppercase tracking-[0.16em] text-[#315FBA]">
-                <span className="h-px w-6 bg-current opacity-60" />
-                How It Works
-              </p>
+      <div className="lg:sticky lg:top-16 lg:h-[calc(100vh-4rem)] lg:flex lg:flex-col lg:justify-center motion-reduce:lg:static motion-reduce:lg:h-auto motion-reduce:lg:flex-initial">
+        <div ref={revealRef} className="mx-auto w-full max-w-[1240px] px-5 sm:px-8">
+          {/* Header */}
+          <div className="grid gap-6 lg:grid-cols-[1fr_auto] lg:items-end">
+            <div>
+              <div className="reveal">
+                <p className="flex items-center gap-2 text-[12.5px] font-semibold uppercase tracking-[0.16em] text-[#315FBA]">
+                  <span className="h-px w-6 bg-current opacity-60" />
+                  How It Works
+                </p>
+              </div>
+              <h2 className="reveal mt-3 sm:mt-5 max-w-3xl text-[30px] font-semibold leading-[1.08] tracking-[-0.035em] text-[#203653] sm:text-[40px] lg:text-[46px]">
+                From scattered information to a structured handover.
+              </h2>
             </div>
-            <h2 className="reveal mt-5 max-w-3xl text-[34px] font-semibold leading-[1.06] tracking-[-0.035em] text-[#203653] sm:text-[44px] lg:text-[52px]">
-              From scattered information to a structured handover.
-            </h2>
+            <div className="reveal lg:text-right">
+              <p className="text-[13.5px] text-[#718096]">
+                Scroll to advance or select any stage directly
+              </p>
+              <div className="hidden lg:flex items-center justify-end gap-2 mt-1.5 font-mono text-[11px] text-[#718096]">
+                <span
+                  className={`size-1.5 rounded-full ${
+                    activeStep === 4 ? "bg-[#299B80]" : "bg-[#315FBA] animate-pulse"
+                  }`}
+                />
+                <span>
+                  {activeStep === 4
+                    ? "Stage 05 of 05 · Complete · Scroll to continue ↓"
+                    : `Stage 0${activeStep + 1} of 05 · ${STEPS[activeStep]?.key}`}
+                </span>
+              </div>
+            </div>
           </div>
-          <p className="reveal text-[14px] text-[#718096]">
-            Scroll to advance or select any stage directly
-          </p>
-        </div>
 
         {/* Canonical 5-Stage Timeline Stepper */}
         <div className="relative mt-14">
@@ -364,6 +381,7 @@ export function HowItWorksSection() {
           </div>
         </div>
       </div>
+    </div>
     </section>
   );
 }

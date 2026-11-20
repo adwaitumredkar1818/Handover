@@ -267,23 +267,27 @@ class ProjectIntelligenceOrchestrator:
         self.registry.update_state(state)
 
         # Policy-based multi-agent selection based on query facets
-        query_lower = state.query.lower()
+        query_lower = state.query.lower().strip().rstrip("?!.,")
+        is_greeting = query_lower in {
+            "hi", "hello", "hey", "greetings", "good morning", "good afternoon", "good evening", "who are you", "what can you do", "help"
+        }
         candidate_agent_ids: list[str] = []
 
-        if any(w in query_lower for w in ("architecture", "adr", "decision", "choice", "design")):
-            candidate_agent_ids.append("decision_agent")
-        if any(w in query_lower for w in ("code", "commit", "pr", "pull request", "git", "function", "diff")):
-            candidate_agent_ids.append("engineering_agent")
-        if any(w in query_lower for w in ("database", "table", "schema", "postgres", "sql", "migration", "column")):
-            candidate_agent_ids.append("database_agent")
-        if any(w in query_lower for w in ("api", "endpoint", "route", "openapi", "rest")):
-            candidate_agent_ids.append("api_agent")
-        if any(w in query_lower for w in ("handover", "transition", "checklist", "readiness")):
-            candidate_agent_ids.append("planning_agent")
+        if not is_greeting:
+            if any(w in query_lower for w in ("architecture", "adr", "decision", "choice", "design")):
+                candidate_agent_ids.append("decision_agent")
+            if any(w in query_lower for w in ("code", "commit", "pr", "pull request", "git", "function", "diff")):
+                candidate_agent_ids.append("engineering_agent")
+            if any(w in query_lower for w in ("database", "table", "schema", "postgres", "sql", "migration", "column")):
+                candidate_agent_ids.append("database_agent")
+            if any(w in query_lower for w in ("api", "endpoint", "route", "openapi", "rest")):
+                candidate_agent_ids.append("api_agent")
+            if any(w in query_lower for w in ("handover", "transition", "checklist", "readiness")):
+                candidate_agent_ids.append("planning_agent")
 
-        # Fallback to knowledge_agent if no specific domain triggered
-        if not candidate_agent_ids:
-            candidate_agent_ids.append("knowledge_agent")
+            # Fallback to knowledge_agent if no specific domain triggered
+            if not candidate_agent_ids:
+                candidate_agent_ids.append("knowledge_agent")
 
         # Enforce bounded execution (max 2 agents) to preserve token budget & latency
         selected_agent_ids = candidate_agent_ids[:2]
@@ -381,6 +385,10 @@ class ProjectIntelligenceOrchestrator:
             for f in state.agent_findings:
                 agent_summary_lines.append(f"[{f.agent_id}]: {f.claim_text}")
             combined_evidence += "\n".join(agent_summary_lines)
+
+        query_clean = state.query.strip().lower().rstrip("?!.,")
+        if query_clean in {"hi", "hello", "hey", "greetings", "good morning", "good afternoon", "good evening", "who are you", "what can you do", "help"}:
+            combined_evidence = ""
 
         payload, telemetry = self.llm_reasoner.generate_answer(
             question=state.query,
@@ -480,6 +488,11 @@ class ProjectIntelligenceOrchestrator:
         project_ctx: ProjectContext,
     ) -> InvestigationState:
         """Persist user turn, assistant message, citations, and investigation trace."""
+        try:
+            self.session.rollback()
+        except Exception:
+            pass
+
         # Persist Assistant Message Turn
         structured_payload = {
             "investigation_id": str(state.investigation_id),

@@ -20,6 +20,7 @@ import { IncomingDashboard } from "./IncomingDashboard";
 import { MemberDashboard } from "./MemberDashboard";
 import { WorkspaceDashboard } from "./WorkspaceDashboard";
 import { EmptyWorkspaceDashboard } from "./EmptyWorkspaceDashboard";
+import { PageSkeleton } from "../loading";
 
 export type DashboardRole = "manager" | "reviewer" | "outgoing" | "incoming" | "member" | "workspace" | "empty";
 
@@ -33,6 +34,7 @@ export function DashboardRouter() {
     setActiveProject,
     members,
     overview,
+    isLoadingOverview,
     setIsCreateProjectModalOpen,
     setIsAddMemberModalOpen,
   } = useLiveApp();
@@ -386,13 +388,21 @@ export function DashboardRouter() {
 
       {/* 3. Render Resolved Dashboard View */}
       <div className="animate-fade">
-        {activeRole === "empty" && <EmptyWorkspaceDashboard />}
-        {activeRole === "workspace" && <WorkspaceDashboard />}
-        {activeRole === "manager" && <ManagerDashboard />}
-        {activeRole === "reviewer" && <ReviewerDashboard />}
-        {activeRole === "outgoing" && <OutgoingDashboard />}
-        {activeRole === "incoming" && <IncomingDashboard />}
-        {activeRole === "member" && <MemberDashboard />}
+        {isLoadingOverview && activeProject && (!overview || overview.project_id !== activeProject.id) ? (
+          <div className="pt-2">
+            <PageSkeleton layout="dashboard" />
+          </div>
+        ) : (
+          <>
+            {activeRole === "empty" && <EmptyWorkspaceDashboard />}
+            {activeRole === "workspace" && <WorkspaceDashboard />}
+            {activeRole === "manager" && <ManagerDashboard />}
+            {activeRole === "reviewer" && <ReviewerDashboard />}
+            {activeRole === "outgoing" && <OutgoingDashboard />}
+            {activeRole === "incoming" && <IncomingDashboard />}
+            {activeRole === "member" && <MemberDashboard />}
+          </>
+        )}
       </div>
     </div>
   );

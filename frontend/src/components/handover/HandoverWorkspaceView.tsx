@@ -22,6 +22,7 @@ import {
 import { useLiveApp } from "../../context/LiveAppContext";
 import { Button } from "../ui";
 import { api } from "../../lib/api";
+import { PageSkeleton, ButtonLoader } from "../loading";
 
 export function HandoverWorkspaceView() {
   const { activeProject, user } = useLiveApp();
@@ -127,6 +128,10 @@ export function HandoverWorkspaceView() {
     );
   }
 
+  if (isLoading && cases.length === 0) {
+    return <PageSkeleton layout="split" />;
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -154,14 +159,17 @@ export function HandoverWorkspaceView() {
           >
             Refresh
           </Button>
-          <Button
+          <ButtonLoader
             variant="primary"
-            icon={Package}
+            icon={<Package className="w-4 h-4" />}
             onClick={handleAssemble}
-            disabled={isAssembling || !selectedCase}
+            disabled={!selectedCase || isAssembling}
+            isLoading={isAssembling}
+            loadingText="Assembling Package..."
+            className="px-4 py-2 text-xs font-semibold rounded-lg shadow-xs"
           >
-            {isAssembling ? "Assembling Package..." : "Assemble New Dossier"}
-          </Button>
+            Assemble New Dossier
+          </ButtonLoader>
         </div>
       </div>
 

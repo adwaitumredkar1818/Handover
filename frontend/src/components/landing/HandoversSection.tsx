@@ -5,6 +5,7 @@ import { ArrowRight, Check, ShieldCheck, FileCheck2, UserCheck, BarChart3, Link2
 import { OrganicScene } from "../brand/OrganicScene";
 import { useReveal } from "./hooks/useReveal";
 import { useElementScrollProgress } from "./motion/useElementScrollProgress";
+import { useReducedMotion } from "./motion/useReducedMotion";
 
 const TABS = [
   "Overview",
@@ -39,9 +40,10 @@ const DOMAIN_BREAKDOWN = [
 
 export function HandoversSection() {
   const revealRef = useReveal<HTMLDivElement>();
+  const reducedMotion = useReducedMotion();
   const { ref: scrollRef, progress: scrollProgress } = useElementScrollProgress<HTMLElement>({
-    startOffset: 0.85,
-    endOffset: 0.25,
+    mode: "pinned",
+    navOffset: 64,
   });
   const [activeTab, setActiveTab] = useState<(typeof TABS)[number]>("Overview");
   const [selectedRolePackage, setSelectedRolePackage] = useState<
@@ -54,37 +56,38 @@ export function HandoversSection() {
     <section
       ref={scrollRef}
       id="handovers"
-      className="relative scroll-mt-20 py-24 sm:py-32 overflow-x-clip"
+      className="relative scroll-mt-20 overflow-x-clip py-16 lg:py-0 lg:h-[240vh] motion-reduce:py-24 motion-reduce:sm:py-32 motion-reduce:lg:h-auto"
     >
-      <div ref={revealRef} className="mx-auto w-full max-w-[1240px] px-5 sm:px-8">
-        <div className="grid items-start gap-14 grid-cols-1 lg:grid-cols-[0.78fr_1.22fr] lg:gap-16">
-          {/* Left Narrative Column */}
-          <div className="lg:sticky lg:top-24 self-start space-y-6">
-            <div>
-              <div className="reveal">
-                <p className="flex items-center gap-2 text-[12.5px] font-semibold uppercase tracking-[0.16em] text-[#315FBA]">
-                  <span className="h-px w-6 bg-current opacity-60" />
-                  Handover Dossier
+      <div className="lg:sticky lg:top-16 lg:h-[calc(100vh-4rem)] lg:flex lg:flex-col lg:justify-center motion-reduce:lg:static motion-reduce:lg:h-auto motion-reduce:lg:flex-initial">
+        <div ref={revealRef} className="mx-auto w-full max-w-[1240px] px-5 sm:px-8">
+          <div className="grid items-start gap-10 lg:gap-14 grid-cols-1 lg:grid-cols-[0.78fr_1.22fr]">
+            {/* Left Narrative Column */}
+            <div className="space-y-5">
+              <div>
+                <div className="reveal">
+                  <p className="flex items-center gap-2 text-[12.5px] font-semibold uppercase tracking-[0.16em] text-[#315FBA]">
+                    <span className="h-px w-6 bg-current opacity-60" />
+                    Handover Dossier
+                  </p>
+                </div>
+                <h2 className="reveal mt-3 sm:mt-4 text-[30px] font-semibold leading-[1.08] tracking-[-0.035em] text-[#203653] sm:text-[38px] lg:text-[44px]">
+                  Everything the next person needs.
+                </h2>
+                <p className="reveal mt-3 text-[15px] sm:text-[16px] leading-[1.6] text-[#56657c]">
+                  Bring reconstructed, evidence-backed knowledge together into an auditable transition dossier across eight canonical domains—covering technical architecture, finished and unfinished work, operational procedures, risks, and review states.
                 </p>
               </div>
-              <h2 className="reveal mt-5 text-[34px] font-semibold leading-[1.06] tracking-[-0.035em] text-[#203653] sm:text-[44px] lg:text-[50px]">
-                Everything the next person needs.
-              </h2>
-              <p className="reveal mt-6 text-[17px] leading-[1.65] text-[#56657c]">
-                Bring reconstructed, evidence-backed knowledge together into an auditable transition dossier across eight canonical domains—covering technical architecture, finished and unfinished work, operational procedures, risks, and review states.
-              </p>
-            </div>
 
-            {/* Scroll-driven Dossier Assembly Strata Card */}
-            <div className="reveal rounded-2xl border border-[#D9E1F0] bg-[#F8FAFD] p-4 shadow-xs">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#315FBA]">
-                  Scroll-Driven Dossier Assembly
-                </span>
-                <span className="font-mono text-[10px] text-[#718096]">
-                  Stage {assemblyStepCount}/7
-                </span>
-              </div>
+              {/* Scroll-driven Dossier Assembly Strata Card */}
+              <div className="reveal rounded-2xl border border-[#D9E1F0] bg-[#F8FAFD] p-4 shadow-xs">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#315FBA]">
+                    Scroll-Driven Dossier Assembly
+                  </span>
+                  <span className="font-mono text-[10px] text-[#718096]">
+                    {assemblyStepCount === 7 ? "Stage 7/7 · Complete ↓" : `Stage ${assemblyStepCount}/7`}
+                  </span>
+                </div>
               <div className="h-[95px] w-full rounded-xl bg-white border border-[#D9E1F0]/70 overflow-hidden mb-3">
                 <OrganicScene
                   variant="dossier"
@@ -457,6 +460,7 @@ export function HandoversSection() {
           </div>
         </div>
       </div>
+    </div>
     </section>
   );
 }

@@ -1,10 +1,7 @@
-import { AdminPage } from '../../../components/figma-pages/AdminPage'
+"use client";
 
-export const metadata = {
-  title: 'Team Management · The Handover',
-  description: 'Workspace members and roles management.',
-}
+import { AdminPage } from "../../../components/figma-pages/AdminPage";
 
 export default function SettingsTeamRoute() {
-  return <AdminPage view="team" />
+  return <AdminPage view="team" />;
 }

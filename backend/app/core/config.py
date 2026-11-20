@@ -9,6 +9,7 @@ from ipaddress import ip_address
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import parse_qs, urlparse
+from email.utils import parseaddr
 
 from pydantic import (
     AliasChoices,
@@ -368,7 +369,7 @@ class OllamaSettings(BaseModel):
     ocr_model: str = Field(min_length=1)
     health_timeout_seconds: float = Field(default=2.0, gt=0.1, le=30.0)
     llm_num_ctx: int = Field(default=2048, ge=1024, le=40960)
-    llm_num_predict: int = Field(default=1200, ge=256, le=8192)
+    llm_num_predict: int = Field(default=1200, ge=-1, le=8192)
     llm_temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     llm_timeout_seconds: float | None = Field(default=None, ge=0.0)
     llm_think: bool = False
@@ -546,20 +547,23 @@ class IntegrationsSettings(BaseModel):
 
 
 class EmailSettings(BaseModel):
-    """Transactional email delivery settings (Gmail SMTP / Mock / Disabled)."""
+    """Transactional email delivery settings (Resend / Mock / Disabled)."""
 
     delivery_enabled: bool = False
-    provider: Literal["none", "mock", "gmail_smtp"] = "none"
-    smtp_host: str = "smtp.gmail.com"
-    smtp_port: int = Field(default=587, ge=1, le=65535)
-    smtp_username: str | None = None
-    smtp_app_password: SecretStr | None = None
-    smtp_use_tls: bool = True
-    smtp_timeout_seconds: float = Field(default=20.0, gt=0.5, le=60.0)
-    from_address: str = "noreply@handover.local"
-    from_name: str = "The Handover"
+    provider: Literal["none", "mock", "resend"] = "none"
+    resend_api_key: SecretStr | None = None
+    from_address: str = "notifications@the-sapiens.xyz"
+    from_name: str = "Handover"
+    sending_domain: str = "the-sapiens.xyz"
     frontend_base_url: str = "http://localhost:3000"
     http_timeout_seconds: float = Field(default=10.0, gt=0.5, le=60.0)
+
+    @property
+    def sender_identity(self) -> str:
+        """Formatted sender identity (e.g., 'Handover <notifications@the-sapiens.xyz>')."""
+        if self.from_name:
+            return f"{self.from_name} <{self.from_address}>"
+        return self.from_address
 
 
 class Settings(BaseSettings):
@@ -635,7 +639,7 @@ class Settings(BaseSettings):
     ollama_embedding_model: str = Field(default="nomic-embed-text", min_length=1)
     ollama_ocr_model: str = Field(default="glm-ocr:latest", min_length=1)
     ollama_llm_num_ctx: int = Field(default=8192, ge=2048, le=40960)
-    ollama_llm_num_predict: int = Field(default=2048, ge=256, le=8192)
+    ollama_llm_num_predict: int = Field(default=2048, ge=-1, le=8192)
     ollama_llm_temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     ollama_llm_timeout_seconds: float | None = Field(default=None, ge=0.0)
     ollama_llm_think: bool = False
@@ -705,48 +709,32 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("email_delivery_enabled", "enable_email_delivery"),
     )
-    email_provider: Literal["none", "mock", "gmail_smtp"] = Field(
+    email_provider: Literal["none", "mock", "resend"] = Field(
         default="none",
         validation_alias=AliasChoices("email_provider", "mail_provider"),
     )
-    smtp_host: str = Field(
-        default="smtp.gmail.com",
-        min_length=1,
-        validation_alias=AliasChoices("smtp_host", "gmail_smtp_host"),
-    )
-    smtp_port: int = Field(
-        default=587,
-        ge=1,
-        le=65535,
-        validation_alias=AliasChoices("smtp_port", "gmail_smtp_port"),
-    )
-    smtp_username: str | None = Field(
+    resend_api_key: SecretStr | None = Field(
         default=None,
-        validation_alias=AliasChoices("smtp_username", "smtp_user", "gmail_smtp_user", "gmail_user"),
+        validation_alias=AliasChoices("resend_api_key", "resend_key"),
     )
-    smtp_app_password: SecretStr | None = Field(
+    email_from: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("smtp_app_password", "smtp_password", "gmail_app_password"),
-    )
-    smtp_use_tls: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("smtp_use_tls", "smtp_tls", "gmail_smtp_tls"),
-    )
-    smtp_timeout_seconds: float = Field(
-        default=20.0,
-        gt=0.5,
-        le=60.0,
-        validation_alias=AliasChoices("smtp_timeout_seconds", "gmail_smtp_timeout_seconds"),
+        validation_alias=AliasChoices("email_from", "mail_from"),
     )
     email_from_address: str = Field(
-        default="noreply@handover.local",
+        default="notifications@the-sapiens.xyz",
         min_length=3,
-        validation_alias=AliasChoices("email_from_address", "email_from", "mail_from", "from_email", "from_address"),
+        validation_alias=AliasChoices("email_from_address", "from_email", "from_address"),
     )
     email_from_name: str = Field(
-        default="The Handover",
+        default="Handover",
         min_length=1,
         validation_alias=AliasChoices("email_from_name", "email_name", "from_name"),
+    )
+    email_sending_domain: str = Field(
+        default="the-sapiens.xyz",
+        min_length=3,
+        validation_alias=AliasChoices("email_sending_domain", "sending_domain", "email_domain"),
     )
     frontend_base_url: str = Field(
         default="http://localhost:3000",
@@ -757,7 +745,7 @@ class Settings(BaseSettings):
         default=10.0,
         gt=0.5,
         le=60.0,
-        validation_alias=AliasChoices("email_http_timeout_seconds", "email_timeout_seconds"),
+        validation_alias=AliasChoices("email_http_timeout_seconds", "email_timeout_seconds", "resend_timeout_seconds"),
     )
 
     # Delegated source integration fields (`settings.integrations`)
@@ -1156,26 +1144,24 @@ class Settings(BaseSettings):
             raise ValueError(
                 "FRONTEND_BASE_URL must use https:// when transactional email delivery is enabled in production."
             )
+        from_name = self.email_from_name.strip()
         from_addr = self.email_from_address.strip()
-        if self.email_provider == "gmail_smtp" and (
-            from_addr == "noreply@handover.local"
-            or from_addr.endswith(".local")
-            or from_addr.endswith(".invalid")
-        ):
-            if self.smtp_username and self.smtp_username.strip():
-                from_addr = self.smtp_username.strip()
+
+        # Support EMAIL_FROM="Handover <notifications@the-sapiens.xyz>"
+        if self.email_from and self.email_from.strip():
+            parsed_name, parsed_addr = parseaddr(self.email_from.strip())
+            if parsed_addr:
+                from_addr = parsed_addr
+            if parsed_name:
+                from_name = parsed_name
 
         return EmailSettings(
             delivery_enabled=self.email_delivery_enabled,
             provider=self.email_provider,
-            smtp_host=self.smtp_host.strip(),
-            smtp_port=self.smtp_port,
-            smtp_username=self.smtp_username.strip() if self.smtp_username else None,
-            smtp_app_password=self.smtp_app_password,
-            smtp_use_tls=self.smtp_use_tls,
-            smtp_timeout_seconds=self.smtp_timeout_seconds,
+            resend_api_key=self.resend_api_key,
             from_address=from_addr,
-            from_name=self.email_from_name.strip(),
+            from_name=from_name,
+            sending_domain=self.email_sending_domain.strip(),
             frontend_base_url=clean_frontend_url,
             http_timeout_seconds=self.email_http_timeout_seconds,
         )

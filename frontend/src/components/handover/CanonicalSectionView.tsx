@@ -53,6 +53,7 @@ import {
   cn,
 } from '../figma-ui/index'
 import { api } from '../../lib/api'
+import { CardSkeleton, TableSkeleton } from '../loading'
 import type {
   CanonicalHandoverSectionType,
   HandoverContextContributionResponse,
@@ -719,15 +720,9 @@ export function CanonicalSectionPanel({
 
   if (isLoading) {
     return (
-      <Card className="p-10">
-        <div className="flex flex-col items-center justify-center gap-3 text-center">
-          <Loader2 className="size-6 animate-spin text-brand" />
-          <p className="text-sm font-medium text-navy">Loading canonical section data…</p>
-          <p className="text-xs text-muted">
-            Retrieving persisted records, content links, and source-ACL-checked provenance.
-          </p>
-        </div>
-      </Card>
+      <div className="space-y-4" role="status" aria-live="polite">
+        <CardSkeleton variant="domain" count={3} />
+      </div>
     )
   }
 
@@ -1738,10 +1733,9 @@ export function CanonicalEvidenceTable({
 
   if (isLoading) {
     return (
-      <Card className="p-10 text-center text-sm text-muted">
-        <Loader2 className="mx-auto mb-2 size-5 animate-spin text-brand" />
-        Loading linked provenance evidence…
-      </Card>
+      <div className="p-4" role="status" aria-live="polite">
+        <TableSkeleton rows={5} columns={4} />
+      </div>
     )
   }
 

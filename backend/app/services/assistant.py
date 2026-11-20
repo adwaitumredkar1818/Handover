@@ -150,6 +150,10 @@ class ProjectKnowledgeAssistantService:
 
         msg_responses: list[AssistantMessageResponse] = []
         for msg in conv.messages:
+            # Filter out internal system checkpoint records from user chat display
+            if msg.sender_type == AssistantSenderType.SYSTEM.value or (msg.content and msg.content.startswith("Investigation Checkpoint:")):
+                continue
+
             cit_responses = [
                 AssistantCitationResponse.model_validate(c)
                 for c in msg.citations

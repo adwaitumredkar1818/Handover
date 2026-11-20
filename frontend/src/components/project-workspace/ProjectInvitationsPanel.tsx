@@ -26,6 +26,7 @@ import {
   ConfirmDialog,
 } from "../ui";
 import { api, ApiError } from "../../lib/api";
+import { ListSkeleton } from "../loading";
 import type { InvitationSummary } from "../../lib/types";
 
 export const PROJECT_ROLE_OPTIONS: Array<{
@@ -374,9 +375,8 @@ export function ProjectInvitationsPanel({
 
         {/* List */}
         {isLoading ? (
-          <div className="flex items-center justify-center py-8 text-xs text-muted">
-            <Loader2 className="mr-2 size-4 animate-spin" />
-            Loading project invitations...
+          <div className="py-2" role="status" aria-live="polite">
+            <ListSkeleton variant="thread" count={4} />
           </div>
         ) : filteredInvitations.length === 0 ? (
           <div className="rounded-xl border border-dashed border-line p-6 text-center text-xs text-muted">

@@ -499,6 +499,7 @@ SYSTEM_ROLES: tuple[RoleSpec, ...] = (
             "project.evidence.read",
             "project.evidence.upload",
             "project.evidence.manage",
+            "project.knowledge.review",
             "handover.read",
             "handover.create",
             "handover.edit",

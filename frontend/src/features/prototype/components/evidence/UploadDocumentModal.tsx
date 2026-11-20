@@ -128,7 +128,7 @@ export function UploadDocumentModal() {
                 Click to browse local files
               </div>
               <div className="text-[11px] text-[#69778D] mt-1">
-                Supports PDF (PyMuPDF / GLM OCR) and DOCX (python-docx)
+                Supports PDF and DOCX documents
               </div>
               <div className="text-[10px] text-[#69778D] mt-2 font-mono">
                 Maximum size: 25MB

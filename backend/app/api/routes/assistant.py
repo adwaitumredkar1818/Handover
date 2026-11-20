@@ -28,7 +28,7 @@ from app.api.deps import (
     require_project_permission,
 )
 from app.core.config import Settings
-from app.models.enums import AssistantConversationStatus
+from app.models.enums import AssistantConversationStatus, AssistantSenderType
 from app.schemas.assistant import (
     AssistantAnswerResponse,
     AssistantFeedbackRequest,
@@ -270,6 +270,30 @@ async def create_investigation(
     if session_factory is None:
         from app.db.session import create_session_factory
         session_factory = create_session_factory(request.app.state.db_engine)
+
+    # Persist the user turn immediately into PostgreSQL so it is durable and queryable
+    with session_factory() as init_session:
+        from app.repositories.assistant import (
+            AssistantConversationRepository,
+            AssistantMessageRepository,
+        )
+        msg_repo = AssistantMessageRepository(init_session)
+        conv_repo = AssistantConversationRepository(init_session)
+        conv = conv_repo.get_by_id(conversation_id, project_id=project_id)
+        if conv:
+            msg_repo.create(
+                conversation_id=conversation_id,
+                organisation_id=project_ctx.organisation.id,
+                project_id=project_id,
+                sender_type=AssistantSenderType.USER,
+                content=payload.question,
+            )
+            # Update auto title if still default
+            if conv.title in ("New Conversation", "New Project Inquiry", "Untitled") or conv.title.startswith("New Thread"):
+                auto_title = payload.question.strip()[:60]
+                if len(payload.question) > 60:
+                    auto_title += "..."
+                conv_repo.update(conversation_id, title=auto_title)
 
     async def _execute_investigation_in_background() -> None:
         with session_factory() as bg_session:

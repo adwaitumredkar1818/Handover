@@ -285,8 +285,12 @@ class AssistantQueryClassifier:
                 "high-level overview",
                 "about this project",
                 "explain the project",
+                "hello",
+                "hi",
+                "hey",
+                "greetings",
             ],
-            [r"\bwhat is (?:this|the) project\b", r"\bproject overview\b", r"\bcore purpose\b"],
+            [r"\bwhat is (?:this|the) project\b", r"\bproject overview\b", r"\bcore purpose\b", r"^(?:hi|hello|hey|greetings)\b"],
         ),
     ]
 

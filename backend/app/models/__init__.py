@@ -66,6 +66,7 @@ from app.models.handover import (
     HandoverResponsibilityTransfer,
     HandoverSignoff,
     HandoverStatusHistory,
+    ProjectOnboardingProgress,
 )
 from app.models.assistant import (
     AssistantCitation,
@@ -123,6 +124,7 @@ __all__ = [
     "Permission",
     "Project",
     "ProjectMembership",
+    "ProjectOnboardingProgress",
     "ProjectSourceMapping",
     "ProjectTransition",
     "ProjectVectorIndex",

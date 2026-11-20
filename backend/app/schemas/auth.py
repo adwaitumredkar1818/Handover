@@ -192,7 +192,7 @@ class ForgotPasswordResponse(BaseSchema):
     message: str = Field(description="Human-readable status message")
     reset_token: str | None = Field(
         default=None,
-        description="Password reset token returned ONLY in development/testing mode when SMTP is not configured.",
+        description="Password reset token returned ONLY in development/testing mode when email delivery is not configured.",
     )
     email_delivery: Literal["not_configured", "submitted", "failed"] | None = Field(
         default=None,

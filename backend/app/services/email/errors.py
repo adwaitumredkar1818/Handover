@@ -8,16 +8,24 @@ class EmailProviderError(Exception):
 
 
 class EmailConfigurationError(EmailProviderError):
-    """Raised when provider configuration is incomplete or invalid."""
+    """Raised when provider configuration is incomplete or invalid (e.g. missing RESEND_API_KEY)."""
 
 
 class EmailAuthenticationError(EmailProviderError):
-    """Raised when SMTP authentication with Google fails (e.g. invalid App Password)."""
+    """Raised when Resend API authentication fails (e.g. invalid or revoked RESEND_API_KEY)."""
 
 
 class EmailConnectionTimeoutError(EmailProviderError):
-    """Raised when connection or handshake with smtp.gmail.com times out."""
+    """Raised when API connection or HTTP request times out."""
 
 
 class EmailRecipientRejectedError(EmailProviderError):
-    """Raised when SMTP server refuses recipient or sender address."""
+    """Raised when provider or mail server refuses recipient or sender address."""
+
+
+class EmailRateLimitError(EmailProviderError):
+    """Raised when Resend API rate limits are encountered."""
+
+
+class EmailValidationError(EmailProviderError):
+    """Raised when email payload fails provider validation."""

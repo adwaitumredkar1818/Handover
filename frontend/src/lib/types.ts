@@ -290,6 +290,7 @@ export interface EvidenceMetrics {
   total_items: number;
   by_type: Record<string, number>;
   by_indexing_status: Record<string, number>;
+  by_provider?: Record<string, number>;
 }
 
 
@@ -1220,7 +1221,7 @@ export type AssistantAnswerStatus =
 
 export type AssistantResponseMode = "standard" | "deep_research" | "deep_think" | "deep_extract";
 
-export type AssistantSenderType = "user" | "assistant";
+export type AssistantSenderType = "user" | "assistant" | "system";
 
 export interface ResearchReportSection {
   section_title: string;
@@ -1475,6 +1476,7 @@ export interface ActiveSyncJob {
   progress_percent: number;
   attempt_count: number;
   message?: string;
+  mapping_id?: string;
   created_at: string;
   started_at?: string;
 }

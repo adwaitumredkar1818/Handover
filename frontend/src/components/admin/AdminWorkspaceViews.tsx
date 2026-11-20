@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { Button } from "../ui";
+import { TableSkeleton } from "../loading";
 import { api } from "../../lib/api";
 
 export function AuditWorkspaceView() {
@@ -114,7 +115,11 @@ export function AuditWorkspaceView() {
         </div>
 
         {/* Audit Table */}
-        {filteredEvents.length === 0 ? (
+        {isLoading && auditEvents.length === 0 ? (
+          <div className="py-2" role="status" aria-live="polite">
+            <TableSkeleton rows={6} columns={5} />
+          </div>
+        ) : filteredEvents.length === 0 ? (
           <div className="p-12 text-center">
             <ScrollText className="w-12 h-12 text-[#69778D] mb-3 mx-auto" />
             <div className="font-bold text-sm text-[#25334B]">No Audit Events Recorded</div>

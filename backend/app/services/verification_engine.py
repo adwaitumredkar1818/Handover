@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,6 +26,7 @@ from app.models.enums import (
     ConflictResolutionState,
     IssueResolutionState,
     MachineAssessmentStatus,
+    RelationshipBasis,
     TemporalComparison,
     VerificationCaseStatus,
     VerificationCategory,
@@ -48,7 +49,16 @@ from app.models.verification import (
     VerificationFindingRevision,
     VerificationIssue,
 )
-from app.repositories.verification import VerificationRepository
+from app.repositories.verification import (
+    VerificationCaseRepository,
+    VerificationIssueRepository,
+    VerificationRepository,
+)
+from app.services.verification_taxonomy import (
+    get_severity_penalty,
+    get_source_authority_weight,
+    get_taxonomy_entry,
+)
 from app.services.verification_intelligence import (
     AdvancedContradictionEvaluator,
     CompletenessEvaluator,
@@ -64,6 +74,7 @@ from app.services.verification_intelligence import (
 _STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "from", "was", "were", "are",
     "has", "have", "had", "been", "being", "into", "onto", "about", "will",
+    "use", "using", "uses",
 }
 _POSITIVE_STATUS_TOKENS = {"done", "merged", "completed", "approved", "closed", "resolved", "finalized"}
 _NEGATIVE_STATUS_TOKENS = {"open", "pending", "blocked", "undecided", "in_progress", "wip", "draft", "reopened"}
@@ -97,6 +108,565 @@ def _ensure_utc(dt: datetime | None) -> datetime | None:
     if dt is None:
         return None
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def verify_excerpt_grounding(
+    excerpt: str, chunk: Any
+) -> tuple[bool, float, str, dict[str, Any]]:
+    """Determine whether an excerpt is grounded verbatim or via fuzzy token overlap in a chunk."""
+    chunk_text = chunk if isinstance(chunk, str) else (getattr(chunk, "chunk_text", None) or "")
+    excerpt_norm = re.sub(r'[\s“”"\'`]+', " ", excerpt).strip().lower()
+    chunk_norm = re.sub(r'[\s“”"\'`]+', " ", chunk_text).strip().lower()
+
+    if excerpt_norm and excerpt_norm in chunk_norm:
+        return True, 1.0, "verbatim", {"normalized_match": True, "containment_ratio": 1.0}
+
+    toks_e = _tokenize(excerpt)
+    toks_c = _tokenize(chunk_text)
+    if not toks_e:
+        return False, 0.0, "unsupported", {"containment_ratio": 0.0}
+
+    overlap = toks_e & toks_c
+    containment = len(overlap) / len(toks_e)
+    if containment >= 0.85:
+        return True, round(containment, 4), "fuzzy_token_overlap", {
+            "containment_ratio": round(containment, 4),
+            "matched_tokens": sorted(list(overlap)),
+        }
+    return False, round(containment, 4), "unsupported", {
+        "containment_ratio": round(containment, 4),
+        "missing_tokens": sorted(list(toks_e - toks_c)),
+    }
+
+
+def verify_claim_support(
+    title: str, summary: str, chunks: list[Any]
+) -> tuple[bool, float, list[str]]:
+    """Verify whether core substantive claim tokens are grounded in cited chunk texts."""
+    claim_tokens = _tokenize(f"{title} {summary}")
+    if not claim_tokens:
+        return True, 1.0, []
+
+    chunk_tokens: set[str] = set()
+    for ch in chunks:
+        ch_text = ch if isinstance(ch, str) else (getattr(ch, "chunk_text", None) or "")
+        chunk_tokens |= _tokenize(ch_text)
+
+    grounded: set[str] = set()
+    missing: list[str] = []
+
+    for t in sorted(list(claim_tokens)):
+        matched = False
+        if t in chunk_tokens:
+            matched = True
+        else:
+            t_stem = t.rstrip("s")
+            for c in chunk_tokens:
+                c_stem = c.rstrip("s")
+                if t_stem == c_stem or (len(t) >= 4 and len(c) >= 4 and (t.startswith(c) or c.startswith(t))):
+                    matched = True
+                    break
+        if matched:
+            grounded.add(t)
+        else:
+            missing.append(t)
+
+    ratio = len(grounded) / len(claim_tokens)
+    supported = ratio >= 0.70
+    return supported, round(ratio, 4), missing
+
+
+def calculate_composite_confidence(
+    *,
+    target_type: VerificationTargetType | str,
+    evidence_links: list[Any],
+    issues: list[dict[str, Any]],
+    conflicts_count: int = 0,
+    is_stale: bool = False,
+    is_inferred: bool = False,
+) -> tuple[float, dict[str, Any]]:
+    """Calibrate composite confidence score with authority, freshness, coverage, and penalties."""
+    authority_scores = []
+    coverage_lengths = []
+    for link in evidence_links:
+        ev = getattr(link, "evidence_item", None)
+        st = getattr(ev, "source_type", None)
+        authority_scores.append(get_source_authority_weight(st))
+        chunk = getattr(link, "evidence_chunk", None)
+        text = getattr(chunk, "chunk_text", "") or ""
+        coverage_lengths.append(len(text))
+
+    if authority_scores:
+        authority_score = max(authority_scores)
+    else:
+        authority_score = 0.50
+
+    freshness_score = 0.40 if is_stale else 1.00
+
+    if not evidence_links:
+        coverage_score = 0.0
+    else:
+        avg_len = sum(coverage_lengths) / len(coverage_lengths) if coverage_lengths else 0
+        base_cov = min(1.0, 0.50 + 0.10 * len(evidence_links) + (0.20 if avg_len > 100 else 0.0))
+        coverage_score = base_cov
+
+    if is_inferred:
+        coverage_score = coverage_score * 0.80
+
+    conflict_penalty = 0.25 if conflicts_count > 0 else 0.0
+
+    issue_penalty = 0.0
+    for iss in issues:
+        sev = iss.get("severity")
+        issue_penalty += get_severity_penalty(sev)
+
+    if not evidence_links:
+        base_confidence = 0.20 * freshness_score
+    else:
+        base_confidence = 0.45 * authority_score + 0.35 * coverage_score + 0.20 * freshness_score
+
+    final_score = max(0.0, min(1.0, round(base_confidence - conflict_penalty - issue_penalty, 4)))
+
+    breakdown = {
+        "authority_score": round(authority_score, 4),
+        "freshness_score": round(freshness_score, 4),
+        "coverage_score": round(coverage_score, 4),
+        "conflict_penalty": round(conflict_penalty, 4),
+        "issue_penalty": round(issue_penalty, 4),
+    }
+    return final_score, breakdown
+
+
+@dataclass
+class AssessmentResult:
+    """In-memory assessment outcome from deterministic rules."""
+
+    target_type: VerificationTargetType
+    target_id: uuid.UUID
+    project_id: uuid.UUID
+    organisation_id: uuid.UUID
+    machine_status: MachineAssessmentStatus
+    priority: VerificationPriority
+    issues: list[dict[str, Any]] = field(default_factory=list)
+    assessment_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class VerificationIntelligenceEngine:
+    """Deterministic intelligence engine assessing findings, relationships, and claim grounding."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.case_repo = VerificationCaseRepository(session)
+        self.issue_repo = VerificationIssueRepository(session)
+
+    def assess_knowledge_item(self, item: KnowledgeItem) -> AssessmentResult:
+        issues: list[dict[str, Any]] = []
+
+        links_stmt = (
+            select(KnowledgeEvidenceLink)
+            .where(KnowledgeEvidenceLink.knowledge_item_id == item.id)
+            .options(
+                selectinload(KnowledgeEvidenceLink.evidence_item),
+                selectinload(KnowledgeEvidenceLink.evidence_chunk),
+            )
+        )
+        links = list(self.session.execute(links_stmt).scalars().all())
+
+        chunks_text: list[str] = []
+        is_stale = getattr(item, "is_stale", False) or False
+
+        if not links:
+            entry = get_taxonomy_entry(VerificationIssueType.MISSING_EVIDENCE)
+            issues.append({
+                "issue_type": VerificationIssueType.MISSING_EVIDENCE,
+                "severity": entry.default_severity,
+                "category": entry.category,
+                "description": "Finding has no supporting evidence links.",
+                "details_json": {"reason": "zero_links_found"},
+                "conflicting_evidence_id": None,
+                "conflicting_chunk_id": None,
+            })
+        else:
+            for link in links:
+                ev = link.evidence_item
+                chunk = link.evidence_chunk
+
+                if not ev or ev.project_id != item.project_id:
+                    entry = get_taxonomy_entry(VerificationIssueType.INVALID_SOURCE_REFERENCE)
+                    issues.append({
+                        "issue_type": VerificationIssueType.INVALID_SOURCE_REFERENCE,
+                        "severity": entry.default_severity,
+                        "category": entry.category,
+                        "description": "Cited evidence item is invalid or not in workspace.",
+                        "details_json": {"cited_evidence_id": str(link.evidence_id)},
+                        "conflicting_evidence_id": link.evidence_id,
+                        "conflicting_chunk_id": link.evidence_chunk_id,
+                    })
+                    continue
+
+                if chunk and getattr(chunk, "chunk_text", None):
+                    chunks_text.append(chunk.chunk_text)
+
+                if link.supporting_excerpt:
+                    is_gr, score, mode, details = verify_excerpt_grounding(link.supporting_excerpt, chunk)
+                    if not is_gr:
+                        entry = get_taxonomy_entry(VerificationIssueType.UNSUPPORTED_CLAIM)
+                        issues.append({
+                            "issue_type": VerificationIssueType.UNSUPPORTED_CLAIM,
+                            "severity": entry.default_severity,
+                            "category": entry.category,
+                            "description": "Supporting excerpt could not be matched in source chunk.",
+                            "details_json": {
+                                "excerpt_preview": link.supporting_excerpt[:200],
+                                "match_mode": mode,
+                                "support_ratio": score,
+                                "chunk_id": str(getattr(chunk, "id", None)),
+                            },
+                            "conflicting_evidence_id": ev.id,
+                            "conflicting_chunk_id": getattr(chunk, "id", None),
+                        })
+
+                if getattr(ev, "processing_status", None) == "failed" or getattr(ev, "is_stale", False):
+                    is_stale = True
+                    entry = get_taxonomy_entry(VerificationIssueType.STALE_KNOWLEDGE)
+                    issues.append({
+                        "issue_type": VerificationIssueType.STALE_KNOWLEDGE,
+                        "severity": entry.default_severity,
+                        "category": entry.category,
+                        "description": "Cited evidence item is marked stale or failed processing.",
+                        "details_json": {"evidence_id": str(ev.id)},
+                        "conflicting_evidence_id": ev.id,
+                        "conflicting_chunk_id": None,
+                    })
+
+        if chunks_text and not any(i["issue_type"] == VerificationIssueType.UNSUPPORTED_CLAIM for i in issues):
+            item_summary = getattr(item, "structured_summary", "") or getattr(item, "summary", "") or ""
+            supported, ratio, missing = verify_claim_support(item.title, item_summary, chunks_text)
+            if not supported:
+                entry = get_taxonomy_entry(VerificationIssueType.UNSUPPORTED_CLAIM)
+                issues.append({
+                    "issue_type": VerificationIssueType.UNSUPPORTED_CLAIM,
+                    "severity": entry.default_severity,
+                    "category": entry.category,
+                    "description": "Finding title and summary claim terms are not grounded in cited chunks.",
+                    "details_json": {
+                        "support_ratio": ratio,
+                        "missing_tokens": missing,
+                        "match_mode": "unsupported",
+                    },
+                    "conflicting_evidence_id": None,
+                    "conflicting_chunk_id": None,
+                })
+
+        if getattr(item, "is_stale", False):
+            if not any(i["issue_type"] == VerificationIssueType.STALE_KNOWLEDGE for i in issues):
+                entry = get_taxonomy_entry(VerificationIssueType.STALE_KNOWLEDGE)
+                issues.append({
+                    "issue_type": VerificationIssueType.STALE_KNOWLEDGE,
+                    "severity": entry.default_severity,
+                    "category": entry.category,
+                    "description": "Knowledge item is flagged as stale or superseded.",
+                    "details_json": {"superseded_by_id": str(item.superseded_by_id) if item.superseded_by_id else None},
+                    "conflicting_evidence_id": None,
+                    "conflicting_chunk_id": None,
+                })
+
+        item_toks = _tokenize(item.title)
+        other_items = (
+            self.session.execute(
+                select(KnowledgeItem).where(
+                    KnowledgeItem.project_id == item.project_id,
+                    KnowledgeItem.id != item.id,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        dup_ids = []
+        for o in other_items:
+            if item.fingerprint and o.fingerprint and item.fingerprint == o.fingerprint:
+                dup_ids.append(str(o.id))
+                continue
+            o_toks = _tokenize(o.title)
+            if not item_toks or not o_toks:
+                continue
+            sim = _jaccard_similarity(item_toks, o_toks)
+            overlap_ratio = len(item_toks & o_toks) / max(len(item_toks), len(o_toks))
+            if sim >= 0.72 or overlap_ratio > 0.85:
+                dup_ids.append(str(o.id))
+
+        if dup_ids:
+            entry = get_taxonomy_entry(VerificationIssueType.DUPLICATE_RECORD)
+            issues.append({
+                "issue_type": VerificationIssueType.DUPLICATE_RECORD,
+                "severity": entry.default_severity,
+                "category": entry.category,
+                "description": f"Potential duplicate of {len(dup_ids)} other finding(s).",
+                "details_json": {"duplicate_item_ids": dup_ids},
+                "conflicting_evidence_id": None,
+                "conflicting_chunk_id": None,
+            })
+
+        priority, machine_status = self._compute_priority_and_status(issues)
+
+        conf_score, conf_breakdown = calculate_composite_confidence(
+            target_type=VerificationTargetType.KNOWLEDGE_ITEM,
+            evidence_links=links,
+            issues=issues,
+            conflicts_count=0,
+            is_stale=is_stale,
+        )
+
+        return AssessmentResult(
+            target_type=VerificationTargetType.KNOWLEDGE_ITEM,
+            target_id=item.id,
+            project_id=item.project_id,
+            organisation_id=item.organisation_id,
+            machine_status=machine_status,
+            priority=priority,
+            issues=issues,
+            assessment_metadata={
+                "assessed_at": datetime.now(UTC).isoformat(),
+                "confidence_score": conf_score,
+                "confidence_breakdown": conf_breakdown,
+                "links_checked": len(links),
+                "issues_count": len(issues),
+            },
+        )
+
+    def assess_relationship(self, rel: KnowledgeRelationship) -> AssessmentResult:
+        issues: list[dict[str, Any]] = []
+
+        links_stmt = (
+            select(RelationshipEvidenceLink)
+            .where(RelationshipEvidenceLink.relationship_id == rel.id)
+            .options(
+                selectinload(RelationshipEvidenceLink.evidence_item),
+                selectinload(RelationshipEvidenceLink.evidence_chunk),
+            )
+        )
+        links = list(self.session.execute(links_stmt).scalars().all())
+
+        if not links:
+            entry = get_taxonomy_entry(VerificationIssueType.MISSING_EVIDENCE)
+            issues.append({
+                "issue_type": VerificationIssueType.MISSING_EVIDENCE,
+                "severity": entry.default_severity,
+                "category": entry.category,
+                "description": "Relationship edge has no cited supporting evidence links.",
+                "details_json": {"relationship_type": rel.relationship_type},
+                "conflicting_evidence_id": None,
+                "conflicting_chunk_id": None,
+            })
+        else:
+            for link in links:
+                if link.supporting_excerpt:
+                    chunk = link.evidence_chunk
+                    is_gr, score, mode, details = verify_excerpt_grounding(link.supporting_excerpt, chunk)
+                    if not is_gr:
+                        entry = get_taxonomy_entry(VerificationIssueType.UNSUPPORTED_CLAIM)
+                        issues.append({
+                            "issue_type": VerificationIssueType.UNSUPPORTED_CLAIM,
+                            "severity": entry.default_severity,
+                            "category": entry.category,
+                            "description": "Relationship excerpt does not appear in cited chunk text.",
+                            "details_json": {"excerpt": link.supporting_excerpt[:200], "match_mode": mode},
+                            "conflicting_evidence_id": link.evidence_id,
+                            "conflicting_chunk_id": link.evidence_chunk_id,
+                        })
+
+        is_inferred = rel.relationship_basis == RelationshipBasis.INFERRED
+        if is_inferred:
+            entry = get_taxonomy_entry(VerificationIssueType.UNCERTAIN_RELATIONSHIP)
+            issues.append({
+                "issue_type": VerificationIssueType.UNCERTAIN_RELATIONSHIP,
+                "severity": entry.default_severity,
+                "category": entry.category,
+                "description": "Relationship was inferred without explicit key reference.",
+                "details_json": {
+                    "confidence_score": float(rel.confidence_score) if rel.confidence_score is not None else 0.85,
+                    "inference_reason": getattr(rel, "inference_reason", None) or "contextual_match",
+                },
+                "conflicting_evidence_id": None,
+                "conflicting_chunk_id": None,
+            })
+
+        source_ent = self.session.get(KnowledgeEntity, rel.source_entity_id)
+        target_ent = self.session.get(KnowledgeEntity, rel.target_entity_id)
+        if not source_ent or not target_ent:
+            entry = get_taxonomy_entry(VerificationIssueType.INVALID_ENTITY_MAPPING)
+            issues.append({
+                "issue_type": VerificationIssueType.INVALID_ENTITY_MAPPING,
+                "severity": entry.default_severity,
+                "category": entry.category,
+                "description": "One or both linked entity nodes do not exist.",
+                "details_json": {"source_exists": bool(source_ent), "target_exists": bool(target_ent)},
+                "conflicting_evidence_id": None,
+                "conflicting_chunk_id": None,
+            })
+
+        dup_rel_stmt = select(KnowledgeRelationship).where(
+            KnowledgeRelationship.project_id == rel.project_id,
+            KnowledgeRelationship.id != rel.id,
+            KnowledgeRelationship.source_entity_id == rel.source_entity_id,
+            KnowledgeRelationship.target_entity_id == rel.target_entity_id,
+            KnowledgeRelationship.relationship_type == rel.relationship_type,
+        )
+        dup_rels = list(self.session.execute(dup_rel_stmt).scalars().all())
+        if dup_rels:
+            entry = get_taxonomy_entry(VerificationIssueType.DUPLICATE_RECORD)
+            issues.append({
+                "issue_type": VerificationIssueType.DUPLICATE_RECORD,
+                "severity": entry.default_severity,
+                "category": entry.category,
+                "description": "Duplicate relationship connecting identical entities.",
+                "details_json": {"duplicate_rel_ids": [str(d.id) for d in dup_rels]},
+                "conflicting_evidence_id": None,
+                "conflicting_chunk_id": None,
+            })
+
+        priority, machine_status = self._compute_priority_and_status(issues)
+
+        conf_score, conf_breakdown = calculate_composite_confidence(
+            target_type=VerificationTargetType.RELATIONSHIP,
+            evidence_links=links,
+            issues=issues,
+            conflicts_count=0,
+            is_stale=False,
+            is_inferred=is_inferred,
+        )
+
+        return AssessmentResult(
+            target_type=VerificationTargetType.RELATIONSHIP,
+            target_id=rel.id,
+            project_id=rel.project_id,
+            organisation_id=rel.organisation_id,
+            machine_status=machine_status,
+            priority=priority,
+            issues=issues,
+            assessment_metadata={
+                "assessed_at": datetime.now(UTC).isoformat(),
+                "confidence_score": conf_score,
+                "confidence_breakdown": conf_breakdown,
+                "relationship_type": rel.relationship_type,
+                "basis": rel.relationship_basis,
+                "issues_count": len(issues),
+            },
+        )
+
+    def persist_assessment(self, result: AssessmentResult) -> VerificationCase:
+        tt = result.target_type.value if hasattr(result.target_type, "value") else str(result.target_type)
+        case = self.case_repo.get_case_by_target(
+            project_id=result.project_id,
+            target_type=tt,
+            target_id=result.target_id,
+        )
+
+        now = datetime.now(UTC)
+        if case is None:
+            initial_case_status = VerificationCaseStatus.PENDING_REVIEW.value
+            if result.machine_status == MachineAssessmentStatus.PASSED:
+                initial_case_status = VerificationCaseStatus.CANDIDATE.value
+            elif any(i["severity"] == VerificationSeverity.CRITICAL for i in result.issues):
+                initial_case_status = VerificationCaseStatus.UNRESOLVED.value
+
+            case = VerificationCase(
+                organisation_id=result.organisation_id,
+                project_id=result.project_id,
+                target_type=tt,
+                target_id=result.target_id,
+                case_status=initial_case_status,
+                machine_assessment_status=result.machine_status.value if hasattr(result.machine_status, "value") else str(result.machine_status),
+                priority=result.priority.value if hasattr(result.priority, "value") else str(result.priority),
+                machine_assessment_json=result.assessment_metadata,
+                last_assessed_at=now,
+                version=1,
+            )
+            self.session.add(case)
+            self.session.flush()
+        else:
+            case.machine_assessment_status = result.machine_status.value if hasattr(result.machine_status, "value") else str(result.machine_status)
+            case.priority = result.priority.value if hasattr(result.priority, "value") else str(result.priority)
+            case.machine_assessment_json = result.assessment_metadata
+            case.last_assessed_at = now
+            self.session.flush()
+
+        if tt == VerificationTargetType.KNOWLEDGE_ITEM.value:
+            kitem = self.session.get(KnowledgeItem, result.target_id)
+            if kitem:
+                c_meta = dict(kitem.confidence_metadata_json or {})
+                c_meta["confidence_score"] = result.assessment_metadata.get("confidence_score", 0.85)
+                c_meta["confidence_breakdown"] = result.assessment_metadata.get("confidence_breakdown", {})
+                kitem.confidence_metadata_json = c_meta
+
+        existing_issues = self.issue_repo.list_by_case(case.id, open_only=True)
+        existing_types = {i.issue_type: i for i in existing_issues}
+        new_types = {i["issue_type"] for i in result.issues}
+
+        for itype, ex_issue in existing_types.items():
+            if itype not in new_types:
+                ex_issue.resolution_state = IssueResolutionState.RESOLVED.value
+                ex_issue.resolution_reason = "Auto-resolved by re-assessment: issue condition no longer met."
+                ex_issue.resolved_at = now
+
+        for issue_dict in result.issues:
+            itype_val = issue_dict["issue_type"].value if hasattr(issue_dict["issue_type"], "value") else str(issue_dict["issue_type"])
+            if itype_val not in existing_types:
+                sev_val = issue_dict["severity"].value if hasattr(issue_dict["severity"], "value") else str(issue_dict["severity"])
+                new_issue = VerificationIssue(
+                    organisation_id=result.organisation_id,
+                    project_id=result.project_id,
+                    case_id=case.id,
+                    verification_category=issue_dict.get("category", "General"),
+                    issue_type=itype_val,
+                    severity=sev_val,
+                    description=issue_dict["description"],
+                    detection_method="deterministic_rule",
+                    details_json=issue_dict.get("details_json", {}),
+                    conflicting_evidence_id=issue_dict.get("conflicting_evidence_id"),
+                    conflicting_chunk_id=issue_dict.get("conflicting_chunk_id"),
+                    resolution_state=IssueResolutionState.OPEN.value,
+                )
+                self.session.add(new_issue)
+
+        self.session.flush()
+        return case
+
+    def _compute_priority_and_status(
+        self, issues: list[dict[str, Any]]
+    ) -> tuple[VerificationPriority, MachineAssessmentStatus]:
+        if not issues:
+            return VerificationPriority.LOW, MachineAssessmentStatus.PASSED
+
+        severities = {i["severity"] for i in issues}
+        types = {i["issue_type"] for i in issues}
+
+        if (
+            VerificationIssueType.CONFLICTING_SOURCES in types
+            or any(getattr(t, "value", str(t)) == VerificationIssueType.CONFLICTING_SOURCES.value for t in types)
+        ):
+            return VerificationPriority.HIGH, MachineAssessmentStatus.CONFLICT_DETECTED
+
+        if (
+            VerificationIssueType.MISSING_EVIDENCE in types
+            or any(getattr(t, "value", str(t)) == VerificationIssueType.MISSING_EVIDENCE.value for t in types)
+        ):
+            return VerificationPriority.CRITICAL, MachineAssessmentStatus.INSUFFICIENT_EVIDENCE
+
+        if VerificationSeverity.CRITICAL in severities or "critical" in severities:
+            return VerificationPriority.CRITICAL, MachineAssessmentStatus.ISSUES_DETECTED
+
+        if VerificationSeverity.HIGH in severities or "high" in severities:
+            return VerificationPriority.HIGH, MachineAssessmentStatus.ISSUES_DETECTED
+
+        if VerificationSeverity.MEDIUM in severities or "medium" in severities:
+            return VerificationPriority.MEDIUM, MachineAssessmentStatus.ISSUES_DETECTED
+
+        return VerificationPriority.LOW, MachineAssessmentStatus.UNCERTAIN
+
+
+DeterministicVerificationEngine = VerificationIntelligenceEngine
+
 
 
 class VerificationEngine:
@@ -678,9 +1248,6 @@ class VerificationEngine:
             change_type=change_type,
             triggered_by_user_id=triggered_by_user_id,
         )
-
-        self.session.flush()
-        return {"cases_assessed": len(targets), "issues_detected": issues_detected}
 
     def _build_issue(
         self,

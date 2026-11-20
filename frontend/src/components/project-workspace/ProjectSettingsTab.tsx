@@ -22,6 +22,7 @@ import {
   ConfirmDialog,
   Callout,
 } from "../ui";
+import { ButtonLoader } from "../loading";
 import { api } from "../../lib/api";
 import type {
   Project,
@@ -307,14 +308,15 @@ export function ProjectSettingsTab({
 
           {canManage && (
             <div className="flex justify-end pt-3 border-t border-line">
-              <Button
+              <ButtonLoader
                 type="submit"
                 variant="primary"
-                icon={Save}
-                disabled={isSavingGeneral}
+                icon={<Save className="size-4" />}
+                isLoading={isSavingGeneral}
+                loadingText="Saving..."
               >
-                {isSavingGeneral ? "Saving..." : "Save Project Settings"}
-              </Button>
+                Save Project Settings
+              </ButtonLoader>
             </div>
           )}
         </form>
@@ -444,16 +446,15 @@ export function ProjectSettingsTab({
 
           {canManage && (
             <div className="flex justify-end pt-3 border-t border-line">
-              <Button
+              <ButtonLoader
                 type="submit"
                 variant="primary"
-                icon={Save}
-                disabled={isSavingTransition}
+                icon={<Save className="size-4" />}
+                isLoading={isSavingTransition}
+                loadingText="Saving Configuration..."
               >
-                {isSavingTransition
-                  ? "Saving Configuration..."
-                  : "Save Transition Configuration"}
-              </Button>
+                Save Transition Configuration
+              </ButtonLoader>
             </div>
           )}
         </form>

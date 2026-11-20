@@ -21,8 +21,8 @@ import {
   Sparkles,
   Users,
 } from "lucide-react";
-import { AppLayout } from "../layout/AppLayout";
 import { Card, CardHeader, Button, Badge } from "../ui";
+import { PageSkeleton } from "../loading";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { api } from "../../lib/api";
 import type {
@@ -141,20 +141,6 @@ export function SuccessorOnboardingWorkspace({
 
   const storageKey = `handover_onboarding_completed_${projectId}`;
 
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const raw = localStorage.getItem(storageKey);
-        if (raw) {
-          const parsed = JSON.parse(raw) as Record<string, boolean>;
-          setCompletedSteps(parsed);
-        }
-      } catch {
-        // ignore storage errors
-      }
-    }
-  }, [storageKey]);
-
   const markStepDone = (id: string) => {
     setCompletedSteps((prev) => {
       const next = { ...prev, [id]: true };
@@ -167,6 +153,8 @@ export function SuccessorOnboardingWorkspace({
       }
       return next;
     });
+    // Canonical backend database persistence
+    void api.onboarding.updateStep(projectId, id, true).catch(() => {});
   };
 
   const loadWorkspaceData = useCallback(async () => {
@@ -187,6 +175,7 @@ export function SuccessorOnboardingWorkspace({
         evidenceRes,
         sourcesRes,
         casesRes,
+        onboardingRes,
       ] = await Promise.all([
         api.projects.get(projectId),
         api.projects.getOverview(projectId).catch(() => null),
@@ -199,6 +188,9 @@ export function SuccessorOnboardingWorkspace({
         api.handover
           .listCases(projectId)
           .catch(() => ({ items: [], total: 0 })),
+        api.onboarding
+          .getProgress(projectId)
+          .catch(() => null),
       ]);
 
       setProject(projRes);
@@ -210,6 +202,28 @@ export function SuccessorOnboardingWorkspace({
       setEvidence(evidenceRes || []);
       setSources(sourcesRes || []);
       setHandoverCases(casesRes.items || []);
+
+      // Merge server-persisted onboarding progress with any local storage cache
+      const mergedCompleted: Record<string, boolean> = {
+        ...(onboardingRes?.completed_steps || {}),
+      };
+      if (typeof window !== "undefined") {
+        try {
+          const raw = localStorage.getItem(storageKey);
+          if (raw) {
+            const localSteps = JSON.parse(raw) as Record<string, boolean>;
+            for (const [stepId, isDone] of Object.entries(localSteps)) {
+              if (isDone && !mergedCompleted[stepId]) {
+                mergedCompleted[stepId] = true;
+                void api.onboarding.updateStep(projectId, stepId, true).catch(() => {});
+              }
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+      setCompletedSteps(mergedCompleted);
     } catch (err: unknown) {
       setErrorMessage(
         err instanceof Error
@@ -258,7 +272,6 @@ export function SuccessorOnboardingWorkspace({
   };
 
   return (
-    <AppLayout>
       <div className="space-y-6">
         {/* Header */}
         <div className="flex flex-col justify-between gap-4 rounded-2xl border border-line bg-white p-5 shadow-2xs sm:flex-row sm:items-center">
@@ -290,10 +303,9 @@ export function SuccessorOnboardingWorkspace({
         </div>
 
         {isLoading ? (
-          <Card className="flex items-center justify-center p-12 text-sm text-muted">
-            <Loader2 className="mr-2 size-5 animate-spin text-brand" />
-            Loading real project context...
-          </Card>
+          <div role="status" aria-live="polite">
+            <PageSkeleton layout="dashboard" />
+          </div>
         ) : errorMessage || !project ? (
           <Card className="p-6">
             <div className="flex items-start gap-3 text-sm text-red-700">
@@ -688,6 +700,5 @@ export function SuccessorOnboardingWorkspace({
           </div>
         )}
       </div>
-    </AppLayout>
   );
 }

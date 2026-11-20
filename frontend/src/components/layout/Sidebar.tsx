@@ -14,6 +14,7 @@ import {
   AlertTriangle,
   Workflow,
   Send,
+  Compass,
   Plug,
   ScrollText,
   Settings,
@@ -27,6 +28,7 @@ import {
   FileSearch,
   CheckCircle2,
   MessageSquareText,
+  Loader2,
   type LucideIcon,
 } from "lucide-react";
 import { Logo, LogoMark } from "../figma-ui/brand";
@@ -93,8 +95,14 @@ function WorkspaceSwitcher({ collapsed }: { collapsed: boolean }) {
     setMounted(true);
   }, []);
 
-  const { organisations, activeOrg, setActiveOrg, setIsCreateOrgModalOpen } =
-    useLiveApp();
+  const {
+    organisations,
+    activeOrg,
+    setActiveOrg,
+    setIsCreateOrgModalOpen,
+    isCreatingOrg,
+    isLoadingOrganisations,
+  } = useLiveApp();
 
   const activeName =
     mounted && activeOrg?.name
@@ -141,6 +149,21 @@ function WorkspaceSwitcher({ collapsed }: { collapsed: boolean }) {
           <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
             Workspaces
           </p>
+          {isCreatingOrg && (
+            <div className="flex items-center gap-2.5 px-2.5 py-2 text-slate-600 bg-slate-50/80 rounded-lg animate-pulse mb-1 border border-slate-200">
+              <Loader2 className="size-4 animate-spin text-brand shrink-0" />
+              <div className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] font-medium text-navy">Creating organisation...</span>
+                <span className="block text-[11px] text-muted">Provisioning multi-tenant workspace</span>
+              </div>
+            </div>
+          )}
+          {isLoadingOrganisations && orgList.length === 0 && !isCreatingOrg && (
+            <div className="flex items-center gap-2 px-2.5 py-3 text-slate-500 text-xs">
+              <Loader2 className="size-3.5 animate-spin text-brand shrink-0" />
+              <span>Loading organisations...</span>
+            </div>
+          )}
           {orgList.map((org) => {
             const isSelected = activeOrg?.id === org.id;
             return (
@@ -205,6 +228,8 @@ function ProjectSwitcher({
     setIsCreateProjectModalOpen,
     user,
     members,
+    isCreatingProject,
+    isLoadingProjects,
   } = useLiveApp();
 
   const effectiveProjects = projects;
@@ -289,6 +314,21 @@ function ProjectSwitcher({
           <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
             Switch project
           </p>
+          {isCreatingProject && (
+            <div className="flex items-center gap-2.5 px-2.5 py-2 text-slate-600 bg-slate-50/80 rounded-lg animate-pulse mb-1 border border-slate-200">
+              <Loader2 className="size-4 animate-spin text-brand shrink-0" />
+              <div className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] font-medium text-navy">Creating project...</span>
+                <span className="block text-[11px] text-muted">Setting up isolated repository & indexes</span>
+              </div>
+            </div>
+          )}
+          {isLoadingProjects && effectiveProjects.length === 0 && !isCreatingProject && (
+            <div className="flex items-center gap-2 px-2.5 py-3 text-slate-500 text-xs">
+              <Loader2 className="size-3.5 animate-spin text-brand shrink-0" />
+              <span>Loading projects...</span>
+            </div>
+          )}
           <button
             onClick={() => {
               setActiveProject(null);
@@ -487,6 +527,12 @@ function SidebarContent({
           to: "/generated-handovers",
           icon: Send,
           match: "^/generated-handovers",
+        },
+        {
+          label: "Successor Onboarding",
+          to: activeProject ? `/projects/${activeProject.id}/onboarding` : "/onboarding",
+          icon: Compass,
+          match: "^/projects/.+/onboarding|^/onboarding",
         },
       ],
     },

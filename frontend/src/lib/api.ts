@@ -52,7 +52,21 @@ import type {
   VerificationConflictItem,
   DetectConflictsResponse,
   QueueFilterParams,
+  ChangeImpactFeedResponse,
 } from "../types/verification";
+
+export interface OnboardingStepProgressItem {
+  step_id: string;
+  is_completed: boolean;
+  completed_at?: string | null;
+}
+
+export interface OnboardingProgressResponse {
+  project_id: string;
+  user_id: string;
+  completed_steps: Record<string, boolean>;
+  items: OnboardingStepProgressItem[];
+}
 
 export function getApiBaseUrl(): string {
   const configured = process.env.NEXT_PUBLIC_API_BASE_URL;
@@ -240,7 +254,7 @@ interface RawOverviewResponse {
 
 const inFlightRequests = new Map<string, Promise<unknown>>();
 const getCache = new Map<string, { timestamp: number; data: unknown }>();
-const CACHE_TTL_MS = 30000; // 30s in-memory deduplication & read cache for fast tab navigation
+const CACHE_TTL_MS = 2000; // 2s in-memory deduplication for concurrent callers without freezing live sync
 
 export function clearApiCache(pathPrefix?: string) {
   if (!pathPrefix) {
@@ -1286,9 +1300,7 @@ export const api = {
       return request(`/projects/${projectId}/relationships/identities/candidates/${candidateId}/review`, {
 
         method: "POST",
-
-        body: JSON.stringify({ action: decision, rationale }),
-
+        body: JSON.stringify({ action: decision, decision, rationale }),
       });
 
     },
@@ -1647,6 +1659,33 @@ export const api = {
 
   },
   knowledgeIntelligence: {
+    async getQuality(projectId: string, refresh: boolean = false): Promise<{
+      project_id?: string;
+      dimension_scores: Record<string, number>;
+      overall_quality_score?: number;
+      overall_score?: number;
+      identified_gaps?: Array<{
+        type: string;
+        severity: string;
+        title: string;
+        description: string;
+        recommendation: string;
+      }>;
+      gaps?: Array<{
+        type: string;
+        severity: string;
+        title: string;
+        description: string;
+        recommendation: string;
+      }>;
+      total_items: number;
+      verified_items?: number;
+      stale_items?: number;
+      recommendation_count?: number;
+    }> {
+      const q = refresh ? "?sync_findings=true" : "";
+      return request(`/projects/${projectId}/knowledge-intelligence/quality${q}`);
+    },
 
     async getGraph(
 
@@ -2249,6 +2288,19 @@ export const api = {
         body: JSON.stringify(body),
       });
     },
+    async reviewFinding(
+      projectId: string,
+      findingId: string,
+      payload: { action: "approve" | "flag" | "reject"; notes?: string }
+    ): Promise<Record<string, unknown>> {
+      return request(
+        `/projects/${projectId}/verification/findings/${findingId}/review`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        }
+      );
+    },
     async editFinding(
       projectId: string,
       caseId: string,
@@ -2329,6 +2381,15 @@ export const api = {
       return request<VerificationSummaryResponse>(`/projects/${projectId}/verification/assess-all`, {
         method: "POST",
       });
+    },
+    async getChangeImpact(
+      projectId: string,
+      limit: number = 50,
+      offset: number = 0
+    ): Promise<ChangeImpactFeedResponse> {
+      return request<ChangeImpactFeedResponse>(
+        `/projects/${projectId}/verification/change-impact?limit=${limit}&offset=${offset}`
+      );
     },
   },
   conflicts: {
@@ -2920,6 +2981,41 @@ export const api = {
       if (opts?.versionId) params.set("version_id", opts.versionId);
       if (opts?.role) params.set("role", opts.role);
       return request(`/projects/${projectId}/handover/cases/${caseId}/export?${params.toString()}`);
+    },
+  },
+  onboarding: {
+    async getProgress(
+      projectId: string,
+      targetUserId?: string
+    ): Promise<OnboardingProgressResponse> {
+      const q = targetUserId ? `?target_user_id=${encodeURIComponent(targetUserId)}` : "";
+      return request<OnboardingProgressResponse>(
+        `/projects/${projectId}/handover/onboarding/progress${q}`
+      );
+    },
+    async updateStep(
+      projectId: string,
+      stepId: string,
+      isCompleted: boolean = true
+    ): Promise<OnboardingStepProgressItem> {
+      return request<OnboardingStepProgressItem>(
+        `/projects/${projectId}/handover/onboarding/progress/${encodeURIComponent(stepId)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ is_completed: isCompleted }),
+        }
+      );
+    },
+    async deleteStep(
+      projectId: string,
+      stepId: string
+    ): Promise<{ status: string; step_id: string }> {
+      return request<{ status: string; step_id: string }>(
+        `/projects/${projectId}/handover/onboarding/progress/${encodeURIComponent(stepId)}`,
+        {
+          method: "DELETE",
+        }
+      );
     },
   },
   assistant: {

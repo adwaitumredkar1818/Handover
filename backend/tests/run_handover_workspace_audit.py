@@ -105,6 +105,8 @@ def _setup_test_context(session: Session) -> tuple[User, User, User, Organisatio
         password_hash=hash_password("DepartingSecret123!"),
         full_name="Alice Departing Lead",
         status=UserStatus.ACTIVE,
+        is_email_verified=True,
+        email_verified_at=datetime.now(UTC),
     )
     # 2. Successor
     successor = User(
@@ -113,6 +115,8 @@ def _setup_test_context(session: Session) -> tuple[User, User, User, Organisatio
         password_hash=hash_password("SuccessorSecret123!"),
         full_name="Bob Incoming Lead",
         status=UserStatus.ACTIVE,
+        is_email_verified=True,
+        email_verified_at=datetime.now(UTC),
     )
     # 3. Independent Reviewer
     reviewer = User(
@@ -121,6 +125,8 @@ def _setup_test_context(session: Session) -> tuple[User, User, User, Organisatio
         password_hash=hash_password("ReviewerSecret123!"),
         full_name="Carol Project Reviewer",
         status=UserStatus.ACTIVE,
+        is_email_verified=True,
+        email_verified_at=datetime.now(UTC),
     )
     session.add_all([departing, successor, reviewer])
     session.flush()
@@ -892,6 +898,42 @@ def run_full_handover_audit() -> dict[str, Any]:
             "GET /projects/{project_id}/handover/eligibility/knowledge_item/{id}",
             r_elig.status_code == 200 and r_elig.json()["is_eligible"] is True,
             f"Status {r_elig.status_code}, is_eligible={r_elig.json().get('is_eligible')}",
+        )
+
+        # 9. GET /api/v1/projects/{project_id}/handover/cases/{case_id}/export?format=markdown&role=developer
+        r_exp_md = client.get(f"/api/v1/projects/{project_id}/handover/cases/{case_id}/export?format=markdown&role=developer")
+        log_result(
+            "API-09",
+            "GET /projects/{project_id}/handover/cases/{case_id}/export (Markdown 16-Section)",
+            r_exp_md.status_code == 200 and "Table of Contents" in r_exp_md.text and "Executive Summary" in r_exp_md.text,
+            f"Status {r_exp_md.status_code}, length={len(r_exp_md.text)} chars",
+        )
+
+        # 10. GET /api/v1/projects/{project_id}/handover/cases/{case_id}/export?format=json&role=technical_lead
+        r_exp_json = client.get(f"/api/v1/projects/{project_id}/handover/cases/{case_id}/export?format=json&role=technical_lead")
+        log_result(
+            "API-10",
+            "GET /projects/{project_id}/handover/cases/{case_id}/export (JSON Structured 16-Section)",
+            r_exp_json.status_code == 200 and len(r_exp_json.json().get("sections", [])) == 16,
+            f"Status {r_exp_json.status_code}, sections count={len(r_exp_json.json().get('sections', []))}",
+        )
+
+        # 11. GET /api/v1/projects/{project_id}/handover/cases/{case_id}/export?format=pdf&role=project_manager
+        r_exp_pdf = client.get(f"/api/v1/projects/{project_id}/handover/cases/{case_id}/export?format=pdf&role=project_manager")
+        log_result(
+            "API-11",
+            "GET /projects/{project_id}/handover/cases/{case_id}/export (PyMuPDF Professional PDF)",
+            r_exp_pdf.status_code == 200 and r_exp_pdf.content.startswith(b"%PDF"),
+            f"Status {r_exp_pdf.status_code}, pdf_bytes={len(r_exp_pdf.content)} bytes",
+        )
+
+        # 12. GET /api/v1/projects/{project_id}/handover/cases/{case_id}/preview
+        r_prev = client.get(f"/api/v1/projects/{project_id}/handover/cases/{case_id}/preview?role=developer")
+        log_result(
+            "API-12",
+            "GET /projects/{project_id}/handover/cases/{case_id}/preview (Live Preview)",
+            r_prev.status_code == 200 and "sections" in r_prev.json(),
+            f"Status {r_prev.status_code}, preview title='{r_prev.json().get('title')}'",
         )
 
     # =========================================================================

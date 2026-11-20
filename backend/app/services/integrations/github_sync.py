@@ -99,6 +99,8 @@ class SyncExecutionReport:
     warnings: list[str] = field(default_factory=list)
     new_cursor: dict[str, Any] = field(default_factory=dict)
     partial: bool = False
+    created_evidence_ids: list[uuid.UUID] = field(default_factory=list)
+    updated_evidence_ids: list[uuid.UUID] = field(default_factory=list)
 
 
 def _extract_referenced_issue_numbers(*texts: str | None) -> list[int]:
@@ -1069,8 +1071,12 @@ class GitHubSyncOrchestrator:
         )
         if outcome.action == "created":
             report.items_created += 1
+            if outcome.evidence_item and outcome.evidence_item.id:
+                report.created_evidence_ids.append(outcome.evidence_item.id)
         elif outcome.action == "updated":
             report.items_updated += 1
+            if outcome.evidence_item and outcome.evidence_item.id:
+                report.updated_evidence_ids.append(outcome.evidence_item.id)
         else:
             report.items_unchanged += 1
 

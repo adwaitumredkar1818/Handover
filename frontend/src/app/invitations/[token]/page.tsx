@@ -18,6 +18,7 @@ import {
   UserCheck,
 } from "lucide-react";
 import { AuthLayout } from "../../../components/auth/AuthLayout";
+import { SectionLoader, ButtonLoader } from "../../../components/loading";
 import { useLiveApp } from "../../../context/LiveAppContext";
 import { api, ApiError } from "../../../lib/api";
 import type {
@@ -172,11 +173,11 @@ export default function InvitationAcceptancePage() {
   return (
     <AuthLayout>
       {isLoadingPreview || isLoadingAuth ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Loader2 className="size-7 animate-spin text-[#315FBA]" />
-          <p className="mt-3 text-sm text-[#718096]">
-            Validating invitation link...
-          </p>
+        <div className="py-6" role="status" aria-live="polite">
+          <SectionLoader
+            label="Validating invitation link..."
+            description="Confirming secure invitation token with The Handover platform identity authority."
+          />
         </div>
       ) : previewError || !preview ? (
         <div className="space-y-4">
@@ -564,20 +565,15 @@ export default function InvitationAcceptancePage() {
                     />
                   </div>
 
-                  <button
+                  <ButtonLoader
                     type="submit"
-                    disabled={isSubmitting}
-                    className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#315FBA] text-sm font-semibold text-white hover:bg-[#264C98] disabled:opacity-60"
+                    variant="primary"
+                    isLoading={isSubmitting}
+                    loadingText="Creating account..."
+                    className="w-full h-11 text-sm font-semibold"
                   >
-                    {isSubmitting ? (
-                      <>
-                        <Loader2 className="size-4 animate-spin" />
-                        Creating account...
-                      </>
-                    ) : (
-                      "Create Account & Accept Invitation"
-                    )}
-                  </button>
+                    Create Account & Accept Invitation
+                  </ButtonLoader>
                 </form>
               ) : (
                 <div className="space-y-3 rounded-xl border border-[#D9E1F0] bg-white p-4 text-xs text-[#718096]">

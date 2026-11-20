@@ -139,6 +139,7 @@ class JiraSyncOrchestrator:
         external_username: str | None,
         sync_mode: str,
         site_base_url: str | None = None,
+        on_batch_commit: Any = None,
     ) -> SyncExecutionReport:
         """Verify Jira project ACL, fetch issues/comments/worklogs/changelog/links, and upsert."""
         now = utc_now()
@@ -233,6 +234,17 @@ class JiraSyncOrchestrator:
                 },
             ),
         )
+
+        if on_batch_commit:
+            try:
+                on_batch_commit(
+                    "project_metadata",
+                    report.items_discovered,
+                    report.items_created,
+                    report.items_updated,
+                )
+            except Exception:
+                pass
 
         # 3. Build bounded project-scoped JQL with optional incremental timestamp cursor
         jql_clauses = [f'project = "{project_key}"']
@@ -366,6 +378,16 @@ class JiraSyncOrchestrator:
                     seen_external_ids=seen_external_ids,
                     record=record,
                 )
+                if on_batch_commit and (report.items_discovered % 5 == 0):
+                    try:
+                        on_batch_commit(
+                            "jira_issues",
+                            report.items_discovered,
+                            report.items_created,
+                            report.items_updated,
+                        )
+                    except Exception:
+                        pass
             except IntegrationAuthError:
                 raise
             except IntegrationProviderError as exc:
@@ -374,6 +396,17 @@ class JiraSyncOrchestrator:
                 report.items_failed += 1
                 report.partial = True
                 report.warnings.append(f"Jira issue {issue_key} failed: {exc.message}")
+
+        if on_batch_commit:
+            try:
+                on_batch_commit(
+                    "jira_issues",
+                    report.items_discovered,
+                    report.items_created,
+                    report.items_updated,
+                )
+            except Exception:
+                pass
 
         if (
             sync_mode in {"initial", "manual"}
@@ -426,8 +459,12 @@ class JiraSyncOrchestrator:
         )
         if outcome.action == "created":
             report.items_created += 1
+            if outcome.evidence_item and outcome.evidence_item.id:
+                report.created_evidence_ids.append(outcome.evidence_item.id)
         elif outcome.action == "updated":
             report.items_updated += 1
+            if outcome.evidence_item and outcome.evidence_item.id:
+                report.updated_evidence_ids.append(outcome.evidence_item.id)
         else:
             report.items_unchanged += 1
 

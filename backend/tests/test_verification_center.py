@@ -584,3 +584,35 @@ def _run_source_acl_test(session_factory, client: TestClient) -> None:
         headers=outsider.headers,
     )
     assert outsider_resp.status_code in (403, 404)
+
+
+def test_direct_finding_review_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test fast atomic POST /findings/{finding_id}/review endpoint."""
+    with isolated_auth_app(monkeypatch) as ctx:
+        with TestClient(ctx.app) as client:
+            owner = register_and_login_user(client, email="direct_rev@example.com", full_name="Direct Reviewer")
+            org_id_str, proj_id_str = _create_org_and_project(client, owner.headers, "vc-direct")
+            org_id, proj_id = uuid.UUID(org_id_str), uuid.UUID(proj_id_str)
+
+            with ctx.session_factory() as db:
+                ev = _seed_evidence(db, org_id=org_id, project_id=proj_id, user_id=owner.user_id, title="Direct Doc")
+                ki = _seed_knowledge_item(
+                    db,
+                    org_id=org_id,
+                    project_id=proj_id,
+                    title="Direct Knowledge Finding",
+                    statement="Direct test statement.",
+                    evidence=ev,
+                )
+                db.commit()
+                ki_id_str = str(ki.id)
+
+            # Direct approve
+            res_approve = client.post(
+                f"/api/v1/projects/{proj_id_str}/verification/findings/{ki_id_str}/review",
+                headers=owner.headers,
+                json={"action": "approve", "notes": "Approved via direct review"},
+            )
+            assert res_approve.status_code == 200
+            assert res_approve.json()["case_status"] == "verified"
+

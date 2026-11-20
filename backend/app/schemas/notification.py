@@ -50,5 +50,6 @@ class ActiveSyncJobResponse(BaseSchema):
     total_steps: int | None = None
     completed_steps: int | None = None
     message: str | None = None
+    mapping_id: str | None = None
     created_at: datetime
     started_at: datetime | None = None

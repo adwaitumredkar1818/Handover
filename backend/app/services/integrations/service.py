@@ -1716,6 +1716,13 @@ class SourceIntegrationService:
             message=f"Queued {mapping.provider} {sync_mode} source sync job.",
         )
         self._session.commit()
+        try:
+            from app.core.cache.local_cache import local_response_cache
+            local_response_cache.invalidate_prefix(f"ev_list:{project_ctx.project.id}:")
+            local_response_cache.invalidate_prefix(f"ev_metrics:{project_ctx.project.id}:")
+            local_response_cache.invalidate_prefix(f"overview:{project_ctx.project.id}:")
+        except Exception:
+            pass
         self._session.refresh(sync_run)
         self._session.refresh(job)
         try:
@@ -1841,6 +1848,13 @@ class SourceIntegrationService:
             message="Cancelled queued or running source sync run.",
         )
         self._session.commit()
+        try:
+            from app.core.cache.local_cache import local_response_cache
+            local_response_cache.invalidate_prefix(f"ev_list:{project_ctx.project.id}:")
+            local_response_cache.invalidate_prefix(f"ev_metrics:{project_ctx.project.id}:")
+            local_response_cache.invalidate_prefix(f"overview:{project_ctx.project.id}:")
+        except Exception:
+            pass
         self._session.refresh(sync_run)
         if job is not None:
             self._session.refresh(job)

@@ -7,7 +7,7 @@ import {
   ChevronRight, ClipboardCheck, AlertTriangle, ArrowRight, BrainCircuit,
   CalendarClock, CheckCircle2, Columns3, FileQuestion, GitCommitHorizontal,
   GitPullRequest, Lightbulb, Link2, List, ListTodo, MessageSquare, Milestone,
-  Network, ShieldCheck, Sparkles, UserRoundCog, Zap, Ban, Flag, Search, Filter
+  Network, ShieldCheck, Sparkles, UserRoundCog, Zap, Ban, Flag, Search, Filter, Plus
 } from 'lucide-react'
 
 import { useFigmaStore as useStore, FigmaStoreProvider, FigmaCtx } from '../../lib/figmaStore'
@@ -1141,10 +1141,28 @@ export interface IntelligencePageProps {
 
 function IntelligencePageInner({ view = 'overview', projectId }: IntelligencePageProps) {
   const params = useParams() as { id?: string } | null
-  const { activeProject } = useLiveApp()
+  const { activeProject, activeOrg } = useLiveApp()
   const s = useStore()
 
-  const pid = projectId || params?.id || activeProject?.id || s.currentProject?.id || 'atlas'
+  const storePid = s.currentProject?.workspaceId === activeOrg?.id ? s.currentProject?.id : undefined
+  const pid = projectId || params?.id || activeProject?.id || storePid || ''
+
+  if (!pid) {
+    return (
+      <Card className="p-8 text-center my-6">
+        <EmptyState
+          icon={Network}
+          title="No project workspace selected"
+          body="Select or create a project workspace in this organisation to view intelligence, decisions, and relationships."
+          action={
+            <Button icon={Plus} onClick={() => window.location.assign('/projects/new')}>
+              Create project
+            </Button>
+          }
+        />
+      </Card>
+    )
+  }
 
   switch (view) {
     case 'overview':

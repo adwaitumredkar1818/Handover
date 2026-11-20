@@ -22,7 +22,7 @@ export function CreateOrganisationModal() {
     setError(null);
     setIsSubmitting(true);
     try {
-      await createOrganisation(name.trim(), undefined);
+      await createOrganisation(name.trim(), undefined, description.trim() || undefined);
       setName("");
       setDescription("");
       setIsCreateOrgModalOpen(false);

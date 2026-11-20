@@ -10,7 +10,7 @@ import React, {
   type ReactNode,
 } from "react";
 import { usePathname } from "next/navigation";
-import { api, setStoredToken, setStoredUser, getStoredUser, ApiError } from "../lib/api";
+import { api, setStoredToken, setStoredUser, getStoredUser, ApiError, clearApiCache } from "../lib/api";
 import { getCachedGraph, invalidateGraphCache, setCachedGraph, setGraphCacheUser } from "../lib/graphCache";
 import {
   prefetchAllWorkspaceProjects,
@@ -62,7 +62,9 @@ interface LiveAppContextType {
   organisations: Organisation[];
   activeOrg: Organisation | null;
   setActiveOrg: (org: Organisation) => void;
-  createOrganisation: (name: string, slug?: string) => Promise<Organisation>;
+  createOrganisation: (name: string, slug?: string, description?: string) => Promise<Organisation>;
+  isCreatingOrg: boolean;
+  isLoadingOrganisations: boolean;
 
   // Projects
   projects: Project[];
@@ -72,6 +74,7 @@ interface LiveAppContextType {
     data: { name: string; slug?: string; description?: string; target_handover_date?: string },
     options?: { orgId?: string; newOrgName?: string }
   ) => Promise<Project>;
+  isCreatingProject: boolean;
   isLoadingProjects: boolean;
   refreshProjects: () => Promise<void>;
 
@@ -216,6 +219,9 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
   const [isLoadingProjects, setIsLoadingProjects] = useState(false);
+  const [isCreatingOrg, setIsCreatingOrg] = useState(false);
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [isLoadingOrganisations, setIsLoadingOrganisations] = useState(false);
 
   // Overview state
   const [overview, setOverview] = useState<ProjectOverview | null>(null);
@@ -284,24 +290,6 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     setGraphCacheUser(user?.id || null);
   }, [user?.id]);
 
-  // Organisation selector wrapper that persists user workspace preference
-  const setActiveOrg = useCallback(
-    (action: Organisation | null | ((prev: Organisation | null) => Organisation | null)) => {
-      setActiveOrgInternal((prev) => {
-        const next = typeof action === "function" ? action(prev) : action;
-        if (next && typeof window !== "undefined") {
-          localStorage.setItem("handover_active_org_id", next.id);
-          localStorage.setItem("handover_cached_active_org", JSON.stringify(next));
-        } else if (!next && typeof window !== "undefined") {
-          localStorage.removeItem("handover_active_org_id");
-          localStorage.removeItem("handover_cached_active_org");
-        }
-        return next;
-      });
-    },
-    []
-  );
-
   // Project selector wrapper that resets stale project-specific caches
   const setActiveProject = useCallback(
     (action: Project | null | ((prev: Project | null) => Project | null)) => {
@@ -329,6 +317,28 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       });
     },
     []
+  );
+
+  // Organisation selector wrapper that persists user workspace preference
+  const setActiveOrg = useCallback(
+    (action: Organisation | null | ((prev: Organisation | null) => Organisation | null)) => {
+      setActiveOrgInternal((prev) => {
+        const next = typeof action === "function" ? action(prev) : action;
+        if (next && typeof window !== "undefined") {
+          localStorage.setItem("handover_active_org_id", next.id);
+          localStorage.setItem("handover_cached_active_org", JSON.stringify(next));
+        } else if (!next && typeof window !== "undefined") {
+          localStorage.removeItem("handover_active_org_id");
+          localStorage.removeItem("handover_cached_active_org");
+        }
+        if (prev?.id !== next?.id) {
+          // Immediately reset active project and project states on organisation switch
+          setActiveProject(null);
+        }
+        return next;
+      });
+    },
+    [setActiveProject]
   );
 
   // Modals & UI
@@ -431,12 +441,34 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
           return;
         }
 
-        // 2. Only if unauthenticated, check if there's an active Supabase OAuth session to exchange
+        // 2. Only if unauthenticated, check if there's an active Supabase OAuth session or fallback code to exchange
         try {
           const supabase = createSupabaseClient();
           if (supabase) {
-            const { data } = await supabase.auth.getSession();
-            const sbToken = data?.session?.access_token;
+            const urlParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+            const supabaseCode = urlParams?.get("supabase_code");
+            let sbToken: string | undefined;
+
+            if (supabaseCode) {
+              const { data: codeData, error: codeErr } = await supabase.auth.exchangeCodeForSession(supabaseCode);
+              if (!codeErr && codeData?.session?.access_token) {
+                sbToken = codeData.session.access_token;
+                if (typeof window !== "undefined" && window.history?.replaceState) {
+                  const cleanUrl = window.location.pathname;
+                  window.history.replaceState({}, document.title, cleanUrl);
+                }
+              } else if (codeErr) {
+                console.warn("Client fallback code exchange failed:", codeErr);
+                window.location.href = `/login?oauth_error=${encodeURIComponent(codeErr.message)}`;
+                return;
+              }
+            }
+
+            if (!sbToken) {
+              const { data } = await supabase.auth.getSession();
+              sbToken = data?.session?.access_token;
+            }
+
             if (sbToken) {
               try {
                 const exchangeRes = await api.auth.exchangeSupabaseToken(sbToken);
@@ -451,6 +483,12 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
                 return;
               } catch (exchangeErr) {
                 console.warn("Supabase token exchange skipped:", exchangeErr);
+                if (typeof window !== "undefined" && (window.location.search.includes("supabase_auth=success") || supabaseCode)) {
+                  const errorMsg = exchangeErr instanceof Error ? exchangeErr.message : "Failed to verify workspace session";
+                  await supabase.auth.signOut().catch(() => {});
+                  window.location.href = `/login?oauth_error=${encodeURIComponent(errorMsg)}`;
+                  return;
+                }
               }
             }
           }
@@ -508,7 +546,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       const supabase = createSupabaseClient();
       if (supabase) {
         const { data: authListener } = supabase.auth.onAuthStateChange(
-          async (event, session) => {
+          async (event: string, session: any) => {
             if ((event === "SIGNED_IN" || event === "TOKEN_REFRESHED") && session?.access_token) {
               const existingStored =
                 typeof window !== "undefined" ? localStorage.getItem("handover_access_token") : null;
@@ -533,6 +571,11 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
                 setIsLoadingAuth(false);
               } catch (err) {
                 console.warn("Failed to exchange Supabase session on auth state change:", err);
+                if (typeof window !== "undefined" && window.location.search.includes("supabase_auth=success")) {
+                  const errorMsg = err instanceof Error ? err.message : "Failed to verify workspace session";
+                  await supabase.auth.signOut().catch(() => {});
+                  window.location.href = `/login?oauth_error=${encodeURIComponent(errorMsg)}`;
+                }
               }
             } else if (event === "SIGNED_OUT") {
               setStoredToken(null);
@@ -575,6 +618,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   // Once authenticated, load organisations
   const refreshOrganisations = useCallback(async () => {
     if (!user) return;
+    setIsLoadingOrganisations(true);
     try {
       const orgs = await api.organisations.list();
       setOrganisations(orgs);
@@ -592,6 +636,8 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 401) return;
       console.error("Error loading organisations:", err);
+    } finally {
+      setIsLoadingOrganisations(false);
     }
   }, [user, setActiveOrg]);
 
@@ -642,15 +688,15 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
           if (current) {
             const matchedCurrent = projs.find((p) => p.id === current.id);
             if (matchedCurrent) return matchedCurrent;
-            // Never overwrite an active project from another org with projs[0]
-            if (current.organisation_id && current.organisation_id !== targetOrgId) {
-              return current;
-            }
           }
           return preferredProj;
         });
       } else {
         setActiveProject(null);
+        if (typeof window !== "undefined") {
+          localStorage.removeItem("handover_active_project_id");
+          localStorage.removeItem("handover_cached_active_project");
+        }
       }
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 401) return;
@@ -857,6 +903,10 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     const targetProjectId = activeProject?.id || null;
     setIsLoadingSources(true);
     try {
+      if (targetProjectId) {
+        clearApiCache(`/projects/${targetProjectId}/sources`);
+      }
+      clearApiCache(`/organisations/${targetOrgId}/sources`);
       const [mappingsRes, connsRes] = await Promise.allSettled([
         targetProjectId
           ? api.sources.listProjectMappings(targetProjectId)
@@ -887,19 +937,25 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const isFetchingEvidenceRef = useRef(false);
   const evidenceListLenRef = useRef(0);
   evidenceListLenRef.current = evidenceList.length;
+  const hasPendingRefreshEvidenceRef = useRef(false);
   const refreshEvidence = useCallback(async () => {
     if (!user || !activeProject) {
       setEvidenceList([]);
       setEvidenceMetrics(null);
       return;
     }
-    if (isFetchingEvidenceRef.current) return;
+    if (isFetchingEvidenceRef.current) {
+      hasPendingRefreshEvidenceRef.current = true;
+      return;
+    }
     isFetchingEvidenceRef.current = true;
+    hasPendingRefreshEvidenceRef.current = false;
     const currentProjectId = activeProject.id;
     if (evidenceListLenRef.current === 0) {
       setIsLoadingEvidence(true);
     }
     try {
+      clearApiCache(`/projects/${currentProjectId}/evidence`);
       const [itemsRes, metricsRes] = await Promise.allSettled([
         api.evidence.list(currentProjectId, {
           limit: 500,
@@ -931,6 +987,10 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
         setIsLoadingEvidence(false);
       }
       isFetchingEvidenceRef.current = false;
+      if (hasPendingRefreshEvidenceRef.current) {
+        hasPendingRefreshEvidenceRef.current = false;
+        void refreshEvidence();
+      }
     }
   }, [user?.id, activeProject?.id]);
 
@@ -1014,7 +1074,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       addToast({
         type: "success",
         title: "AI Knowledge Reconstruction Started",
-        message: "Ollama Qwen3 8B is reconstructing project knowledge from all gathered sources without timeout.",
+        message: "AI knowledge reconstruction is analyzing project knowledge from all gathered sources.",
       });
       await refreshFindings();
       await refreshOverview();
@@ -1172,6 +1232,14 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
           title: "Background Task Finished",
           message: "All background sync and extraction jobs have completed.",
         });
+      } else if (prevJobs.length > jobs.length) {
+        void refreshEvidence();
+        void refreshSources();
+        void refreshNotifications();
+      } else if (jobs.length > 0) {
+        // While jobs are actively running, refresh evidence and sources so newly committed extractions appear immediately
+        void refreshEvidence();
+        void refreshSources();
       }
     } catch {
       // ignore
@@ -1214,7 +1282,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     void refreshNotifications();
     void refreshActiveJobs();
 
-    const intervalTime = hasActiveJobs ? 3000 : 15000;
+    const intervalTime = hasActiveJobs ? 2500 : 15000;
     const timer = setInterval(() => {
       if (typeof document !== "undefined" && document.hidden) {
         return;
@@ -1235,6 +1303,19 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!currentUserId || !activeProjectId) {
       lastLoadedProjectIdRef.current = null;
+      setOverview(null);
+      setMembers([]);
+      setEvidenceList([]);
+      setEvidenceMetrics(null);
+      setSelectedEvidenceId(null);
+      setSelectedEvidence(null);
+      setFindings([]);
+      setKnowledgeSummary(null);
+      setVerificationQueue([]);
+      setVerificationSummary(null);
+      setHandoverCases([]);
+      setActiveJobs([]);
+      setSourceMappings([]);
       return;
     }
     if (lastLoadedProjectIdRef.current === activeProjectId) {
@@ -1358,63 +1439,81 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   };
 
   // Org & Project actions
-  const createOrganisation = async (name: string, slug?: string) => {
-    const org = await api.organisations.create({ name, slug });
-    await refreshOrganisations();
-    setActiveOrg(org);
-    addToast({
-      type: "success",
-      title: "Organisation Created",
-      message: `Organisation ${org.name} is ready`,
-    });
-    return org;
+  const createOrganisation = async (name: string, slug?: string, description?: string) => {
+    setIsCreatingOrg(true);
+    try {
+      const org = await api.organisations.create({ name, slug, description });
+      await refreshOrganisations();
+      setActiveOrg(org);
+      addToast({
+        type: "success",
+        title: "Organisation Created",
+        message: `Organisation ${org.name} is ready`,
+      });
+      return org;
+    } finally {
+      setIsCreatingOrg(false);
+    }
   };
 
   const createProject = async (
     data: { name: string; slug?: string; description?: string; target_handover_date?: string },
     options?: { orgId?: string; newOrgName?: string }
   ) => {
-    let targetOrg: Organisation | null = activeOrg;
+    setIsCreatingProject(true);
+    try {
+      let targetOrg: Organisation | null = activeOrg;
 
-    if (options?.newOrgName && options.newOrgName.trim()) {
-      targetOrg = await createOrganisation(options.newOrgName.trim());
-    } else if (options?.orgId) {
-      targetOrg = organisations.find((o) => o.id === options.orgId) ?? activeOrg;
+      if (options?.newOrgName && options.newOrgName.trim()) {
+        targetOrg = await createOrganisation(options.newOrgName.trim());
+      } else if (options?.orgId) {
+        targetOrg = organisations.find((o) => o.id === options.orgId) ?? activeOrg;
+      }
+
+      if (!targetOrg && organisations.length > 0 && organisations[0]) {
+        targetOrg = organisations[0];
+        setActiveOrg(targetOrg);
+      }
+
+      if (!targetOrg) {
+        throw new Error("Please specify or create an Organisation workspace first.");
+      }
+
+      const proj = await api.projects.create(targetOrg.id, data);
+      await refreshProjects();
+      setActiveProject(proj);
+      setIsCreateProjectModalOpen(false);
+      addToast({
+        type: "success",
+        title: "Project Workspace Created",
+        message: `Project ${proj.name} is now active in ${targetOrg.name}`,
+      });
+      return proj;
+    } finally {
+      setIsCreatingProject(false);
     }
-
-    if (!targetOrg && organisations.length > 0 && organisations[0]) {
-      targetOrg = organisations[0];
-      setActiveOrg(targetOrg);
-    }
-
-    if (!targetOrg) {
-      throw new Error("Please specify or create an Organisation workspace first.");
-    }
-
-    const proj = await api.projects.create(targetOrg.id, data);
-    await refreshProjects();
-    setActiveProject(proj);
-    setIsCreateProjectModalOpen(false);
-    addToast({
-      type: "success",
-      title: "Project Workspace Created",
-      message: `Project ${proj.name} is now active in ${targetOrg.name}`,
-    });
-    return proj;
   };
 
   // Member actions
   const addMember = async (data: { email?: string; user_id?: string; role_name?: string; transition_role?: string }) => {
     if (!activeProject) throw new Error("No active project");
-    await api.members.add(activeProject.id, data);
+    const res = await api.members.add(activeProject.id, data);
     invalidateGraphCache("rel_");
     await refreshMembers();
     setIsAddMemberModalOpen(false);
-    addToast({
-      type: "success",
-      title: "Member Added",
-      message: "Team member joined the project workspace",
-    });
+    if (res && res.status === "invited") {
+      addToast({
+        type: "info",
+        title: "Invitation Sent",
+        message: `Project invitation issued for ${data.email || "new member"}`,
+      });
+    } else {
+      addToast({
+        type: "success",
+        title: "Member Added",
+        message: `${res?.full_name || data.email || "Team member"} joined the project workspace`,
+      });
+    }
   };
 
   const updateMember = async (memberId: string, data: { role_name?: string; transition_role?: string }) => {
@@ -1487,16 +1586,34 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const triggerSync = async (mappingId: string) => {
-    if (!activeProject) return;
+  const triggerSync = async (mappingId: string, projectId?: string) => {
+    const targetProjectId = projectId || activeProject?.id;
+    if (!targetProjectId) return;
     try {
-      const res = await api.sources.triggerSync(activeProject.id, mappingId);
+      clearApiCache();
+      const res = await api.sources.triggerSync(targetProjectId, mappingId);
       addToast({
         type: "info",
         title: "Sync Started",
         message: res.message || "Background sync job submitted",
       });
-      void Promise.allSettled([refreshSources(), refreshEvidence(), refreshOverview()]);
+      await refreshSources();
+      await refreshEvidence();
+      await refreshOverview();
+      void refreshActiveJobs();
+
+      // Responsive polling while worker executes sync
+      let pollCount = 0;
+      const pollTimer = setInterval(async () => {
+        pollCount += 1;
+        clearApiCache();
+        await refreshActiveJobs();
+        await refreshSources();
+        await refreshEvidence();
+        if (pollCount >= 60) {
+          clearInterval(pollTimer);
+        }
+      }, 2000);
     } catch (err: unknown) {
       addToast({
         type: "error",
@@ -1634,10 +1751,13 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     activeOrg,
     setActiveOrg,
     createOrganisation,
+    isCreatingOrg,
+    isLoadingOrganisations,
     projects,
     activeProject,
     setActiveProject,
     createProject,
+    isCreatingProject,
     isLoadingProjects,
     refreshProjects,
     overview,

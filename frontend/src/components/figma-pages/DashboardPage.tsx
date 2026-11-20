@@ -29,7 +29,6 @@ import {
   FigmaCtx,
   activityTrend,
   gaps,
-  ME,
   personById,
   timeline,
   ROLE_LABEL,
@@ -91,14 +90,17 @@ const ViewLink = ({ to, children = 'View all' }: { to: string; children?: ReactN
 
 function ProjectSwitcherStrip() {
   const s = useFigmaStore()
-  const { projects: liveProjects, activeProject: liveProject, setActiveProject } = useLiveApp()
-  const projectsList = liveProjects && liveProjects.length > 0 ? liveProjects.map(lp => ({
+  const { projects: liveProjects, activeProject: liveProject, setActiveProject, activeOrg } = useLiveApp()
+  const validStoreProjects = s.projects.filter(p => !activeOrg?.id || p.workspaceId === activeOrg.id)
+  const projectsList = liveProjects ? liveProjects.map(lp => ({
     id: lp.id,
     name: lp.name,
     code: lp.slug?.toUpperCase() || lp.name.slice(0, 3).toUpperCase(),
     color: '#0f766e',
     role: (lp.my_project_role?.toLowerCase() || 'manager') as MemberRole,
-  })) : s.projects
+  })) : validStoreProjects
+
+  if (projectsList.length === 0) return null
 
   return (
     <div className="scrollbar-thin -mx-1 flex gap-1 overflow-x-auto px-1 pb-1" role="tablist" aria-label="Switch project">
@@ -221,6 +223,7 @@ function ManagerDash({ project }: { project: Project }) {
   const s = useFigmaStore()
   const {
     projects: liveProjects,
+    activeProject: liveProject,
     overview,
     sourceMappings,
     handoverCases,
@@ -228,24 +231,30 @@ function ManagerDash({ project }: { project: Project }) {
     verificationSummary,
   } = useLiveApp()
 
-  const projectsCount = liveProjects?.length || 1
-  const activeHandoversCount = handoverCases?.length || 1
-  const connectedSourcesCount = sourceMappings?.length || overview?.sources?.connected_count || 2
-  const verifiedFindingsCount = verificationSummary?.total_cases || findings?.length || 47
+  const projectsCount = liveProjects?.length || (liveProject ? 1 : 0)
+  const activeHandoversCount = handoverCases?.length || 0
+  const connectedSourcesCount = sourceMappings?.length ?? overview?.sources?.connected_count ?? 0
+  const verifiedFindingsCount = verificationSummary?.total_cases ?? findings?.length ?? 0
 
   const pendingHandovers = handoverCases?.filter((h) => h.status === 'verification' || h.status === 'in_progress') || []
   const failingSources = sourceMappings?.filter((m) => m.status === 'error') || []
   const firstPending = pendingHandovers[0]
 
-  const weekEvidence = overview?.evidence?.total_evidence_items || 74
-  const weekFindings = findings?.length || 47
+  const weekEvidence = overview?.evidence?.total_evidence_items ?? 0
+  const weekFindings = findings?.length ?? 0
 
-  const trendData = [
-    { label: '11 Nov', evidence: 14, findings: 8 },
-    { label: '12 Nov', evidence: 32, findings: 19 },
-    { label: '13 Nov', evidence: 48, findings: 28 },
-    { label: '14 Nov', evidence: 65, findings: 39 },
-    { label: '15 Nov', evidence: weekEvidence, findings: weekFindings },
+  const trendData = weekEvidence > 0 ? [
+    { label: 'Day 1', evidence: Math.round((weekEvidence / 5) * 0.4), findings: Math.round((weekFindings / 5) * 0.3) },
+    { label: 'Day 2', evidence: Math.round((weekEvidence / 5) * 0.6), findings: Math.round((weekFindings / 5) * 0.5) },
+    { label: 'Day 3', evidence: Math.round((weekEvidence / 5) * 0.8), findings: Math.round((weekFindings / 5) * 0.7) },
+    { label: 'Day 4', evidence: Math.round((weekEvidence / 5) * 0.9), findings: Math.round((weekFindings / 5) * 0.9) },
+    { label: 'Today', evidence: weekEvidence, findings: weekFindings },
+  ] : [
+    { label: 'Day 1', evidence: 0, findings: 0 },
+    { label: 'Day 2', evidence: 0, findings: 0 },
+    { label: 'Day 3', evidence: 0, findings: 0 },
+    { label: 'Day 4', evidence: 0, findings: 0 },
+    { label: 'Today', evidence: 0, findings: 0 },
   ]
 
   const attention = [
@@ -265,8 +274,8 @@ function ManagerDash({ project }: { project: Project }) {
       {firstPending ? (
         <NextAction
           tone="amber"
-          title={`Review ${firstPending.title || 'Skillpassport Handover'}`}
-          body="1 active handover is waiting in verification review. Reconstructed knowledge across 47 findings requires validation."
+          title={`Review ${firstPending.title || 'Project Handover'}`}
+          body="1 active handover is waiting in verification review. Reconstructed knowledge requires validation."
           cta="Start review"
           to="/handovers"
         />
@@ -403,9 +412,9 @@ function ManagerDash({ project }: { project: Project }) {
               <span className="text-right">Risks</span>
               <span className="text-right">Sync</span>
             </div>
-            {(liveProjects?.length ? liveProjects : [project]).map((p) => {
-              const healthScore = overview?.readiness?.overall_readiness_pct || 92
-              const risksCount = overview?.knowledge?.risks_count || 11
+            {(liveProjects?.length ? liveProjects : (project ? [project] : [])).map((p) => {
+              const healthScore = overview?.readiness?.overall_readiness_pct ?? 0
+              const risksCount = overview?.knowledge?.risks_count ?? 0
               return (
                 <Link
                   key={p.id}
@@ -438,17 +447,14 @@ function ManagerDash({ project }: { project: Project }) {
         </Panel>
         <Panel title="Knowledge processing status" sub={project.name}>
           <ul className="space-y-3.5 px-5 pb-5 sm:px-6">
-            {(sourceMappings?.length ? sourceMappings : [
-              { id: 'src-1', provider: 'github' as const, external_resource_name: 'shubham392007-sketch/HackMatrix-5.0-MISCo2', status: 'connected', records_count: 72 },
-              { id: 'src-2', provider: 'document_upload' as const, external_resource_name: 'GrowthLens – Skill Passport & Handover Specification.docx', status: 'connected', records_count: 2 },
-            ]).map((x) => (
+            {(sourceMappings || []).map((x) => (
               <li key={x.id}>
                 <Link href="/evidence" className="flex items-center gap-3">
                   <SourceIcon type={x.provider === 'github' ? 'github' : 'docs'} size={28} />
                   <div className="min-w-0 flex-1">
                     <p className="flex items-center justify-between text-[13px]">
                       <span className="font-medium text-navy">{x.external_resource_name}</span>
-                      <Mono className="text-[11.5px] text-muted">{((x as unknown as { records_count?: number }).records_count ?? (x.provider === 'github' ? 72 : 2)).toLocaleString()}</Mono>
+                      <Mono className="text-[11.5px] text-muted">{((x as unknown as { records_count?: number }).records_count ?? 0).toLocaleString()}</Mono>
                     </p>
                     <p className="text-[11.5px] text-muted">
                       {x.status === 'error' ? <span className="text-red-600">Sync failing</span> : 'Synced recently'}
@@ -457,6 +463,11 @@ function ManagerDash({ project }: { project: Project }) {
                 </Link>
               </li>
             ))}
+            {!sourceMappings?.length && (
+              <li className="py-4 text-center text-[12.5px] text-muted">
+                No data sources connected yet.
+              </li>
+            )}
           </ul>
         </Panel>
       </div>
@@ -468,12 +479,14 @@ function ManagerDash({ project }: { project: Project }) {
 function OutgoingDash({ project }: { project: Project }) {
   const router = useRouter()
   const s = useFigmaStore()
-  const h = s.handovers.find((x) => x.projectId === project.id && x.outgoingId === ME)
+  const { user } = useLiveApp()
+  const currentUserId = user?.id || ''
+  const h = s.handovers.find((x) => x.projectId === project.id && (x.outgoingId === currentUserId || (user?.email && x.outgoingId === user.email)))
   const findings = allFindings(project.id)
   const status = (f: (typeof findings)[number]) => s.verif[f.id] ?? f.verification
   const pending = findings.filter((f) => !['verified', 'rejected'].includes(status(f)))
   const projGaps = gaps.filter((g) => g.projectId === project.id && !s.gapAnswers[g.id])
-  const myTasks = projectFindings(project.id).tasks.filter((t) => t.ownerId === ME && t.status !== 'Done')
+  const myTasks = projectFindings(project.id).tasks.filter((t) => (t.ownerId === currentUserId || (user?.email && t.ownerId === user.email)) && t.status !== 'Done')
   const reviewed = findings.length - findings.filter((f) => status(f) === 'needs_review').length
   const checklist = [
     { label: 'Review AI-generated findings', done: pending.length === 0, meta: `${reviewed}/${findings.length}` },
@@ -496,7 +509,7 @@ function OutgoingDash({ project }: { project: Project }) {
       )}
       <MetricBand
         items={[
-          { label: 'My active handovers', value: s.handovers.filter((x) => x.outgoingId === ME && x.status !== 'completed').length, tone: 'blue', onClick: () => router.push('/handovers') },
+          { label: 'My active handovers', value: s.handovers.filter((x) => (x.outgoingId === currentUserId || (user?.email && x.outgoingId === user.email)) && x.status !== 'completed').length, tone: 'blue', onClick: () => router.push('/handovers') },
           { label: 'Pending verification', value: pending.length, hint: 'findings to confirm', tone: 'amber', onClick: h ? () => router.push(`/handovers/${h.id}/review`) : undefined },
           { label: 'Missing information', value: projGaps.length, hint: 'questions only you can answer', tone: 'red', onClick: h ? () => router.push(`/handovers/${h.id}/review?gaps=1`) : undefined },
           { label: 'Pending responsibilities', value: myTasks.length, hint: 'tasks to transfer', tone: 'indigo', onClick: () => router.push(`/projects/${project.id}/intelligence/tasks`) },
@@ -585,7 +598,9 @@ function OutgoingDash({ project }: { project: Project }) {
 function IncomingDash({ project }: { project: Project }) {
   const router = useRouter()
   const s = useFigmaStore()
-  const received = s.handovers.filter((h) => h.incomingId === ME && (h.status === 'published' || h.status === 'completed'))
+  const { user } = useLiveApp()
+  const currentUserId = user?.id || ''
+  const received = s.handovers.filter((h) => (h.incomingId === currentUserId || (user?.email && h.incomingId === user.email)) && (h.status === 'published' || h.status === 'completed'))
   const pendingAck = received.filter((h) => h.status === 'published')
   const main = received.find((h) => h.projectId === project.id && h.status === 'published') ?? received.find((h) => h.projectId === project.id)
   const verified = allFindings(project.id).filter((f) => (s.verif[f.id] ?? f.verification) === 'verified')
@@ -992,13 +1007,13 @@ function DashboardContent() {
     setIsCreateProjectModalOpen,
   } = useLiveApp()
 
-  const projectsCount = liveProjects?.length || (liveProject ? 1 : 0)
-  const activeHandoversCount = handoverCases?.length || (liveProject ? 1 : 0)
-  const connectedSourcesCount = sourceMappings?.length || overview?.sources?.connected_count || 2
-  const verifiedFindingsCount = verificationSummary?.total_cases || findings?.length || 47
-  const orgName = activeOrg?.name || 'The Sapiens'
-  const activeProjectName = liveProject?.name || (liveProjects?.[0]?.name ?? 'Skillpassport')
-  const membersCount = liveMembers?.length || 3
+  const projectsCount = liveProjects?.length ?? (liveProject ? 1 : 0)
+  const activeHandoversCount = handoverCases?.length ?? 0
+  const connectedSourcesCount = sourceMappings?.length ?? (overview?.sources?.connected_count ?? 0)
+  const verifiedFindingsCount = verificationSummary?.total_cases ?? (findings?.length ?? 0)
+  const orgName = activeOrg?.name || 'Your Organisation'
+  const activeProjectName = liveProject?.name || (liveProjects?.[0]?.name ?? '')
+  const membersCount = liveMembers?.length ?? 0
 
   // Determine user role strictly from LiveAppContext
   const currentMember = liveMembers?.find(
@@ -1041,27 +1056,27 @@ function DashboardContent() {
   }
 
   const currentLiveProj = liveProject || (liveProjects && liveProjects.length > 0 ? liveProjects[0] : null)
-  const p: Project | null = s.currentProject || (currentLiveProj ? {
+  const storeProj = (s.currentProject?.workspaceId === activeOrg?.id ? s.currentProject : null) ?? null
+  const p: Project | null = (currentLiveProj ? {
     id: currentLiveProj.id,
-    workspaceId: s.workspaceId || 'workspace',
+    workspaceId: currentLiveProj.organisation_id || activeOrg?.id || s.workspaceId || 'workspace',
     name: currentLiveProj.name,
     code: currentLiveProj.slug?.toUpperCase() || currentLiveProj.name.slice(0, 3).toUpperCase(),
     description: currentLiveProj.description || 'Verified skills and handover reconstruction platform workspace.',
     category: 'Platform Engineering',
     status: 'active' as const,
-    health: overview?.readiness?.overall_readiness_pct || 92,
-    ownerId: currentLiveProj.owner_id || user?.id || ME,
+    health: overview?.readiness?.overall_readiness_pct ?? 0,
+    ownerId: currentLiveProj.owner_id || user?.id || '',
     role: (effectiveRole === 'member' ? 'incoming' : effectiveRole) as ProjectRole,
     lastActivity: 'Today',
-    coverage: overview?.readiness?.overall_readiness_pct || 88,
+    coverage: overview?.readiness?.overall_readiness_pct ?? 0,
     startDate: currentLiveProj.start_date || '2026-10-01',
-    endDate: currentLiveProj.target_completion_date || currentLiveProj.target_handover_date || '2026-12-01',
+    endDate: currentLiveProj.target_completion_date || currentLiveProj.target_handover_date || '',
     color: '#0f766e',
-  } : null)
+  } : null) || storeProj || null
 
   const loading = useFakeLoading(450, [p?.id, s.workspaceId])
-  const me = personById(ME)
-  const displayName = user?.full_name?.split(' ')[0] ?? me.name.split(' ')[0] ?? 'there'
+  const displayName = user?.full_name?.split(' ')[0] || user?.email?.split('@')[0] || 'there'
 
   const quick = {
     manager: [

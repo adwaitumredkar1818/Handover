@@ -5,13 +5,17 @@ import { useSearchParams } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { AuthPage } from "../../components/figma-pages/AuthPage";
 import { SuccessorOnboardingWorkspace } from "../../components/onboarding/SuccessorOnboardingWorkspace";
+import { useLiveApp } from "../../context/LiveAppContext";
 
 function OnboardingRouter() {
   const searchParams = useSearchParams();
-  const projectId = searchParams.get("project");
+  const { activeProject, projects, user } = useLiveApp();
+  const queryProjectId = searchParams.get("project");
+  const effectiveProjectId =
+    queryProjectId || activeProject?.id || (user && projects.length > 0 ? projects[0]?.id : null);
 
-  if (projectId) {
-    return <SuccessorOnboardingWorkspace projectId={projectId} />;
+  if (effectiveProjectId) {
+    return <SuccessorOnboardingWorkspace projectId={effectiveProjectId} />;
   }
 
   return <AuthPage view="onboarding" />;

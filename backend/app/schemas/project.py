@@ -161,17 +161,47 @@ class ProjectMemberListResponse(BaseSchema):
     total: int
 
 
-class AddProjectMemberRequest(BaseSchema):
-    """Request payload to add an existing organisation member to a project."""
+_PROJECT_ROLE_ALIASES: dict[str, str] = {
+    "project_contributor": "project_member",
+    "contributor": "project_member",
+    "project_member": "project_member",
+    "member": "project_member",
+    "project_admin": "project_manager",
+    "project_lead": "project_manager",
+    "project_manager": "project_manager",
+    "admin": "project_manager",
+    "manager": "project_manager",
+    "reviewer": "reviewer",
+    "project_reviewer": "reviewer",
+    "project_viewer": "project_member",
+    "viewer": "project_member",
+}
 
-    user_id: uuid.UUID
+
+def _clean_project_role_name(value: str) -> str:
+    cleaned = _clean_role_name(value).lower().strip()
+    return _PROJECT_ROLE_ALIASES.get(cleaned, cleaned)
+
+
+class AddProjectMemberRequest(BaseSchema):
+    """Request payload to add an existing organisation member or invitee to a project."""
+
+    user_id: uuid.UUID | None = None
+    email: NormalisedEmail | None = None
     role_name: str = Field(min_length=1, max_length=64)
     responsibility_description: str | None = Field(default=None, max_length=2000)
+    transition_role: str | None = Field(default=None, max_length=64)
 
     @field_validator("role_name")
     @classmethod
     def _validate_role_name(cls, value: str) -> str:
-        return _clean_role_name(value)
+        return _clean_project_role_name(value)
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> "AddProjectMemberRequest":
+        if self.user_id is None and self.email is None:
+            raise ValueError("Either user_id or email must be provided.")
+        return self
 
 
 class UpdateProjectMemberRoleRequest(BaseSchema):
@@ -183,7 +213,7 @@ class UpdateProjectMemberRoleRequest(BaseSchema):
     @field_validator("role_name")
     @classmethod
     def _validate_role_name(cls, value: str) -> str:
-        return _clean_role_name(value)
+        return _clean_project_role_name(value)
 
 
 class UpdateMemberNameRequest(BaseSchema):
@@ -215,7 +245,7 @@ class CreateProjectInvitationRequest(BaseSchema):
     @field_validator("project_role_name")
     @classmethod
     def _validate_project_role_name(cls, value: str) -> str:
-        return _clean_role_name(value)
+        return _clean_project_role_name(value)
 
 
 class ProjectParticipantSummary(BaseSchema):

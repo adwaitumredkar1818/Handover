@@ -43,6 +43,7 @@ import {
   Textarea,
   cn,
 } from '../figma-ui/index'
+import { TableSkeleton } from '../loading'
 import { api } from '../../lib/api'
 import type {
   HandoverResponsibilityTransferDetail,
@@ -479,15 +480,9 @@ export function ResponsibilityTransferPanel({
 
   if (isLoading && !workspace) {
     return (
-      <Card className="p-10">
-        <div className="flex flex-col items-center justify-center gap-3 text-center">
-          <Loader2 className="size-7 animate-spin text-brand" />
-          <p className="text-sm font-semibold text-navy">Loading responsibility transfer workspace…</p>
-          <p className="text-xs text-muted">
-            Validating real project participants, mapped ownership transfers, 8-domain knowledge links, and ACL-checked evidence.
-          </p>
-        </div>
-      </Card>
+      <div className="p-4 space-y-4" role="status" aria-live="polite">
+        <TableSkeleton rows={5} columns={4} />
+      </div>
     )
   }
 

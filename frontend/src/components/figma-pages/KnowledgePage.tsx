@@ -45,12 +45,12 @@ function Link({ to, href, className, children, onClick }: { to?: string; href?: 
 
 /* ---------- 10. Data Sources Constants & Connect Modal ---------- */
 const REPOS: Record<SourceType, string[]> = {
-  github: ['atlas-ledger', 'atlas-settlement', 'atlas-gateway', 'atlas-infra', 'payments-sdk-js', 'northwind-docs'],
-  jira: ['PAY · Payments', 'PAYOPS · Payments Ops', 'SEC · Security', 'PLAT · Platform'],
-  slack: ['#payments-arch', '#payments-oncall', '#incidents', '#eng-general', '#releases'],
+  github: [],
+  jira: [],
+  slack: [],
   docs: [],
-  confluence: ['ENG · Engineering', 'PAY · Payments space', 'OPS · Runbooks'],
-  gdrive: ['Payments / Architecture', 'Payments / Vendor contracts'],
+  confluence: [],
+  gdrive: [],
 }
 
 const SCOPES: Record<SourceType, string[]> = {
@@ -87,7 +87,7 @@ function ConnectFlow({ type, projectId, onClose }: { type: SourceType; projectId
         projectId,
         type,
         name: meta.label,
-        account: isUpload ? 'Manual uploads' : type === 'slack' ? 'Northwind HQ' : 'northwind-eng',
+        account: isUpload ? 'Manual uploads' : type === 'slack' ? 'Slack Workspace' : 'Connected',
         status: 'syncing',
         lastSync: 'Syncing now',
         records: 0,
@@ -294,7 +294,21 @@ export function DataSources({ projectId }: { projectId: string }) {
   const p = useProject(projectId)
   const router = useRouter()
   const [connecting, setConnecting] = useState<SourceType | null>(null)
-  const { openConnectSourceModal, setIsUploadModalOpen, sourceMappings, triggerSync, evidenceList } = useLiveApp()
+  const {
+    openConnectSourceModal,
+    setIsUploadModalOpen,
+    sourceMappings,
+    triggerSync,
+    evidenceList,
+    evidenceMetrics,
+    refreshEvidence,
+  } = useLiveApp()
+
+  useEffect(() => {
+    if (p?.id) {
+      void refreshEvidence()
+    }
+  }, [p?.id, refreshEvidence])
 
   const types: SourceType[] = ['github', 'jira', 'slack', 'docs', 'confluence', 'gdrive']
   const srcs = p ? s.sources.filter((x) => x.projectId === p.id) : []
@@ -304,12 +318,34 @@ export function DataSources({ projectId }: { projectId: string }) {
   const jiraMapping = sourceMappings.find((m) => m.provider === 'jira')
   const slackMapping = sourceMappings.find((m) => m.provider === 'slack')
 
-  const githubEvidence = evidenceList.filter((e) => e.provider === 'github')
-  const docEvidence = evidenceList.filter(
-    (e) => e.provider === 'upload' || e.category?.includes('document') || e.category?.includes('pdf') || e.category?.includes('docx')
+  const githubEvidence = evidenceList.filter((e) => {
+    const prov = (e.provider || e.source_provider || e.source_type || '').toLowerCase()
+    const cat = (e.category || '').toLowerCase()
+    return prov === 'github' || cat === 'commit' || cat === 'pull_request' || cat === 'pr' || cat === 'source_code' || (e.title || '').toLowerCase().startsWith('github')
+  })
+  const docEvidence = evidenceList.filter((e) => {
+    const prov = (e.provider || e.source_provider || e.source_type || '').toLowerCase()
+    const cat = (e.category || '').toLowerCase()
+    return (
+      prov === 'upload' ||
+      prov === 'local_upload' ||
+      prov === 'project' ||
+      prov === 'pdf' ||
+      prov === 'docx' ||
+      cat.includes('document') ||
+      cat.includes('pdf') ||
+      cat.includes('docx') ||
+      cat === 'team_roster' ||
+      cat === 'meeting_notes' ||
+      cat === 'project_document'
+    )
+  })
+  const jiraEvidence = evidenceList.filter(
+    (e) => (e.provider || e.source_provider || e.source_type || '').toLowerCase() === 'jira'
   )
-  const jiraEvidence = evidenceList.filter((e) => e.provider === 'jira')
-  const slackEvidence = evidenceList.filter((e) => e.provider === 'slack')
+  const slackEvidence = evidenceList.filter(
+    (e) => (e.provider || e.source_provider || e.source_type || '').toLowerCase() === 'slack'
+  )
 
   const liveSourcesMap = useMemo(() => {
     const map = new Map<SourceType, Source>()
@@ -319,7 +355,8 @@ export function DataSources({ projectId }: { projectId: string }) {
       const mockSrc = srcs.find((x) => x.type === t)
       if (t === 'github') {
         const isConn = allGithubMappings.length > 0 || githubEvidence.length > 0
-        const count = githubEvidence.length
+        const gitMetricsCount = evidenceMetrics?.by_provider?.['github']
+        const count = Math.max(gitMetricsCount ?? 0, githubEvidence.length)
         const repoNames = allGithubMappings
           .map((m) => m.external_resource_key || m.external_resource_name)
           .filter(Boolean) as string[]
@@ -342,7 +379,14 @@ export function DataSources({ projectId }: { projectId: string }) {
           volume: `${count} items`,
         })
       } else if (t === 'docs') {
-        const isConn = docEvidence.length > 0
+        const docMetricsCount =
+          (evidenceMetrics?.by_provider?.['local_upload'] ?? 0) +
+          (evidenceMetrics?.by_provider?.['upload'] ?? 0) +
+          (evidenceMetrics?.by_provider?.['project'] ?? 0) +
+          (evidenceMetrics?.by_provider?.['pdf'] ?? 0) +
+          (evidenceMetrics?.by_provider?.['docx'] ?? 0)
+        const docCount = docMetricsCount > docEvidence.length ? docMetricsCount : docEvidence.length
+        const isConn = docCount > 0 || docEvidence.length > 0
         map.set(t, {
           id: 'src-docs',
           projectId: activeP.id,
@@ -351,10 +395,10 @@ export function DataSources({ projectId }: { projectId: string }) {
           account: isConn ? 'Uploaded Project Documentation' : 'Not connected',
           status: isConn ? 'connected' : 'disconnected',
           lastSync: isConn ? 'Recent' : '—',
-          records: docEvidence.length,
+          records: docCount,
           scope: docEvidence.length ? docEvidence.map((d) => d.title).slice(0, 2) : [],
           frequency: 'Manual upload',
-          volume: `${docEvidence.length} documents`,
+          volume: `${docCount} documents`,
         })
       } else if (t === 'jira') {
         const isConn = !!jiraMapping || jiraEvidence.length > 0
@@ -403,7 +447,7 @@ export function DataSources({ projectId }: { projectId: string }) {
       }
     })
     return map
-  }, [p, srcs, allGithubMappings, githubMapping, jiraMapping, slackMapping, githubEvidence.length, docEvidence, jiraEvidence.length, slackEvidence.length])
+  }, [p, srcs, allGithubMappings, githubMapping, jiraMapping, slackMapping, githubEvidence.length, docEvidence.length, jiraEvidence.length, slackEvidence.length, evidenceMetrics])
 
   if (!p) return <ProjectNotFound />
   const canManage = p.role === 'manager'
@@ -628,7 +672,7 @@ export function SourceDetail({ projectId, sourceId }: { projectId: string; sourc
         <div className="mb-5">
           <ErrorState
             title="Authorisation expired"
-            body="The Slack token for Northwind HQ was revoked on Jun 16. 0 of 3 channels are syncing."
+            body="The Slack authorization token was revoked. Reconnect to resume syncing."
             action={canManage && <Button size="sm" variant="danger" onClick={reconnect}>{syncing ? 'Reconnecting…' : 'Reconnect Slack'}</Button>}
           />
         </div>
@@ -769,6 +813,7 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
   const router = useRouter()
   const {
     evidenceList,
+    evidenceMetrics,
     selectedEvidenceId,
     selectedEvidence: liveSelectedEvidence,
     isLoadingEvidenceDetail,
@@ -778,6 +823,12 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
     setIsUploadModalOpen,
     sourceMappings,
   } = useLiveApp()
+
+  useEffect(() => {
+    if (projectId) {
+      void refreshEvidence()
+    }
+  }, [projectId, refreshEvidence])
   const loading = useFakeLoading(450, [projectId])
   const [layoutMode, setLayoutMode] = useState<'threepanel' | 'table'>('threepanel')
   const [q, setQ] = useState('')
@@ -797,6 +848,9 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
   const [attributions, setAttributions] = useState<any[]>([])
   const [isLoadingAttributions, setIsLoadingAttributions] = useState(false)
   const [reconcilingId, setReconcilingId] = useState<string | null>(null)
+  const githubMap = useMemo(() => sourceMappings.find((m) => m.provider === 'github'), [sourceMappings])
+  const jiraMap = useMemo(() => sourceMappings.find((m) => m.provider === 'jira'), [sourceMappings])
+  const slackMap = useMemo(() => sourceMappings.find((m) => m.provider === 'slack'), [sourceMappings])
 
   const handleReprocess = async (evId: string) => {
     if (!p) return
@@ -848,19 +902,31 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
         processing = 'failed'
       }
 
+      let sourceId = 'docs'
+      const prov = (e.provider || e.source_provider || e.source_type || '').toLowerCase()
+      if (prov === 'github' || cat === 'commit' || cat === 'pull_request' || cat === 'pr' || cat === 'source_code' || (e.title || '').toLowerCase().startsWith('github')) {
+        sourceId = 'github'
+      } else if (prov === 'jira' || cat === 'issue') {
+        sourceId = 'jira'
+      } else if (prov === 'slack' || cat === 'message') {
+        sourceId = 'slack'
+      } else {
+        sourceId = 'upload'
+      }
+
       return {
         id: e.id,
         projectId: e.project_id || p?.id || '',
         type,
         title: e.title || 'Evidence Record',
-        sourceId: e.provider || 'docs',
-        authorId: e.author_name || 'system',
-        date: e.source_created_at ? e.source_created_at.split('T')[0]! : 'Today',
+        sourceId,
+        authorId: e.author_name || e.source_author_identity || 'system',
+        date: e.source_created_at ? e.source_created_at.split('T')[0]! : (e.created_at ? e.created_at.split('T')[0]! : 'Today'),
         memberId: 'user',
         processing,
         verification,
         ref: e.id.slice(0, 8),
-        content: e.extracted_text_preview || (e.original_filename ? `Document: ${e.original_filename}` : 'Decrypted source content available in Evidence Workspace.'),
+        content: e.extracted_text_preview || (e.original_filename ? `Document: ${e.original_filename}` : (e.title ? `${e.title}` : 'Decrypted source content available in Evidence Workspace.')),
         extracted: e.extracted_text_preview ? [e.extracted_text_preview.slice(0, 220)] : [],
       }
     })
@@ -870,30 +936,63 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
   const sources = useMemo(() => {
     if (!p) return []
     const sList: Source[] = []
-    const gitEvidence = evidenceList.filter((e) => e.provider === 'github')
-    const docEvidence = evidenceList.filter((e) => e.provider === 'upload' || e.category?.includes('doc') || e.category?.includes('pdf') || e.category === 'team_roster' || e.category === 'meeting_notes' || e.category === 'project_document')
-    const jiraEvidence = evidenceList.filter((e) => e.provider === 'jira')
-    const slackEvidence = evidenceList.filter((e) => e.provider === 'slack')
+    const gitEvidence = evidenceList.filter((e) => {
+      const prov = (e.provider || e.source_provider || e.source_type || '').toLowerCase()
+      const cat = (e.category || '').toLowerCase()
+      return prov === 'github' || cat === 'commit' || cat === 'pull_request' || cat === 'pr' || cat === 'source_code' || (e.title || '').toLowerCase().startsWith('github')
+    })
+    const docEvidence = evidenceList.filter((e) => {
+      const prov = (e.provider || e.source_provider || e.source_type || '').toLowerCase()
+      const cat = (e.category || '').toLowerCase()
+      return (
+        prov === 'upload' ||
+        prov === 'local_upload' ||
+        prov === 'project' ||
+        prov === 'pdf' ||
+        prov === 'docx' ||
+        cat.includes('document') ||
+        cat.includes('pdf') ||
+        cat.includes('docx') ||
+        cat === 'team_roster' ||
+        cat === 'meeting_notes' ||
+        cat === 'project_document'
+      )
+    })
+    const jiraEvidence = evidenceList.filter(
+      (e) => (e.provider || e.source_provider || e.source_type || '').toLowerCase() === 'jira'
+    )
+    const slackEvidence = evidenceList.filter(
+      (e) => (e.provider || e.source_provider || e.source_type || '').toLowerCase() === 'slack'
+    )
     const githubMap = sourceMappings.find((m) => m.provider === 'github')
     const jiraMap = sourceMappings.find((m) => m.provider === 'jira')
     const slackMap = sourceMappings.find((m) => m.provider === 'slack')
 
     if (gitEvidence.length > 0 || githubMap) {
+      const gitMetricsCount = evidenceMetrics?.by_provider?.['github']
+      const gitCount = Math.max(gitMetricsCount ?? 0, gitEvidence.length)
       sList.push({
-        id: githubMap?.id || 'src-github',
+        id: 'src-github',
         projectId: p?.id || '',
         type: 'github',
         name: 'GitHub Repository',
         account: githubMap?.external_resource_name || 'Connected',
         status: 'connected',
         lastSync: 'Recent',
-        records: gitEvidence.length,
+        records: gitCount,
         scope: githubMap?.external_resource_name ? [githubMap.external_resource_name] : [],
         frequency: 'Continuous',
-        volume: `${gitEvidence.length} items`,
+        volume: `${gitCount} items`,
       })
     }
     if (docEvidence.length > 0) {
+      const docMetricsCount =
+        (evidenceMetrics?.by_provider?.['local_upload'] ?? 0) +
+        (evidenceMetrics?.by_provider?.['upload'] ?? 0) +
+        (evidenceMetrics?.by_provider?.['project'] ?? 0) +
+        (evidenceMetrics?.by_provider?.['pdf'] ?? 0) +
+        (evidenceMetrics?.by_provider?.['docx'] ?? 0)
+      const docCount = docMetricsCount > docEvidence.length ? docMetricsCount : docEvidence.length
       sList.push({
         id: 'src-docs',
         projectId: p?.id || '',
@@ -902,44 +1001,54 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
         account: 'Connected',
         status: 'connected',
         lastSync: 'OCR processed',
-        records: docEvidence.length,
+        records: docCount,
         scope: docEvidence.map((d) => d.title).slice(0, 3),
         frequency: 'Manual upload',
-        volume: `${docEvidence.length} docs`,
+        volume: `${docCount} docs`,
       })
     }
     if (jiraEvidence.length > 0 || jiraMap) {
+      const jiraMetricsCount = evidenceMetrics?.by_provider?.['jira']
+      const jiraCount =
+        jiraMetricsCount !== undefined && jiraMetricsCount > jiraEvidence.length
+          ? jiraMetricsCount
+          : jiraEvidence.length
       sList.push({
-        id: jiraMap?.id || 'src-jira',
+        id: 'src-jira',
         projectId: p?.id || '',
         type: 'jira',
         name: 'Jira Workspace',
         account: jiraMap?.external_resource_name || 'Connected',
         status: 'connected',
         lastSync: 'Recent',
-        records: jiraEvidence.length,
+        records: jiraCount,
         scope: jiraMap?.external_resource_name ? [jiraMap.external_resource_name] : ['Issues & Epics'],
         frequency: 'Hourly',
-        volume: `${jiraEvidence.length} issues`,
+        volume: `${jiraCount} issues`,
       })
     }
     if (slackEvidence.length > 0 || slackMap) {
+      const slackMetricsCount = evidenceMetrics?.by_provider?.['slack']
+      const slackCount =
+        slackMetricsCount !== undefined && slackMetricsCount > slackEvidence.length
+          ? slackMetricsCount
+          : slackEvidence.length
       sList.push({
-        id: slackMap?.id || 'src-slack',
+        id: 'src-slack',
         projectId: p?.id || '',
         type: 'slack',
         name: 'Slack Discussions',
         account: slackMap?.external_resource_name || 'Connected',
         status: 'connected',
         lastSync: 'Recent',
-        records: slackEvidence.length,
+        records: slackCount,
         scope: slackMap?.external_resource_name ? [slackMap.external_resource_name] : ['Public channels'],
         frequency: 'Real-time',
-        volume: `${slackEvidence.length} messages`,
+        volume: `${slackCount} messages`,
       })
     }
     return sList
-  }, [evidenceList, p?.id, sourceMappings])
+  }, [evidenceList, p?.id, sourceMappings, evidenceMetrics])
 
   const now = new Date()
   const cutoff = range === '30'
@@ -952,12 +1061,18 @@ export function EvidenceLibrary({ projectId }: { projectId: string }) {
       (e.title + e.ref).toLowerCase().includes(q.toLowerCase()) &&
       (src === 'all' ||
         e.sourceId === src ||
-        (src === 'src-github' && e.sourceId === 'github') ||
-        (src === 'src-docs' && (e.sourceId === 'upload' || e.sourceId === 'docs'))) &&
+        ((src === 'src-github' || src === 'github' || (githubMap && src === githubMap.id)) &&
+          (e.sourceId === 'github' || (e as any).source_provider === 'github' || (e as any).source_type === 'github')) ||
+        ((src === 'src-docs' || src === 'docs' || src === 'upload') &&
+          (e.sourceId === 'upload' || e.sourceId === 'docs' || e.sourceId === 'project')) ||
+        ((src === 'src-jira' || src === 'jira' || (jiraMap && src === jiraMap.id)) &&
+          (e.sourceId === 'jira' || (e as any).source_provider === 'jira')) ||
+        ((src === 'src-slack' || src === 'slack' || (slackMap && src === slackMap.id)) &&
+          (e.sourceId === 'slack' || (e as any).source_provider === 'slack'))) &&
       (type === 'all' || e.type === type) &&
       (author === 'all' || e.authorId === author) &&
       (proc === 'all' || e.processing === proc) &&
-      e.date >= cutoff
+      (range === 'all' || !cutoff || cutoff === '0' || e.date >= cutoff)
   )
 
   const per = 8
@@ -2965,17 +3080,35 @@ function KnowledgePageInner({
   evidenceId,
 }: KnowledgePageProps) {
   const params = useParams() as { id?: string; sourceId?: string; evidenceId?: string } | null
-  const { activeProject, projects } = useLiveApp()
+  const { activeProject, activeOrg } = useLiveApp()
   const s = useStore()
 
+  const storePid = s.currentProject?.workspaceId === activeOrg?.id ? s.currentProject?.id : undefined
   const pid =
     projectId ||
     params?.id ||
     activeProject?.id ||
-    s.currentProject?.id ||
+    storePid ||
     ''
-  const sid = sourceId || params?.sourceId || 'src-github-atlas'
-  const eid = evidenceId || params?.evidenceId || 'e-settle-adr'
+  const sid = sourceId || params?.sourceId || ''
+  const eid = evidenceId || params?.evidenceId || ''
+
+  if (!pid) {
+    return (
+      <Card className="p-8 text-center my-6">
+        <EmptyState
+          icon={Boxes}
+          title="No project workspace selected"
+          body="Select or create a project workspace in this organisation to view knowledge intelligence, sources, and evidence."
+          action={
+            <Button icon={Plus} onClick={() => window.location.assign('/projects/new')}>
+              Create project
+            </Button>
+          }
+        />
+      </Card>
+    )
+  }
 
   switch (view) {
     case 'sources':

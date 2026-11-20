@@ -1,7 +1,7 @@
 "use client";
 
-import { DashboardPage } from "../../components/figma-pages/DashboardPage";
+import { OverviewView } from "../../components/views/OverviewView";
 
 export default function DashboardRoute() {
-  return <DashboardPage />;
+  return <OverviewView />;
 }

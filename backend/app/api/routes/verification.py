@@ -1,11 +1,12 @@
-"""FastAPI routes for the Verification Center (Phase 1 Rebuild)."""
+"""FastAPI routes for the Verification Center (Phase 1 Rebuild + Direct Review Bridge)."""
 
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -13,10 +14,12 @@ from app.api.deps import get_db_session, require_project_permission
 from app.core.cache.local_cache import local_response_cache
 from app.core.exceptions import NotFoundError
 from app.models.evidence import EvidenceItem
+from app.models.knowledge import KnowledgeItem
 from app.models.verification import VerificationCase
 from app.schemas.verification import (
     ApproveFindingRequest,
     AssignReviewerRequest,
+    ChangeImpactFeedResponse,
     EditFindingRequest,
     MarkUnresolvedRequest,
     MonitorSourceChangeRequest,
@@ -37,9 +40,32 @@ from app.services.verification_review import VerificationReviewService
 router = APIRouter(tags=["Verification Center"])
 
 
-def _invalidate_ki_caches(project_id: uuid.UUID) -> None:
+def _invalidate_project_caches(project_id: uuid.UUID) -> None:
+    """Clear short-lived L1 response caches on verification mutations."""
     local_response_cache.invalidate_prefix(f"ki_findings:{project_id}:")
+    local_response_cache.invalidate_prefix(f"ki_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"ki_domains:{project_id}:")
+    local_response_cache.invalidate_prefix(f"ki_summary:{project_id}:")
+    local_response_cache.invalidate_prefix(f"rel_graph:{project_id}:")
+    local_response_cache.invalidate_prefix(f"contrib_graph:{project_id}:")
+    local_response_cache.invalidate_prefix(f"verification_summary:{project_id}:")
+
+
+def _invalidate_ki_caches(project_id: uuid.UUID) -> None:
+    _invalidate_project_caches(project_id)
+
+
+class DirectReviewFindingRequest(BaseModel):
+    action: str = Field(description="'approve', 'flag', or 'reject'")
+    notes: str | None = Field(default=None)
+
+
+class CaseEvidenceResponse(BaseModel):
+    case_id: uuid.UUID
+    target_type: str
+    target_id: uuid.UUID
+    supporting_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 @router.post("/projects/{project_id}/verification/target-case")
@@ -77,8 +103,6 @@ def ensure_target_verification_case(
         "version": vc.version,
         "case_status": str(getattr(vc.case_status, "value", vc.case_status)),
     }
-
-
 @router.get(
     "/projects/{project_id}/verification/summary",
     response_model=VerificationSummaryResponse,
@@ -144,6 +168,30 @@ def get_verification_case_detail(
     return service.get_case_detail(case_id, project_ctx=project_ctx)
 
 
+@router.get(
+    "/projects/{project_id}/verification/cases/{case_id}/evidence",
+    response_model=CaseEvidenceResponse,
+)
+def get_verification_case_evidence(
+    project_id: uuid.UUID,
+    case_id: uuid.UUID,
+    project_ctx: Annotated[ProjectContext, Depends(require_project_permission("project.read"))],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> CaseEvidenceResponse:
+    service = VerificationReviewService(session)
+    detail = service.get_case_detail(case_id, project_ctx=project_ctx)
+    supporting: list[dict[str, Any]] = []
+    for ref in detail.evidence_references:
+        supporting.append(ref.model_dump(mode="json"))
+    return CaseEvidenceResponse(
+        case_id=detail.id,
+        target_type=detail.target_type,
+        target_id=detail.target_id,
+        supporting_evidence=supporting,
+        conflicts=[],
+    )
+
+
 @router.post(
     "/projects/{project_id}/verification/sync",
     response_model=SyncAndAssessResponse,
@@ -159,6 +207,7 @@ def sync_and_assess_verification(
     sync_res = engine.sync_project_findings(project_ctx.project.id)
     assess_res = engine.assess_project(project_ctx.project.id)
     session.commit()
+    _invalidate_project_caches(project_ctx.project.id)
     return SyncAndAssessResponse(
         project_id=project_ctx.project.id,
         cases_created=sync_res["cases_created"],
@@ -183,6 +232,7 @@ def run_verification_checks(
     engine = VerificationEngine(session)
     assess_res = engine.assess_project(project_ctx.project.id, case_id=case_id)
     session.commit()
+    _invalidate_project_caches(project_ctx.project.id)
     return SyncAndAssessResponse(
         project_id=project_ctx.project.id,
         cases_assessed=assess_res["cases_assessed"],
@@ -205,7 +255,7 @@ def approve_verification_case(
 ) -> VerificationCaseDetailResponse:
     service = VerificationReviewService(session)
     res = service.approve_case(case_id, project_ctx=project_ctx, payload=payload)
-    _invalidate_ki_caches(project_ctx.project.id)
+    _invalidate_project_caches(project_ctx.project.id)
     return res
 
 
@@ -224,7 +274,7 @@ def reject_verification_case(
 ) -> VerificationCaseDetailResponse:
     service = VerificationReviewService(session)
     res = service.reject_case(case_id, project_ctx=project_ctx, payload=payload)
-    _invalidate_ki_caches(project_ctx.project.id)
+    _invalidate_project_caches(project_ctx.project.id)
     return res
 
 
@@ -242,7 +292,9 @@ def edit_verification_finding(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationCaseDetailResponse:
     service = VerificationReviewService(session)
-    return service.edit_finding(case_id, project_ctx=project_ctx, payload=payload)
+    res = service.edit_finding(case_id, project_ctx=project_ctx, payload=payload)
+    _invalidate_project_caches(project_ctx.project.id)
+    return res
 
 
 @router.post(
@@ -259,7 +311,9 @@ def request_additional_context(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationCaseDetailResponse:
     service = VerificationReviewService(session)
-    return service.request_context(case_id, project_ctx=project_ctx, payload=payload)
+    res = service.request_context(case_id, project_ctx=project_ctx, payload=payload)
+    _invalidate_project_caches(project_ctx.project.id)
+    return res
 
 
 @router.get(
@@ -294,9 +348,11 @@ def respond_to_context_request(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationContextRequestDetail:
     service = VerificationReviewService(session)
-    return service.respond_context_request(
+    res = service.respond_context_request(
         request_id, project_ctx=project_ctx, payload=payload
     )
+    _invalidate_project_caches(project_ctx.project.id)
+    return res
 
 
 @router.post(
@@ -314,7 +370,7 @@ def mark_case_unresolved(
 ) -> VerificationCaseDetailResponse:
     service = VerificationReviewService(session)
     res = service.mark_unresolved(case_id, project_ctx=project_ctx, payload=payload)
-    _invalidate_ki_caches(project_ctx.project.id)
+    _invalidate_project_caches(project_ctx.project.id)
     return res
 
 
@@ -332,11 +388,84 @@ def assign_case_reviewer(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> VerificationCaseDetailResponse:
     service = VerificationReviewService(session)
-    return service.assign_reviewer(
+    res = service.assign_reviewer(
         case_id,
         project_ctx=project_ctx,
         assigned_reviewer_id=payload.assigned_reviewer_id,
     )
+    _invalidate_project_caches(project_ctx.project.id)
+    return res
+
+
+@router.post(
+    "/projects/{project_id}/verification/findings/{finding_id}/review",
+    response_model=VerificationCaseDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Directly review and verify, flag, or reject a knowledge finding in one atomic step",
+)
+def direct_review_finding(
+    project_id: uuid.UUID,
+    finding_id: uuid.UUID,
+    payload: Annotated[DirectReviewFindingRequest, Body()],
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.knowledge.review"))
+    ],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> VerificationCaseDetailResponse:
+    engine = VerificationEngine(session)
+    # Ensure finding has an associated verification case
+    sync_res = engine.sync_project_findings(project_ctx.project.id)
+    service = VerificationReviewService(session)
+    
+    # Locate case for this finding
+    queue = service.list_queue(project_ctx.project.id, project_ctx=project_ctx, limit=200)
+    target_case = next((item for item in queue.items if item.target_id == finding_id), None)
+    
+    if not target_case:
+        item = session.get(KnowledgeItem, finding_id)
+        if not item or item.project_id != project_ctx.project.id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge item not found."
+            )
+        assess_res = engine.assess_project(project_ctx.project.id)
+        session.commit()
+        queue = service.list_queue(project_ctx.project.id, project_ctx=project_ctx, limit=200)
+        target_case = next((it for it in queue.items if it.target_id == finding_id), None)
+
+    if not target_case:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Verification case for finding could not be established."
+        )
+
+    act = payload.action.lower().strip()
+    notes = payload.notes or f"Reviewed directly in Knowledge Intelligence ({act})"
+
+    if act == "approve":
+        res = service.approve_case(
+            target_case.id,
+            project_ctx=project_ctx,
+            payload=ApproveFindingRequest(reviewer_note=notes),
+        )
+    elif act in ("flag", "mark_unresolved", "needs_clarification"):
+        res = service.mark_unresolved(
+            target_case.id,
+            project_ctx=project_ctx,
+            payload=MarkUnresolvedRequest(reviewer_note=notes, decision_reason=notes),
+        )
+    elif act == "reject":
+        res = service.reject_case(
+            target_case.id,
+            project_ctx=project_ctx,
+            payload=RejectFindingRequest(reviewer_note=notes, rejection_category="incorrect_claim"),
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported review action '{payload.action}'. Must be 'approve', 'flag', or 'reject'.",
+        )
+
+    _invalidate_project_caches(project_ctx.project.id)
+    return res
 
 
 @router.post(
@@ -362,6 +491,7 @@ def monitor_source_change(
         triggered_by_user_id=project_ctx.principal.user.id,
     )
     session.commit()
+    _invalidate_project_caches(project_ctx.project.id)
     return MonitorSourceChangeResponse(
         evidence_id=impact.evidence_id,
         change_type=impact.change_type,
@@ -369,3 +499,35 @@ def monitor_source_change(
         reverification_triggered=impact.reverification_triggered,
         summary=impact.summary,
     )
+
+
+@router.get(
+    "/projects/{project_id}/verification/change-impact",
+    response_model=ChangeImpactFeedResponse,
+    summary="List recent source change impact and re-verification events",
+)
+def get_change_impact_feed(
+    project_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.read"))
+    ],
+    session: Annotated[Session, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ChangeImpactFeedResponse:
+    from app.services.verification_intelligence import ContinuousMonitoringService
+
+    monitor = ContinuousMonitoringService(session)
+    items, total = monitor.get_change_impact_events(
+        project_id=project_ctx.project.id,
+        viewer_user_id=project_ctx.principal.user.id,
+        has_manage=project_ctx.has_permission("project.manage"),
+        limit=limit,
+        offset=offset,
+    )
+    return ChangeImpactFeedResponse(
+        project_id=project_ctx.project.id,
+        total=total,
+        items=items,
+    )
+

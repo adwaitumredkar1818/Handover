@@ -16,6 +16,7 @@ interface FindingsQueuePanelProps {
   selectedCaseId: string | null;
   onSelectCase: (caseId: string) => void;
   loading: boolean;
+  canReview?: boolean;
 }
 
 export function FindingsQueuePanel({
@@ -24,6 +25,7 @@ export function FindingsQueuePanel({
   selectedCaseId,
   onSelectCase,
   loading,
+  canReview = true,
 }: FindingsQueuePanelProps) {
   return (
     <section
@@ -55,8 +57,9 @@ export function FindingsQueuePanel({
           <div className="p-8 text-center">
             <p className="text-sm font-medium text-slate-700">No findings in this view</p>
             <p className="text-xs text-slate-500 mt-1">
-              Adjust your filters or click &ldquo;Sync &amp; Run Checks&rdquo; to load findings from Knowledge
-              Intelligence.
+              {canReview
+                ? 'Adjust your filters or click "Sync & Run Checks" to load findings from Knowledge Intelligence.'
+                : "Adjust your filters or ask a Project Manager or Reviewer to sync findings from Knowledge Intelligence."}
             </p>
           </div>
         ) : (

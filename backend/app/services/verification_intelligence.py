@@ -1231,13 +1231,23 @@ class ContinuousMonitoringService:
 
         # 2. Correlate by claim/title overlap for high-impact changes
         ev_tokens = _tokenize(f"{evidence_item.title} {evidence_item.source_url or ''}")
-        if len(ev_tokens) >= 3:
+        ev_tokens_stemmed = {t.rstrip("s") for t in ev_tokens} | ev_tokens
+        if len(ev_tokens) >= 2:
             all_cases = self.session.execute(
                 select(VerificationCase).where(VerificationCase.project_id == project_id)
             ).scalars().all()
             for c in all_cases:
-                c_tok = _tokenize(c.current_claim)
-                if len(c_tok & ev_tokens) >= 3:
+                claim_text = c.current_claim or ""
+                if (
+                    not claim_text or len(claim_text.split()) < 3
+                ) and c.target_type == VerificationTargetType.KNOWLEDGE_ITEM.value and c.target_id:
+                    ki = self.session.get(KnowledgeItem, c.target_id)
+                    if ki:
+                        claim_text = f"{claim_text} {ki.title} {getattr(ki, 'structured_summary', '') or ''}"
+                c_tok = _tokenize(claim_text)
+                c_tok_stemmed = {t.rstrip("s") for t in c_tok} | c_tok
+                overlap = (c_tok & ev_tokens) | (c_tok_stemmed & ev_tokens_stemmed)
+                if len(overlap) >= 2:
                     affected_ids.add(c.id)
 
         reverification_triggered = False
@@ -1251,17 +1261,40 @@ class ContinuousMonitoringService:
             if case is None:
                 continue
 
+            is_direct = case_id in direct_refs
+            impact_nature = "confirmed" if is_direct else "inferred"
+
+            if is_direct:
+                case_impact_explanation = (
+                    f"Direct evidence link: Source record '{evidence_item.title}' ({evidence_item.source_type}) "
+                    f"was {change_type}. Because it directly grounds this finding in domain '{case.domain}', "
+                    "any changes may invalidate or alter the recorded claim."
+                )
+            else:
+                case_impact_explanation = (
+                    f"Inferred topical correlation: Source record '{evidence_item.title}' ({evidence_item.source_type}) "
+                    f"was {change_type} and shares key concepts with this finding in domain '{case.domain}'. "
+                    "The change may affect related dependencies or assumptions."
+                )
+
             assessment = dict(case.machine_assessment_json or {})
             monitoring = dict(assessment.get("monitoring_status") or {})
             monitoring["last_monitored_at"] = now.isoformat()
             monitoring["last_evidence_change_id"] = str(evidence_item.id)
             monitoring["change_type"] = change_type
+            monitoring["evidence_title"] = evidence_item.title
+            monitoring["evidence_source_type"] = evidence_item.source_type
+            monitoring["evidence_url"] = evidence_item.source_url
+            monitoring["impact_summary"] = case_impact_explanation
+            monitoring["impact_nature"] = impact_nature
+            monitoring["reverification_triggered"] = False
 
             # If a human had previously verified this finding, flag for re-verification without overwriting status
             if case.case_status == VerificationCaseStatus.VERIFIED.value:
                 monitoring["reverification_triggered"] = True
                 monitoring["reverification_reason"] = (
-                    f"Supporting source record '{evidence_item.title}' was modified in the source system. "
+                    f"Supporting source record '{evidence_item.title}' was {change_type} in {evidence_item.source_type}. "
+                    f"{'Direct grounding record updated' if is_direct else 'Topically correlated source updated'}. "
                     "Reviewer confirmation required."
                 )
                 reverification_triggered = True
@@ -1295,3 +1328,85 @@ class ContinuousMonitoringService:
             reverification_triggered=reverification_triggered,
             summary=impact_summary,
         )
+
+    def get_change_impact_events(
+        self,
+        *,
+        project_id: uuid.UUID,
+        viewer_user_id: uuid.UUID | None = None,
+        has_manage: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Retrieve recent source change impact and re-verification events, filtered by source ACLs."""
+        cases = self.session.execute(
+            select(VerificationCase)
+            .where(
+                VerificationCase.project_id == project_id,
+                VerificationCase.machine_assessment_json.is_not(None),
+            )
+        ).scalars().all()
+
+        from app.services.integrations.access_policy import SourceAccessPolicyService
+        policy_svc = SourceAccessPolicyService()
+
+        events: list[dict[str, Any]] = []
+        for c in cases:
+            assessment = c.machine_assessment_json or {}
+            mon = assessment.get("monitoring_status")
+            if not mon or not isinstance(mon, dict):
+                continue
+
+            ev_id_str = mon.get("last_evidence_change_id")
+            ev_item = None
+            if ev_id_str:
+                try:
+                    ev_item = self.session.get(EvidenceItem, uuid.UUID(ev_id_str))
+                except (ValueError, TypeError):
+                    ev_item = None
+
+            # Check source ACL if viewer is provided
+            if viewer_user_id is not None and ev_item is not None and not has_manage:
+                allowed = policy_svc.can_user_access_evidence_safe(
+                    evidence=ev_item,
+                    project_id=project_id,
+                    user_id=viewer_user_id,
+                    has_project_manage=has_manage,
+                )
+                if not allowed:
+                    continue
+
+            ts = mon.get("last_monitored_at")
+            if not ts and c.updated_at:
+                ts = c.updated_at.isoformat()
+
+            ev_uuid = None
+            if ev_id_str:
+                try:
+                    ev_uuid = uuid.UUID(ev_id_str)
+                except (ValueError, TypeError):
+                    ev_uuid = None
+
+            events.append({
+                "case_id": c.id,
+                "finding_title": c.title,
+                "domain": c.domain,
+                "current_claim": c.current_claim,
+                "case_status": c.case_status,
+                "priority": c.priority,
+                "evidence_id": ev_uuid,
+                "evidence_title": mon.get("evidence_title") or (ev_item.title if ev_item else "Source Record"),
+                "evidence_source_type": mon.get("evidence_source_type") or (ev_item.source_type if ev_item else "source"),
+                "evidence_url": mon.get("evidence_url") or (ev_item.source_url if ev_item else None),
+                "change_type": mon.get("change_type", "modified"),
+                "reverification_triggered": bool(mon.get("reverification_triggered", False)),
+                "reverification_reason": mon.get("reverification_reason"),
+                "impact_summary": mon.get("impact_summary") or mon.get("summary") or "Source change evaluated.",
+                "impact_nature": mon.get("impact_nature", "confirmed"),
+                "timestamp": ts,
+            })
+
+        # Sort newest first
+        events.sort(key=lambda x: str(x.get("timestamp") or ""), reverse=True)
+        total = len(events)
+        return events[offset : offset + limit], total

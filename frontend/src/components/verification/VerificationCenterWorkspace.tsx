@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { ShieldCheck } from "lucide-react";
+import { Activity, CheckSquare, Scale, ShieldCheck } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import {
   verificationApi,
@@ -13,10 +13,35 @@ import {
 import { VerificationOverviewBar } from "./VerificationOverviewBar";
 import { FindingsQueuePanel } from "./FindingsQueuePanel";
 import { FindingWorkspacePanel } from "./FindingWorkspacePanel";
+import { ChangeImpactFeed } from "./ChangeImpactFeed";
+import { KnowledgeQualityPanel } from "./KnowledgeQualityPanel";
 
 export function VerificationCenterWorkspace() {
-  const { activeProject, members } = useLiveApp();
+  const { activeProject, members, user } = useLiveApp();
   const projectId = activeProject?.id ?? null;
+
+  const canReview = React.useMemo(() => {
+    if (!activeProject) return false;
+    if (activeProject.effective_permissions?.includes("project.knowledge.review")) {
+      return true;
+    }
+    const projectRole = (activeProject.my_project_role ?? "").toLowerCase();
+    if (projectRole === "project_manager" || projectRole === "reviewer") {
+      return true;
+    }
+    if (user?.id) {
+      const me = members.find((m) => m.user_id === user.id);
+      const memberRole = (me?.role_name ?? "").toLowerCase();
+      if (memberRole === "project_manager" || memberRole === "reviewer") {
+        return true;
+      }
+    }
+    const userRoles = (user?.roles ?? []).map((r) => r.toLowerCase());
+    if (userRoles.includes("org_owner") || userRoles.includes("org_admin")) {
+      return true;
+    }
+    return false;
+  }, [activeProject, members, user]);
 
   // ── State ────────────────────────────────────────────────────────────────
   const [summary, setSummary] = useState<VerificationSummary | null>(null);
@@ -46,6 +71,7 @@ export function VerificationCenterWorkspace() {
   const [actionBusy, setActionBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<"queue" | "change_impact" | "quality">("queue");
 
   // Debounce search input to avoid a request on every keystroke
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -207,12 +233,69 @@ export function VerificationCenterWorkspace() {
         availablePeople={availablePeople}
         members={members}
         actionBusy={actionBusy}
+        canReview={canReview}
         onSync={handleSync}
         statusNotice={statusNotice}
         errorMsg={errorMsg}
       />
 
+      {/* Sub-navigation workspace tabs */}
+      <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+        <button
+          onClick={() => setActiveWorkspaceTab("queue")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition cursor-pointer ${
+            activeWorkspaceTab === "queue"
+              ? "bg-indigo-600 text-white shadow-xs"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          <CheckSquare className="w-3.5 h-3.5" />
+          Findings Review Queue
+        </button>
+        <button
+          onClick={() => setActiveWorkspaceTab("change_impact")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition cursor-pointer ${
+            activeWorkspaceTab === "change_impact"
+              ? "bg-indigo-600 text-white shadow-xs"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          <Activity className="w-3.5 h-3.5" />
+          Change Impact Feed
+        </button>
+        <button
+          onClick={() => setActiveWorkspaceTab("quality")}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-md transition cursor-pointer ${
+            activeWorkspaceTab === "quality"
+              ? "bg-indigo-600 text-white shadow-xs"
+              : "text-slate-600 hover:bg-slate-100"
+          }`}
+        >
+          <Scale className="w-3.5 h-3.5" />
+          Knowledge Quality
+        </button>
+      </div>
+
+      {activeWorkspaceTab === "change_impact" && (
+        <div className="flex-1 min-h-0">
+          <ChangeImpactFeed
+            projectId={projectId}
+            onSelectFinding={(caseId) => {
+              setSelectedCaseId(caseId);
+              setActiveWorkspaceTab("queue");
+            }}
+          />
+        </div>
+      )}
+
+      {activeWorkspaceTab === "quality" && (
+        <div className="flex-1 min-h-0">
+          <KnowledgeQualityPanel projectId={projectId} />
+        </div>
+      )}
+
       {/* B: Two-Panel Master–Detail (independent adaptive scrolling on md+, single-column flow on mobile) */}
+      {activeWorkspaceTab === "queue" && (
       <div className="flex flex-col gap-4 md:flex-1 md:min-h-0 md:grid md:grid-cols-[minmax(240px,280px)_minmax(0,1fr)] lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)] md:items-start">
         {/* Left — Findings Queue */}
         <FindingsQueuePanel
@@ -221,6 +304,7 @@ export function VerificationCenterWorkspace() {
           selectedCaseId={selectedCaseId}
           onSelectCase={setSelectedCaseId}
           loading={queueLoading}
+          canReview={canReview}
         />
 
         {/* Right — Main Review Workspace */}
@@ -314,6 +398,7 @@ export function VerificationCenterWorkspace() {
           }}
         />
       </div>
+      )}
     </div>
   );
 }

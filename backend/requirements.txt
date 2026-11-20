@@ -82,6 +82,10 @@ python-dotenv==1.2.4
     #   uvicorn
 python-multipart==0.0.33
     # via ipkrh-backend (pyproject.toml)
+resend==2.55.0
+    # via ipkrh-backend (pyproject.toml)
+requests==2.34.2
+    # via resend
 pyyaml==6.0.3
     # via uvicorn
 sqlalchemy==2.1.8

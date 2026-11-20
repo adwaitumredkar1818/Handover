@@ -101,7 +101,7 @@ export const VerificationDashboardHeader: React.FC<DashboardHeaderProps> = ({
           </span>
           <span className="hidden sm:inline text-slate-300">•</span>
           <span className="hidden sm:inline text-slate-600">
-            Advisory Ollama (qwen3:8b) extraction confidence is never equated with verified truth
+            Advisory AI extraction confidence is never equated with verified truth
           </span>
         </div>
         {summary?.open_issues_count !== undefined && summary.open_issues_count > 0 && (

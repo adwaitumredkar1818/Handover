@@ -127,7 +127,7 @@ export function SignupPage() {
             type="text"
             value={fullName}
             onChange={(e) => setFullName(e.target.value)}
-            placeholder="Maya Chen"
+            placeholder="Jane Doe"
             autoComplete="name"
             required
             className="w-full h-10 rounded-xl border border-[#D9E1F0] bg-white px-3.5 text-sm text-[#203653] placeholder:text-slate-400 focus:border-[#315FBA] focus:outline-none focus:ring-1 focus:ring-[#315FBA] transition"
@@ -142,7 +142,7 @@ export function SignupPage() {
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder="maya.chen@company.com"
+            placeholder="name@company.com"
             autoComplete="email"
             required
             className="w-full h-10 rounded-xl border border-[#D9E1F0] bg-white px-3.5 text-sm text-[#203653] placeholder:text-slate-400 focus:border-[#315FBA] focus:outline-none focus:ring-1 focus:ring-[#315FBA] transition"

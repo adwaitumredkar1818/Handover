@@ -35,6 +35,7 @@ from app.services.knowledge_domains import (
     KnowledgeDomain,
     map_category_to_domain,
     map_domain_to_legacy_categories,
+    resolve_canonical_domain,
 )
 from app.services.rbac import ProjectContext
 from app.services.timeline import ProjectTimelineResponse, ProjectTimelineService
@@ -100,7 +101,10 @@ class KnowledgeIntelligenceService:
 
         for res in accessible_items:
             item = res.item
-            dom_key = item.primary_domain or map_category_to_domain(item.category).value
+            try:
+                dom_key = resolve_canonical_domain(item.primary_domain or item.category).value
+            except (ValueError, KeyError):
+                dom_key = map_category_to_domain(item.category).value
             metric = domain_metrics.get(dom_key)
             if metric is None:
                 continue

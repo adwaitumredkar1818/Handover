@@ -420,6 +420,7 @@ class AssistantRetrievalService:
                     )
                 )
         except Exception as ex:
+            self.session.rollback()
             logger.warning("Verification conflict search in assistant retrieval failed: %s", ex)
 
         # -------------------------------------------------------------------

@@ -177,7 +177,7 @@ def test_email_delivery_failure_does_not_abort_registration_or_invitation_creati
 
     with isolated_auth_app(monkeypatch) as ctx, TestClient(ctx.app) as client:
         # Inject failing mock provider to verify registration succeeds even if email fails
-        ctx.app.state.email_provider = MockEmailProvider(should_fail=True, failure_message="SMTP down")
+        ctx.app.state.email_provider = MockEmailProvider(should_fail=True, failure_message="Provider down")
         reg = client.post(
             "/api/v1/auth/register",
             json={
@@ -198,9 +198,8 @@ def test_production_email_settings_require_https_frontend_url() -> None:
         token_encryption_key="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
         cookie_secure=True,
         email_delivery_enabled=True,
-        email_provider="gmail_smtp",
-        smtp_username="test@gmail.com",
-        smtp_app_password="secretpassword12",
+        email_provider="resend",
+        resend_api_key="re_prod_test_key_1234567890",
         frontend_base_url="http://localhost:3000",
     )
     with pytest.raises(ValueError, match="https://"):

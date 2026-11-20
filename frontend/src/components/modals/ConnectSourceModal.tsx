@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { SourceIcon } from "../brand/brand";
+import { ButtonLoader, ListSkeleton } from "../loading";
 import { api } from "../../lib/api";
 import type { SourceType } from "../../lib/figmaStore";
 
@@ -768,24 +769,17 @@ export function ConnectSourceModal() {
                   </div>
 
                   <div className="pt-2 flex justify-end">
-                    <button
+                    <ButtonLoader
                       type="button"
+                      variant="primary"
                       onClick={handleDiscover}
-                      disabled={isDiscovering || !githubToken.trim()}
-                      className="px-4 py-2 bg-[#4774A9] hover:bg-[#386295] disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-2 transition-colors"
+                      disabled={!githubToken.trim()}
+                      isLoading={isDiscovering}
+                      loadingText="Validating Token & Discovering Repositories..."
+                      icon={<ArrowRight className="w-3.5 h-3.5" />}
                     >
-                      {isDiscovering ? (
-                        <>
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Validating Token & Discovering Repositories...</span>
-                        </>
-                      ) : (
-                        <>
-                          <span>Validate & Discover Repositories</span>
-                          <ArrowRight className="w-3.5 h-3.5" />
-                        </>
-                      )}
-                    </button>
+                      Validate & Discover Repositories
+                    </ButtonLoader>
                   </div>
                 </div>
               )}
@@ -855,15 +849,18 @@ export function ConnectSourceModal() {
                             placeholder="e.g. HackMatrix-5.0-MISC02"
                             className="flex-1 text-xs border border-slate-200 rounded px-2.5 py-1.5 bg-white text-slate-800"
                           />
-                          <button
+                          <ButtonLoader
                             type="button"
-                            disabled={!newProjectName.trim() || isCreatingProject}
+                            variant="primary"
+                            disabled={!newProjectName.trim()}
+                            isLoading={isCreatingProject}
+                            loadingText="Creating..."
                             onClick={handleQuickCreateProject}
-                            className="px-3 py-1.5 bg-[#315FBA] hover:bg-[#264C98] disabled:opacity-50 text-white rounded text-xs font-semibold flex items-center gap-1 shrink-0"
+                            icon={<Plus className="w-3.5 h-3.5" />}
+                            className="text-xs shrink-0"
                           >
-                            {isCreatingProject ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
                             Create Project
-                          </button>
+                          </ButtonLoader>
                         </div>
                       </div>
                     )}
@@ -1271,7 +1268,7 @@ export function ConnectSourceModal() {
                     <div className="text-xs">
                       <span className="font-semibold text-emerald-900">Ready to Ingest & Synchronise</span>
                       <p className="text-emerald-700 text-[11px] mt-0.5">
-                        Review your configuration below. Background worker jobs will be queued to synchronise and index knowledge into ChromaDB and PostgreSQL.
+                        Review your configuration below. Background worker jobs will be queued to synchronise and index project knowledge securely.
                       </p>
                     </div>
                   </div>
@@ -1350,15 +1347,18 @@ export function ConnectSourceModal() {
                             placeholder="e.g. HackMatrix-5.0-MISC02"
                             className="flex-1 text-xs border border-amber-300 rounded px-2.5 py-1.5 bg-white text-slate-800"
                           />
-                          <button
+                          <ButtonLoader
                             type="button"
-                            disabled={!newProjectName.trim() || isCreatingProject}
+                            variant="primary"
+                            disabled={!newProjectName.trim()}
+                            isLoading={isCreatingProject}
+                            loadingText="Creating..."
                             onClick={handleQuickCreateProject}
-                            className="px-3 py-1.5 bg-[#315FBA] hover:bg-[#264C98] disabled:opacity-50 text-white rounded text-xs font-semibold flex items-center gap-1 shrink-0"
+                            icon={<Plus className="w-3.5 h-3.5" />}
+                            className="text-xs shrink-0"
                           >
-                            {isCreatingProject ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
                             Create Project
-                          </button>
+                          </ButtonLoader>
                         </div>
                       </div>
                     )}
@@ -1496,24 +1496,17 @@ export function ConnectSourceModal() {
                   </div>
 
                   <div className="pt-2 flex justify-end">
-                    <button
+                    <ButtonLoader
                       type="button"
+                      variant="primary"
                       onClick={handleDiscover}
-                      disabled={isDiscovering || !jiraEmail || !jiraToken}
-                      className="px-4 py-2 bg-[#4774A9] hover:bg-[#386295] disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-2"
+                      disabled={!jiraEmail || !jiraToken}
+                      isLoading={isDiscovering}
+                      loadingText="Discovering Jira Projects..."
+                      icon={<ArrowRight className="w-3.5 h-3.5" />}
                     >
-                      {isDiscovering ? (
-                        <>
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Discovering Jira Projects...</span>
-                        </>
-                      ) : (
-                        <>
-                          <span>Verify & Discover Projects</span>
-                          <ArrowRight className="w-3.5 h-3.5" />
-                        </>
-                      )}
-                    </button>
+                      Verify & Discover Projects
+                    </ButtonLoader>
                   </div>
                 </div>
               ) : (
@@ -1669,24 +1662,17 @@ export function ConnectSourceModal() {
                   </div>
 
                   <div className="pt-2 flex justify-end">
-                    <button
+                    <ButtonLoader
                       type="button"
+                      variant="primary"
                       onClick={handleDiscover}
-                      disabled={isDiscovering || !slackToken}
-                      className="px-4 py-2 bg-[#4774A9] hover:bg-[#386295] disabled:opacity-50 text-white rounded-lg text-xs font-semibold flex items-center gap-2"
+                      disabled={!slackToken}
+                      isLoading={isDiscovering}
+                      loadingText="Discovering Slack Channels..."
+                      icon={<ArrowRight className="w-3.5 h-3.5" />}
                     >
-                      {isDiscovering ? (
-                        <>
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Discovering Slack Channels...</span>
-                        </>
-                      ) : (
-                        <>
-                          <span>Verify & Discover Channels</span>
-                          <ArrowRight className="w-3.5 h-3.5" />
-                        </>
-                      )}
-                    </button>
+                      Verify & Discover Channels
+                    </ButtonLoader>
                   </div>
                 </div>
               ) : (

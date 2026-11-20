@@ -11,6 +11,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { AuthLayout } from "../../components/auth/AuthLayout";
+import { SectionLoader, ButtonLoader } from "../../components/loading";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { api } from "../../lib/api";
 import type { VerifyEmailResponse } from "../../lib/types";
@@ -104,14 +105,11 @@ function VerifyEmailContent() {
   return (
     <AuthLayout>
       {status === "verifying" && (
-        <div className="flex flex-col items-center justify-center py-10 text-center">
-          <Loader2 className="size-8 animate-spin text-[#315FBA]" />
-          <h1 className="mt-4 text-lg font-semibold text-[#203653]">
-            Verifying your email address...
-          </h1>
-          <p className="mt-1 text-xs text-[#718096]">
-            Confirming your verification token with The Handover.
-          </p>
+        <div className="py-6" role="status" aria-live="polite">
+          <SectionLoader
+            label="Verifying your email address..."
+            description="Confirming your verification token with The Handover platform identity authority."
+          />
         </div>
       )}
 
@@ -216,20 +214,15 @@ function VerifyEmailContent() {
               </div>
             )}
 
-            <button
+            <ButtonLoader
               type="submit"
-              disabled={isResending}
-              className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#315FBA] text-sm font-semibold text-white hover:bg-[#264C98] disabled:opacity-60"
+              variant="primary"
+              isLoading={isResending}
+              loadingText="Sending link..."
+              className="w-full h-11 text-sm font-semibold"
             >
-              {isResending ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" />
-                  Sending link...
-                </>
-              ) : (
-                "Resend Verification Email"
-              )}
-            </button>
+              Resend Verification Email
+            </ButtonLoader>
           </form>
 
           <p className="flex items-center justify-center gap-1.5 text-[11px] text-[#718096]">
@@ -249,8 +242,8 @@ export default function VerifyEmailPage() {
     <Suspense
       fallback={
         <AuthLayout>
-          <div className="flex items-center justify-center py-12">
-            <Loader2 className="size-6 animate-spin text-[#315FBA]" />
+          <div className="py-12" role="status" aria-live="polite">
+            <SectionLoader label="Loading email verification..." />
           </div>
         </AuthLayout>
       }

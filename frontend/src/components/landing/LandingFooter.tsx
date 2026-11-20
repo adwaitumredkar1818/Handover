@@ -4,20 +4,25 @@ import React from "react";
 import { ArrowUp } from "lucide-react";
 import { Logo } from "../brand";
 import { useLiveApp } from "../../context/LiveAppContext";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { useReveal } from "./hooks/useReveal";
-
-const scrollToSection = (id: string) => {
-  const el = document.getElementById(id);
-  if (el) {
-    el.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-};
 
 export function LandingFooter() {
   const ref = useReveal<HTMLElement>();
   const { user } = useLiveApp();
   const router = useRouter();
+  const pathname = usePathname();
+
+  const handleNav = (id: string) => {
+    if (pathname === "/") {
+      const el = document.getElementById(id);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+    }
+    router.push(`/#${id}`);
+  };
 
   const handleAuth = (mode: "login" | "register") => {
     if (user) {
@@ -34,34 +39,35 @@ export function LandingFooter() {
     {
       title: "Product",
       links: [
-        { label: "Connected Sources", action: () => scrollToSection("sources") },
-        { label: "Evidence Center", action: () => scrollToSection("evidence") },
-        { label: "Knowledge Intelligence", action: () => scrollToSection("intelligence") },
-        { label: "Relationship Explorer", action: () => scrollToSection("explorer") },
-        { label: "Knowledge Assistant", action: () => scrollToSection("assistant") },
-        { label: "Structured Handovers", action: () => scrollToSection("handovers") },
+        { label: "Connected Sources", action: () => handleNav("sources") },
+        { label: "Evidence Center", action: () => handleNav("evidence") },
+        { label: "Knowledge Intelligence", action: () => handleNav("intelligence") },
+        { label: "Relationship Explorer", action: () => handleNav("explorer") },
+        { label: "Knowledge Assistant", action: () => handleNav("assistant") },
+        { label: "Structured Handovers", action: () => handleNav("handovers") },
       ],
     },
     {
       title: "Solutions",
       links: [
-        { label: "Departing Members", action: () => scrollToSection("roles") },
-        { label: "Technical Reviewers", action: () => scrollToSection("roles") },
-        { label: "Incoming Successors", action: () => scrollToSection("roles") },
+        { label: "Departing Members", action: () => handleNav("roles") },
+        { label: "Technical Reviewers", action: () => handleNav("roles") },
+        { label: "Incoming Successors", action: () => handleNav("roles") },
       ],
     },
     {
       title: "Resources",
       links: [
-        { label: "How It Works", action: () => scrollToSection("how") },
-        { label: "Trust & Verification", action: () => scrollToSection("security") },
-        { label: "Frequently Asked Questions", action: () => scrollToSection("faq") },
+        { label: "How It Works", action: () => handleNav("how") },
+        { label: "Trust & Verification", action: () => handleNav("security") },
+        { label: "Frequently Asked Questions", action: () => handleNav("faq") },
+        { label: "Meet the Developers", action: () => router.push("/developers") },
       ],
     },
     {
       title: "Platform",
       links: [
-        { label: "Platform Overview", action: () => scrollToSection("product") },
+        { label: "Platform Overview", action: () => handleNav("product") },
         { label: "Sign In to Workspace", action: () => handleAuth("login") },
         { label: "Create Account", action: () => handleAuth("register") },
       ],
@@ -76,7 +82,13 @@ export function LandingFooter() {
           <div className="col-span-2 md:col-span-1">
             <button
               type="button"
-              onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+              onClick={() => {
+                if (pathname === "/") {
+                  window.scrollTo({ top: 0, behavior: "smooth" });
+                } else {
+                  router.push("/");
+                }
+              }}
               className="cursor-pointer focus-visible:ring-2 focus-visible:ring-[#315FBA] rounded-md"
               aria-label="Handover home"
             >

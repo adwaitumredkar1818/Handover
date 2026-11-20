@@ -663,15 +663,68 @@ class ProjectService:
             organisation_id=ctx.organisation.id,
             project_id=ctx.project.id,
         )
+
+        target_user_id = payload.user_id
+        if target_user_id is None and payload.email is not None:
+            existing_user = self._user_repo.get_by_email(payload.email)
+            if existing_user is not None:
+                target_user_id = existing_user.id
+                # Ensure user is active member of organisation
+                org_membership = self._org_repo.get_active_membership(
+                    organisation_id=ctx.organisation.id,
+                    user_id=target_user_id,
+                )
+                if org_membership is None:
+                    default_org_role = self._rbac_repo.get_role_by_name(RoleName.ORG_MEMBER.value)
+                    if default_org_role:
+                        self._org_repo.create_membership(
+                            organisation_id=ctx.organisation.id,
+                            user_id=target_user_id,
+                            role_id=default_org_role.id,
+                            invited_by_id=ctx.principal.user.id,
+                            joined_at=utc_now(),
+                        )
+                        self._db.flush()
+            else:
+                # User does not exist yet in system, issue a project invitation
+                inv_res = self.create_project_invitation(
+                    ctx=ctx,
+                    payload=CreateProjectInvitationRequest(
+                        email=payload.email,
+                        project_role_name=payload.role_name,
+                    ),
+                )
+                now = utc_now()
+                return ProjectMemberResponse(
+                    id=inv_res.invitation.id,
+                    project_id=ctx.project.id,
+                    user_id=inv_res.invitation.id,
+                    full_name=payload.email.split("@")[0].replace(".", " ").title(),
+                    email=payload.email,
+                    role_name=payload.role_name,
+                    status="invited",
+                    responsibility_description=payload.responsibility_description,
+                    assigned_by_id=ctx.principal.user.id,
+                    joined_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+
+        if target_user_id is None:
+            raise BadRequestError(
+                "Either user_id or email must be provided to add a project member.",
+                code="TARGET_USER_REQUIRED",
+            )
+
         self._require_active_org_member(
             organisation_id=ctx.organisation.id,
-            user_id=payload.user_id,
+            user_id=target_user_id,
         )
 
         if (
             self._project_repo.get_active_membership(
                 project_id=ctx.project.id,
-                user_id=payload.user_id,
+                user_id=target_user_id,
             )
             is not None
         ):
@@ -683,7 +736,7 @@ class ProjectService:
         try:
             self._project_repo.create_membership(
                 project_id=ctx.project.id,
-                user_id=payload.user_id,
+                user_id=target_user_id,
                 role_id=target_role.id,
                 assigned_by_id=ctx.principal.user.id,
                 joined_at=utc_now(),
@@ -695,17 +748,17 @@ class ProjectService:
                 actor_user_id=ctx.principal.user.id,
                 organisation_id=ctx.organisation.id,
                 project_id=ctx.project.id,
-                resource_id=str(payload.user_id),
-                metadata={"target_user_id": str(payload.user_id), "role_name": target_role.name},
+                resource_id=str(target_user_id),
+                metadata={"target_user_id": str(target_user_id), "role_name": target_role.name},
                 message=(
-                    f"Added user '{payload.user_id}' as '{target_role.name}' "
+                    f"Added user '{target_user_id}' as '{target_role.name}' "
                     f"to project '{ctx.project.id}'."
                 ),
             )
             self._db.commit()
             local_response_cache.invalidate_prefix("org_projects:")
             cache_service.invalidate_prefix(f"dash:overview:proj:{ctx.project.id}")
-            cache_service.delete(CacheKeys.rbac_user_project_permissions(ctx.project.id, payload.user_id))
+            cache_service.delete(CacheKeys.rbac_user_project_permissions(ctx.project.id, target_user_id))
             local_response_cache.invalidate_prefix(f"project_members:{ctx.project.id}:")
             self._invalidate_relationship_caches(ctx.project.id)
         except IntegrityError as exc:
@@ -717,13 +770,39 @@ class ProjectService:
 
         loaded = self._project_repo.get_active_membership(
             project_id=ctx.project.id,
-            user_id=payload.user_id,
+            user_id=target_user_id,
         )
         if loaded is None:
             raise NotFoundError(
                 "Active project membership was not found.",
                 code="MEMBERSHIP_NOT_FOUND",
             )
+
+        if payload.transition_role:
+            try:
+                curr_trans = self._project_repo.get_transition(project_id=ctx.project.id)
+                dep_id = curr_trans.departing_user_id if curr_trans else ctx.principal.user.id
+                succ_id = curr_trans.successor_user_id if curr_trans else None
+                if payload.transition_role == "departing_owner":
+                    dep_id = target_user_id
+                elif payload.transition_role == "incoming_assignee":
+                    succ_id = target_user_id
+                if dep_id and succ_id and dep_id != succ_id:
+                    self._project_repo.upsert_transition(
+                        project_id=ctx.project.id,
+                        departing_user_id=dep_id,
+                        successor_user_id=succ_id,
+                        workflow_stage=curr_trans.workflow_stage if curr_trans else "planning",
+                        handover_scope=curr_trans.handover_scope if curr_trans else None,
+                        source_scope=curr_trans.source_scope if curr_trans else None,
+                        capture_start_date=curr_trans.capture_start_date if curr_trans else None,
+                        capture_end_date=curr_trans.capture_end_date if curr_trans else None,
+                        context_notes=curr_trans.context_notes if curr_trans else None,
+                    )
+                    self._db.commit()
+            except Exception as exc:
+                logger.warning("Failed to auto-update transition participant: %s", exc)
+
         return _build_project_member_response(loaded)
 
     def update_project_member_role(

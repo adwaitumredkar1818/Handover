@@ -928,3 +928,38 @@ class HandoverOwnershipTransfer(Base):
     to_user: Mapped[Any] = relationship("User", foreign_keys=[to_user_id])
     executed_by_user: Mapped[Any] = relationship("User", foreign_keys=[executed_by_user_id])
     rolled_back_by_user: Mapped[Any] = relationship("User", foreign_keys=[rolled_back_by_user_id])
+
+
+class ProjectOnboardingProgress(Base):
+    """Tracks a user's (e.g. successor or onboarding team member) progress through guided onboarding steps for a project."""
+
+    __tablename__ = "project_onboarding_progress"
+    __table_args__ = (
+        UniqueConstraint("project_id", "user_id", "step_id", name="uq_onboarding_proj_user_step"),
+        Index("ix_onboarding_progress_proj_user", "project_id", "user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    organisation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organisations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    step_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_completed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    # Relationships
+    user: Mapped[Any] = relationship("User", foreign_keys=[user_id])
+    project: Mapped[Any] = relationship("Project", foreign_keys=[project_id])
+
