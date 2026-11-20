@@ -599,7 +599,7 @@ class HandoverResponsibilityTransfer(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     transfer_status: Mapped[str] = mapped_column(
-        String(32), default=TransferStatus.PENDING.value, nullable=False
+        String(64), default=TransferStatus.PENDING.value, nullable=False
     )
     transfer_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     blocker_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

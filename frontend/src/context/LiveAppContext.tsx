@@ -412,18 +412,20 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
             const me = await api.auth.me();
             setUser(me);
             setStoredUser(me);
-          } catch {
-            try {
-              const refreshed = await api.auth.refreshToken();
-              setStoredToken(refreshed.access_token);
-              setStoredUser(refreshed.user);
-              setToken(refreshed.access_token);
-              setUser(refreshed.user);
-            } catch {
-              setStoredToken(null);
-              setStoredUser(null);
-              setToken(null);
-              setUser(null);
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 401) {
+              try {
+                const refreshed = await api.auth.refreshToken();
+                setStoredToken(refreshed.access_token);
+                setStoredUser(refreshed.user);
+                setToken(refreshed.access_token);
+                setUser(refreshed.user);
+              } catch {
+                setStoredToken(null);
+                setStoredUser(null);
+                setToken(null);
+                setUser(null);
+              }
             }
           }
           return;
@@ -464,18 +466,20 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
             const me = await api.auth.me();
             setUser(me);
             setStoredUser(me);
-          } catch {
-            try {
-              const refreshed = await api.auth.refreshToken();
-              setStoredToken(refreshed.access_token);
-              setStoredUser(refreshed.user);
-              setToken(refreshed.access_token);
-              setUser(refreshed.user);
-            } catch {
-              setStoredToken(null);
-              setStoredUser(null);
-              setToken(null);
-              setUser(null);
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 401) {
+              try {
+                const refreshed = await api.auth.refreshToken();
+                setStoredToken(refreshed.access_token);
+                setStoredUser(refreshed.user);
+                setToken(refreshed.access_token);
+                setUser(refreshed.user);
+              } catch {
+                setStoredToken(null);
+                setStoredUser(null);
+                setToken(null);
+                setUser(null);
+              }
             }
           }
         } else {

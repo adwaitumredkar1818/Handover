@@ -505,6 +505,7 @@ SYSTEM_ROLES: tuple[RoleSpec, ...] = (
             "handover.compile",
             "handover.readiness.assess",
             "handover.review",
+            "handover.approve",
             "handover.deliver",
             "handover.transfer",
             "handover.admin",

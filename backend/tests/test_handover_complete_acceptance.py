@@ -57,6 +57,7 @@ from app.models.evidence import EvidenceChunk, EvidenceContent, EvidenceItem
 from app.models.handover import (
     HandoverPackageSection,
     HandoverPackageVersion,
+    HandoverResponsibilityTransfer,
 )
 from app.models.integration import SourceAccessPolicy
 from app.models.knowledge import KnowledgeEvidenceLink, KnowledgeItem
@@ -773,6 +774,7 @@ def test_complete_22_step_handover_journey_and_role_presentations(
             },
         )
         assert tr_create.status_code == 201, tr_create.text
+        assert (HandoverResponsibilityTransfer.__table__.c.transfer_status.type.length or 0) >= 64
         transfer_id = tr_create.json()[0]["id"]
         active_user["user"] = departing
         assert client.post(
@@ -1142,3 +1144,104 @@ def test_negative_handover_security_acl_and_lifecycle_gates(
         assert locked_edit.status_code in (400, 409)
     finally:
         app.dependency_overrides.clear()
+
+
+def test_handover_compilation_and_narrative_wait_for_llm(handover_acceptance_env: dict[str, Any]) -> None:
+    """Strict Ollama-offline test: verify handover assembly & narrative drafting make ZERO LLM calls."""
+    from app.schemas.handover import NarrativeDraftRequest, PackageAssemblyRequest
+    from app.services.handover_assembly import PackageAssemblyService
+    from app.services.handover_narrative import HandoverNarrativeService
+
+    env = handover_acceptance_env
+    session = env["session"]
+    project = env["proj_a"]
+    manager = env["manager"]
+    departing = env["departing"]
+    successor = env["successor"]
+
+    case_svc = HandoverCaseService(session)
+    case = case_svc.create_case(
+        project_id=project.id,
+        organisation_id=project.organisation_id,
+        user_id=manager.id,
+        request=HandoverCaseCreateRequest(
+            title="Ollama-Offline Deterministic Assembly Case",
+            handover_type="developer",
+            departing_member_id=departing.id,
+            successor_user_id=successor.id,
+        ),
+    )
+
+    class _SpyForbiddenLLM:
+        model_name = "qwen3:8b"
+
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
+
+        def generate_json(self, request: Any) -> Any:
+            self.calls.append(request)
+            raise AssertionError("Handover generation must NOT invoke Ollama/LLM!")
+
+    llm_spy = _SpyForbiddenLLM()
+    assembly_svc = PackageAssemblyService(session, llm_client=llm_spy)
+    version = assembly_svc.assemble_package_version(
+        case.id,
+        project_id=project.id,
+        user_id=manager.id,
+        request=PackageAssemblyRequest(version_notes="Offline deterministic compile"),
+        has_project_manage=True,
+    )
+    assert len(llm_spy.calls) == 0
+    assert (version.assembly_snapshot_json or {}).get("total_eligible_knowledge_items", 0) >= 1
+    assert isinstance((version.assembly_snapshot_json or {}).get("exclusion_breakdown"), dict)
+
+    sections = assembly_svc.section_repo.list_by_version(version.id)
+    dec_sec = next(s for s in sections if s.section_type == "decisions_rationale")
+    assert (dec_sec.metadata_json or {}).get("llm_used") is False
+    empty_sec = next((s for s in sections if s.knowledge_item_count == 0 and s.relationship_count == 0), None)
+    if empty_sec is not None:
+        assert "Insufficient approved information" in empty_sec.section_content
+
+    narrative_svc = HandoverNarrativeService(session, llm_client=llm_spy)  # type: ignore[arg-type]
+    draft = narrative_svc.draft_section_narrative(
+        project_id=project.id,
+        case_id=case.id,
+        viewer_user_id=manager.id,
+        request=NarrativeDraftRequest(
+            version_id=version.id,
+            section_type=dec_sec.section_type,
+            additional_context="Focus on locks.",
+        ),
+        has_project_manage=True,
+    )
+    assert len(llm_spy.calls) == 0
+    assert "Deterministic compilation" in draft["content_summary"]
+
+    # Regression: Refresh Draft (assemble) must succeed when case is in review_pending
+    case_svc.transition_status(
+        case.id,
+        project_id=project.id,
+        new_status=HandoverCaseStatus.READINESS_ASSESSED.value,
+        user_id=manager.id,
+    )
+    case_svc.transition_status(
+        case.id,
+        project_id=project.id,
+        new_status=HandoverCaseStatus.REVIEW_PENDING.value,
+        user_id=manager.id,
+    )
+    refreshed_version = assembly_svc.assemble_package_version(
+        case.id,
+        project_id=project.id,
+        user_id=manager.id,
+        request=PackageAssemblyRequest(version_notes="Refresh from review_pending"),
+        has_project_manage=True,
+    )
+    assert refreshed_version.version_number == 2
+
+    from app.core.rbac_catalog import SYSTEM_ROLES
+    from app.models.enums import RoleName
+
+    pm_spec = next(r for r in SYSTEM_ROLES if r.name == RoleName.PROJECT_MANAGER.value)
+    assert "handover.approve" in pm_spec.permission_codes
+

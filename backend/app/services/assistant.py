@@ -397,7 +397,7 @@ class ProjectKnowledgeAssistantService:
             retrieval_run_id=retrieval_run.id,
         )
 
-        # 10. Persist Citations
+        # 10. Persist Citations (only those referencing real evidence_items rows to satisfy FK)
         citations_to_persist = []
         for order, cit in enumerate(validated.validated_citations, start=1):
             citations_to_persist.append(
@@ -419,6 +419,18 @@ class ProjectKnowledgeAssistantService:
                     "is_verified": cit.is_verified,
                 }
             )
+
+        if citations_to_persist:
+            from sqlalchemy import select
+            from app.models.evidence import EvidenceItem
+
+            candidate_ev_ids = [c["evidence_id"] for c in citations_to_persist if c["evidence_id"]]
+            valid_ev_ids = (
+                set(self.session.scalars(select(EvidenceItem.id).where(EvidenceItem.id.in_(candidate_ev_ids))).all())
+                if candidate_ev_ids
+                else set()
+            )
+            citations_to_persist = [c for c in citations_to_persist if c["evidence_id"] in valid_ev_ids]
 
         persisted_citations = self.citation_repo.create_batch(citations_to_persist)
         self.conversation_repo.touch_last_message(conversation_id)

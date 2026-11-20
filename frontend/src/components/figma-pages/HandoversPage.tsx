@@ -466,7 +466,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
   const router = useRouter()
   const searchParams = useSearchParams()
   const projectParam = searchParams?.get('project') || defaultProjectId
-  const { activeProject, projects, user, members: liveMembers, sourceMappings, refreshHandovers, addToast } = useLiveApp()
+  const { activeOrg, activeProject, projects, user, members: liveMembers, sourceMappings, refreshHandovers, addToast } = useLiveApp()
 
   const availableProjects = projects.length > 0 ? projects : (activeProject ? [activeProject] : [])
   const [step, setStep] = useState(0)
@@ -476,6 +476,8 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
       ? projectParam
       : activeProject?.id || availableProjects[0]?.id || ''
   )
+  const [pidMembers, setPidMembers] = useState<Array<{ user_id?: string; id: string; full_name?: string | null; email?: string | null; role_name?: string | null }>>([])
+  const [orgTeamMembers, setOrgTeamMembers] = useState<Array<{ user_id?: string; id: string; full_name?: string | null; email?: string | null; role_name?: string | null }>>([])
 
   useEffect(() => {
     if (activeProject?.id && (!pid || !isUUID(pid) || pid === 'northwind')) {
@@ -483,25 +485,73 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
     }
   }, [activeProject?.id, pid])
 
-  const projectMembers = useMemo(() => {
-    if (liveMembers && liveMembers.length > 0) {
-      return liveMembers.map((m) => ({
-        personId: m.user_id || m.id,
-        name: m.full_name || (m.email ? m.email.split('@')[0] : 'Member'),
-        role: m.role_name || 'member',
-        email: m.email || '',
-      }))
+  useEffect(() => {
+    let cancelled = false
+    if (!pid || !isUUID(pid)) {
+      setPidMembers([])
+      return
     }
-    if (user) {
-      return [{
+    api.members
+      .list(pid)
+      .then((res) => {
+        if (!cancelled) setPidMembers(Array.isArray(res) ? res : [])
+      })
+      .catch(() => {
+        if (!cancelled) setPidMembers([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [pid])
+
+  useEffect(() => {
+    let cancelled = false
+    const selectedProj = availableProjects.find((p) => p.id === pid)
+    const targetOrgId = selectedProj?.organisation_id || activeOrg?.id
+    if (!targetOrgId || !isUUID(targetOrgId)) {
+      setOrgTeamMembers([])
+      return
+    }
+    api.organisations
+      .listMembers(targetOrgId)
+      .then((res) => {
+        if (!cancelled) setOrgTeamMembers(Array.isArray(res) ? res : [])
+      })
+      .catch(() => {
+        if (!cancelled) setOrgTeamMembers([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [pid, activeOrg?.id, availableProjects])
+
+  const projectMembers = useMemo(() => {
+    const byId = new Map<string, { personId: string; name: string; role: string; email: string }>()
+    const addList = (list: Array<{ user_id?: string; id: string; full_name?: string | null; email?: string | null; role_name?: string | null }>, fallbackRole: string) => {
+      for (const m of list) {
+        const personId = m.user_id || m.id
+        if (!personId || byId.has(personId)) continue
+        byId.set(personId, {
+          personId,
+          name: m.full_name || (m.email ? m.email.split('@')[0] : '') || 'Member',
+          role: m.role_name || fallbackRole,
+          email: m.email || '',
+        })
+      }
+    }
+    const baseProjMembers = pidMembers.length > 0 ? pidMembers : (liveMembers || [])
+    addList(baseProjMembers, 'member')
+    addList(orgTeamMembers, 'team member')
+    if (byId.size === 0 && user) {
+      byId.set(user.id, {
         personId: user.id,
-        name: user.full_name || (user.email ? user.email.split('@')[0] : 'Member'),
+        name: user.full_name || (user.email ? user.email.split('@')[0] : '') || 'Member',
         role: user.roles?.[0] || 'project_manager',
         email: user.email || '',
-      }]
+      })
     }
-    return []
-  }, [liveMembers, user])
+    return Array.from(byId.values())
+  }, [pidMembers, liveMembers, orgTeamMembers, user])
 
   const [out, setOut] = useState('')
   const [inc, setInc] = useState('')
@@ -538,6 +588,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
   const [createdCaseId, setCreatedCaseId] = useState<string | null>(null)
   const [assembledVersionId, setAssembledVersionId] = useState<string | null>(null)
   const [readinessData, setReadinessData] = useState<any>(null)
+  const [assembledSnapshot, setAssembledSnapshot] = useState<any>(null)
   const [assembledStats, setAssembledStats] = useState<{ eligibleItems: number; excludedItems: number } | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
 
@@ -605,8 +656,9 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
       })
       const newVerId = asmRes.id
       setAssembledVersionId(newVerId)
+      setAssembledSnapshot(asmRes.assembly_snapshot_json || null)
       setAssembledStats({
-        eligibleItems: asmRes.assembly_snapshot_json?.total_eligible_knowledge_items ?? 1,
+        eligibleItems: asmRes.assembly_snapshot_json?.total_eligible_knowledge_items ?? 0,
         excludedItems: asmRes.assembly_snapshot_json?.total_excluded_knowledge_items ?? 0,
       })
       setGenPct(65)
@@ -1066,73 +1118,123 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
               )}
             </>
           )}
-          {step === 6 && (
-            <>
-              <h2 className="mt-1 text-lg font-semibold text-navy">Review generated handover</h2>
-              <p className="mt-1 text-sm text-muted">This is an AI draft. Verified knowledge is compiled with cryptographic integrity; {getMemberDisplayName(out, liveMembers, user)} will confirm each finding.</p>
-              <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                {[
-                  ['Verified items', assembledStats?.eligibleItems ?? f.decisions.length, Lightbulb],
-                  ['Readiness score', `${readinessData?.overall_score ?? 60}%`, ListTodo],
-                  ['Evaluation', readinessData?.overall_level ? readinessData.overall_level.replace('_', ' ') : 'Ready for review', ShieldCheck],
-                  ['Excluded items', assembledStats?.excludedItems ?? 0, AlertTriangle]
-                ].map(([l, v, I]) => {
-                  const Ic = I as typeof Lightbulb
-                  return (
-                    <div key={l as string} className="rounded-xl border border-line p-3">
-                      <Ic className="size-4 text-brand" />
-                      <p className="mt-2 text-xl font-semibold text-navy">{v as any}</p>
-                      <p className="text-xs text-muted">{l as string}</p>
-                    </div>
-                  )
-                })}
-              </div>
-              <p className="mb-2 mt-5 text-xs font-semibold uppercase tracking-wide text-slate-400">Sample findings</p>
-              <ul className="divide-y divide-line rounded-xl border border-line">
-                {all.slice(0, 5).map((x) => (
-                  <li key={x.id} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center">
-                    <Badge tone="indigo" className="w-fit">{x.kind}</Badge>
-                    <span className="flex-1 text-[13px] font-medium text-navy">{x.title}</span>
-                    <Confidence value={x.confidence} compact />
-                  </li>
-                ))}
-              </ul>
-              {!!all.filter((x) => x.verification === 'conflicting').length && (
-                <div className="mt-4">
-                  <Callout tone="red" icon={AlertTriangle} title={`${all.filter((x) => x.verification === 'conflicting').length} findings have conflicting evidence`}>
-                    These are flagged for the outgoing member to resolve first.
-                  </Callout>
+          {step === 6 && (() => {
+            const verifiedCount = assembledStats?.eligibleItems ?? 0
+            const excludedCount = assembledStats?.excludedItems ?? 0
+            const breakdown = assembledSnapshot?.exclusion_breakdown || {}
+            const verifiedSamples: Array<{ id: string; title: string; category: string; review_status: string; epistemic_status: string }> =
+              Array.isArray(assembledSnapshot?.sample_verified_items) ? assembledSnapshot.sample_verified_items : []
+            const targetProjId = isUUID(pid) ? pid : activeProject?.id
+            const verificationHref = targetProjId ? `/projects/${targetProjId}/verification` : '/verification'
+
+            return (
+              <>
+                <h2 className="mt-1 text-lg font-semibold text-navy">Review generated handover</h2>
+                <p className="mt-1 text-sm text-muted">
+                  {verifiedCount > 0
+                    ? `Compiled deterministically from ${verifiedCount} human-approved finding(s) in this project. ${getMemberDisplayName(out, liveMembers, user)} and the assigned reviewer can review and approve this draft.`
+                    : `Handover packages are compiled strictly from human-approved knowledge. Unreviewed extractions, conflicts, and restricted items are excluded until reviewed.`}
+                </p>
+                <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  {[
+                    ['Human-approved items', verifiedCount, Lightbulb],
+                    ['Readiness score', `${readinessData?.overall_score ?? 0}%`, ListTodo],
+                    ['Evaluation', readinessData?.overall_level ? String(readinessData.overall_level).replace('_', ' ') : 'not ready', ShieldCheck],
+                    ['Excluded items', excludedCount, AlertTriangle]
+                  ].map(([l, v, I]) => {
+                    const Ic = I as typeof Lightbulb
+                    return (
+                      <div key={l as string} className="rounded-xl border border-line p-3">
+                        <Ic className="size-4 text-brand" />
+                        <p className="mt-2 text-xl font-semibold text-navy">{v as any}</p>
+                        <p className="text-xs text-muted">{l as string}</p>
+                      </div>
+                    )
+                  })}
                 </div>
-              )}
-            </>
-          )}
-          {step === 7 && (
-            <>
-              <h2 className="mt-1 text-lg font-semibold text-navy">Submit</h2>
-              <p className="mt-1 text-sm text-muted">Choose the next stage for this handover.</p>
-              <div className="mt-5 space-y-3">
-                <div className={cn('rounded-xl border p-4', submitMode === 'verify' ? 'border-brand bg-tint/30' : 'border-line')}>
-                  <Radio
-                    checked={submitMode === 'verify'}
-                    onChange={() => setSubmitMode('verify')}
-                    label={<span className="font-medium">Send to {getMemberDisplayName(out, liveMembers, user)} for verification <Badge tone="blue" className="ml-1">Recommended</Badge></span>}
-                    description="They review findings, answer gaps, then submit for your approval."
-                  />
+
+                {verifiedCount === 0 ? (
+                  <div className="mt-5 space-y-3">
+                    <Callout tone="amber" icon={AlertTriangle} title="No approved knowledge is available for this handover yet">
+                      <p className="text-xs text-slate-700">
+                        This draft cannot be approved or published until relevant findings are human-approved in Verification Center.
+                      </p>
+                      <ul className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-700 sm:grid-cols-3">
+                        <li>Awaiting human review: <strong>{breakdown.pending_review ?? excludedCount}</strong></li>
+                        <li>Conflicted: <strong>{breakdown.conflicted ?? 0}</strong></li>
+                        <li>Rejected: <strong>{breakdown.rejected ?? 0}</strong></li>
+                        <li>Missing evidence: <strong>{breakdown.missing_evidence ?? 0}</strong></li>
+                        <li>Restricted by ACL: <strong>{breakdown.restricted_acl ?? 0}</strong></li>
+                        <li>Other exclusions: <strong>{breakdown.other ?? 0}</strong></li>
+                      </ul>
+                      <div className="mt-3">
+                        <NextLink
+                          href={verificationHref}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-navy px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-800"
+                        >
+                          <ShieldCheck className="size-3.5" />
+                          Review Knowledge in Verification Center
+                        </NextLink>
+                      </div>
+                    </Callout>
+                  </div>
+                ) : (
+                  <>
+                    <p className="mb-2 mt-5 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                      Included human-approved findings
+                    </p>
+                    <ul className="divide-y divide-line rounded-xl border border-line">
+                      {verifiedSamples.map((x) => (
+                        <li key={x.id} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center">
+                          <Badge tone="indigo" className="w-fit">{String(x.category).replace(/_/g, ' ')}</Badge>
+                          <span className="flex-1 text-[13px] font-medium text-navy">{x.title}</span>
+                          <Badge tone="green">Human Verified · Approved</Badge>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </>
+            )
+          })()}
+          {step === 7 && (() => {
+            const hasVerified = (assembledStats?.eligibleItems ?? 0) > 0
+            return (
+              <>
+                <h2 className="mt-1 text-lg font-semibold text-navy">Submit</h2>
+                <p className="mt-1 text-sm text-muted">
+                  {hasVerified
+                    ? 'Choose the next stage for this handover.'
+                    : 'This incomplete draft has 0 human-approved items. Save it for verification, then approve knowledge in Verification Center before release.'}
+                </p>
+                <div className="mt-5 space-y-3">
+                  <div className={cn('rounded-xl border p-4', submitMode === 'verify' ? 'border-brand bg-tint/30' : 'border-line')}>
+                    <Radio
+                      checked={submitMode === 'verify'}
+                      onChange={() => setSubmitMode('verify')}
+                      label={<span className="font-medium">Send to {getMemberDisplayName(out, liveMembers, user)} for verification <Badge tone="blue" className="ml-1">Recommended</Badge></span>}
+                      description="They review findings, answer gaps, then submit for your approval."
+                    />
+                  </div>
+                  <div className={cn('rounded-xl border p-4', !hasVerified && 'opacity-50', submitMode === 'approve' ? 'border-brand bg-tint/30' : 'border-line')}>
+                    <Radio
+                      checked={hasVerified && submitMode === 'approve'}
+                      onChange={() => { if (hasVerified) setSubmitMode('approve') }}
+                      label={<span className="font-medium">Submit directly for approval</span>}
+                      description={
+                        hasVerified
+                          ? 'Advance directly to managerial review with human-approved findings.'
+                          : 'Disabled until at least one finding is human-approved in Verification Center.'
+                      }
+                    />
+                  </div>
                 </div>
-                <div className={cn('rounded-xl border p-4', submitMode === 'approve' ? 'border-brand bg-tint/30' : 'border-line')}>
-                  <Radio
-                    checked={submitMode === 'approve'}
-                    onChange={() => setSubmitMode('approve')}
-                    label={<span className="font-medium">Submit directly for approval</span>}
-                    description="Skip outgoing verification. Unverified findings stay clearly marked as unverified."
-                  />
-                </div>
-              </div>
-              <p className="mt-4 flex items-center gap-1.5 text-xs text-muted">
-                <Lock className="size-3" />{getMemberDisplayName(out, liveMembers, user)} and approvers will be notified. Nothing is visible to {inc ? getMemberDisplayName(inc, liveMembers, user) : 'unassigned incoming member'} until you publish.
-              </p>
-            </>
-          )}
+                <p className="mt-4 flex items-center gap-1.5 text-xs text-muted">
+                  <Lock className="size-3" />{getMemberDisplayName(out, liveMembers, user)} and approvers will be notified. Nothing is visible to {inc ? getMemberDisplayName(inc, liveMembers, user) : 'unassigned incoming member'} until you publish.
+                </p>
+              </>
+            )
+          })()}
           <div className="mt-8 flex justify-between border-t border-line pt-5">
             <Button
               variant="ghost"

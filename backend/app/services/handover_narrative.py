@@ -19,7 +19,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError, ServiceUnavailableError
 from app.core.security import utc_now
 from app.models.enums import AuditOutcome, HandoverCaseStatus
 from app.models.handover import (
@@ -38,7 +38,12 @@ from app.schemas.handover import NarrativeDraftRequest, SectionEditRequest
 from app.services.audit import AuditService
 from app.services.handover_eligibility import check_evidence_accessibility
 from app.services.handover_sections import redact_secrets
-from app.services.llm import LLMChatMessage, StructuredLLMClient
+from app.services.llm import (
+    DisabledLLMClient,
+    LLMExecutionError,
+    LLMGenerationRequest,
+    StructuredLLMClient,
+)
 
 logger = logging.getLogger("app.services.handover_narrative")
 
@@ -125,34 +130,14 @@ class HandoverNarrativeService:
         draft_content: str
         summary_text: str
 
-        if self.llm_client is not None and knowledge_snippets:
-            try:
-                system_prompt = (
-                    "You are a technical documentation assistant for The Handover platform. "
-                    "Synthesize the following verified project knowledge into a clear, professional, "
-                    "and well-structured handover section narrative. Do not invent any facts, decisions, "
-                    "or claims not present in the provided knowledge findings."
-                )
-                user_prompt = (
-                    f"Section: {section.section_title}\n"
-                    f"Additional User Guidance: {request.additional_context or 'None'}\n\n"
-                    f"Verified Knowledge Findings:\n{context_str}\n\n"
-                    "Provide a clean markdown narrative suitable for an incoming project successor."
-                )
-                messages = [
-                    LLMChatMessage(role="system", content=system_prompt),
-                    LLMChatMessage(role="user", content=user_prompt),
-                ]
-                response_text = self.llm_client.generate_raw(messages=messages, temperature=0.1)
-                draft_content = response_text
-                summary_text = f"AI-drafted narrative synthesizing {len(knowledge_snippets)} verified findings."
-            except Exception as e:
-                logger.warning("LLM generation failed, falling back to deterministic draft: %s", e)
-                draft_content = self._deterministic_draft(section.section_title, knowledge_snippets)
-                summary_text = f"Synthesized {len(knowledge_snippets)} verified findings (deterministic)."
-        else:
-            draft_content = self._deterministic_draft(section.section_title, knowledge_snippets)
-            summary_text = f"Structured compilation of {len(knowledge_snippets)} findings."
+        draft_content = self._deterministic_draft(section.section_title, knowledge_snippets)
+        if not knowledge_snippets:
+            draft_content = (
+                f"# {section.section_title}\n\n"
+                "Insufficient approved information for this section. "
+                "Review and approve supporting findings in Verification Center."
+            )
+        summary_text = f"Deterministic compilation of {len(knowledge_snippets)} human-approved findings."
 
         return {
             "section_id": section.id,

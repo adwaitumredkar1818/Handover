@@ -15,10 +15,11 @@ Provides:
 
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
@@ -323,7 +324,7 @@ def assemble_handover_package(
     project_ctx: Annotated[ProjectContext, Depends(require_project_permission("handover.compile"))],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> HandoverPackageVersionResponse:
-    """Run deterministic compilation of verified project knowledge into an immutable package version."""
+    """Compile human-approved project knowledge deterministically into an immutable package version (no LLM)."""
     service = PackageAssemblyService(session)
     has_manage = project_ctx.has_permission("project.manage")
     version = service.assemble_package_version(

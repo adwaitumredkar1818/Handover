@@ -95,10 +95,11 @@ const scrollToSection = (id: string) => {
 };
 
 export function LandingNav() {
-  const { user } = useLiveApp();
+  const { user, login, addToast } = useLiveApp();
   const router = useRouter();
   const { isScrolled } = useScrollProgress();
   const [mounted, setMounted] = useState(false);
+  const [demoLoading, setDemoLoading] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [productOpen, setProductOpen] = useState(false);
   const [solutionsOpen, setSolutionsOpen] = useState(false);
@@ -144,6 +145,23 @@ export function LandingNav() {
     }
   };
 
+  const handleDemoLogin = async () => {
+    if (demoLoading) return;
+    setDemoLoading(true);
+    try {
+      await login("vernit.gerg25@pccoepune.org", "Handover!Vernit2026");
+      router.push("/overview");
+    } catch (err) {
+      addToast?.({
+        type: "error",
+        title: "Demo login failed",
+        message: err instanceof Error ? err.message : "Could not sign in to demo account.",
+      });
+    } finally {
+      setDemoLoading(false);
+    }
+  };
+
   return (
     <header
       className={`sticky top-0 z-40 transition-all duration-300 ${
@@ -153,14 +171,24 @@ export function LandingNav() {
       }`}
     >
       <div className="mx-auto flex h-[76px] w-full max-w-[1240px] items-center px-5 sm:px-8">
-        {/* Brand Logo */}
-        <button
-          onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
-          className="flex items-center gap-2 cursor-pointer focus:outline-none"
-          aria-label="The Handover home"
-        >
-          <Logo size={28} />
-        </button>
+        {/* Brand Logo & Demo Quick-Login */}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+            className="flex items-center gap-2 cursor-pointer focus:outline-none"
+            aria-label="The Handover home"
+          >
+            <Logo size={28} />
+          </button>
+          <button
+            type="button"
+            onClick={handleDemoLogin}
+            disabled={demoLoading}
+            className="inline-flex h-10 items-center justify-center rounded-lg border border-[#D9E1F0] bg-white/80 px-4 text-[14.5px] font-semibold text-[#203653] transition hover:bg-white cursor-pointer disabled:opacity-60"
+          >
+            {demoLoading ? "Signing in..." : "Demo"}
+          </button>
+        </div>
 
         {/* Desktop Primary Navigation */}
         <nav

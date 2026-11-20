@@ -244,16 +244,57 @@ export function HeroVisual() {
 
 function AuthLayout({ children }: { children: ReactNode }) {
   const router = useRouter()
+  const s = useFigmaStore()
+  const liveApp = useLiveApp()
+  const [demoLoading, setDemoLoading] = useState(false)
+
+  const handleDemoLogin = async () => {
+    if (demoLoading) return
+    setDemoLoading(true)
+    try {
+      if (liveApp?.login) {
+        await liveApp.login('vernit.gerg25@pccoepune.org', 'Handover!Vernit2026')
+      } else {
+        const res = await api.auth.login({
+          email: 'vernit.gerg25@pccoepune.org',
+          password: 'Handover!Vernit2026',
+        })
+        setStoredToken(res.access_token)
+      }
+      s.setAuthed(true)
+      router.push('/overview')
+    } catch (err) {
+      liveApp?.addToast?.({
+        type: 'error',
+        title: 'Demo login failed',
+        message: err instanceof Error ? err.message : 'Unable to sign in to demo account.',
+      })
+    } finally {
+      setDemoLoading(false)
+    }
+  }
+
   return (
     <div className="grid min-h-dvh bg-white lg:grid-cols-[1fr_1.05fr]">
       <div className="flex flex-col px-6 py-8 sm:px-12 lg:px-16">
-        <button
-          onClick={() => router.push('/')}
-          className="w-fit cursor-pointer"
-          aria-label="Handover home"
-        >
-          <Logo size={30} />
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => router.push('/')}
+            className="w-fit cursor-pointer"
+            aria-label="Handover home"
+          >
+            <Logo size={30} />
+          </button>
+          <Button
+            type="button"
+            variant="secondary"
+            size="lg"
+            onClick={handleDemoLogin}
+            disabled={demoLoading}
+          >
+            {demoLoading ? 'Signing in…' : 'Demo'}
+          </Button>
+        </div>
         <div className="mx-auto flex w-full max-w-[400px] flex-1 flex-col justify-center py-10">
           {children}
         </div>

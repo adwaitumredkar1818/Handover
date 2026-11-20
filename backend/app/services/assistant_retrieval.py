@@ -360,7 +360,7 @@ class AssistantRetrievalService:
                 candidates_authorized += 1
                 candidates.append(
                     RetrievedEvidenceCandidate(
-                        evidence_id=rel.id,
+                        evidence_id=(rel.evidence_links[0].evidence_id if rel.evidence_links else rel.id),
                         chunk_id=None,
                         knowledge_item_id=None,
                         source_title=f"{src_name} -> {tgt_name}",
@@ -401,7 +401,7 @@ class AssistantRetrievalService:
                 candidates_authorized += 1
                 candidates.append(
                     RetrievedEvidenceCandidate(
-                        evidence_id=conf.id,
+                        evidence_id=(conf.claim_a_source_evidence_id or conf.claim_b_source_evidence_id or conf.id),
                         chunk_id=None,
                         knowledge_item_id=None,
                         source_title=f"Conflict: {conf.explanation[:50]}",

@@ -127,12 +127,12 @@ export function setStoredUser(user: User | null) {
   }
 }
 
-let refreshPromise: Promise<string | null> | null = null;
+let refreshSessionPromise: Promise<AuthSessionResponse | null> | null = null;
 
-async function tryRefreshToken(): Promise<string | null> {
+async function refreshSessionSingleFlight(): Promise<AuthSessionResponse | null> {
   if (typeof window === "undefined") return null;
-  if (!refreshPromise) {
-    refreshPromise = (async () => {
+  if (!refreshSessionPromise) {
+    refreshSessionPromise = (async () => {
       try {
         const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
           method: "POST",
@@ -146,11 +146,11 @@ async function tryRefreshToken(): Promise<string | null> {
           setStoredUser(null);
           return null;
         }
-        const data = (await res.json()) as { access_token?: string; user?: User };
+        const data = (await res.json()) as AuthSessionResponse;
         if (data?.access_token) {
           setStoredToken(data.access_token);
           if (data.user) setStoredUser(data.user);
-          return data.access_token;
+          return data;
         }
         setStoredToken(null);
         setStoredUser(null);
@@ -160,11 +160,16 @@ async function tryRefreshToken(): Promise<string | null> {
         setStoredUser(null);
         return null;
       } finally {
-        refreshPromise = null;
+        refreshSessionPromise = null;
       }
     })();
   }
-  return refreshPromise;
+  return refreshSessionPromise;
+}
+
+async function tryRefreshToken(): Promise<string | null> {
+  const data = await refreshSessionSingleFlight();
+  return data?.access_token ?? null;
 }
 
 interface ApiErrorPayload {
@@ -449,9 +454,11 @@ export const api = {
       });
     },
     async refreshToken(): Promise<AuthSessionResponse> {
-      return request<AuthSessionResponse>("/auth/refresh", {
-        method: "POST",
-      });
+      const data = await refreshSessionSingleFlight();
+      if (!data?.access_token) {
+        throw new ApiError("Session expired. Please sign in again.", 401);
+      }
+      return data;
     },
     async logout(): Promise<void> {
       try {

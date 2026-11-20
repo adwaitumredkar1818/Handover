@@ -111,12 +111,46 @@ SECTION_ORDER: list[str] = [
     HandoverPackageSectionType.OPERATIONAL_HISTORICAL.value,
 ]
 
+ROLE_SECTION_ORDER: dict[str, list[str]] = {
+    "developer": [
+        HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value,
+        HandoverPackageSectionType.TECHNICAL_ARCHITECTURE.value,
+        HandoverPackageSectionType.WORK_PROGRESS.value,
+        HandoverPackageSectionType.DECISIONS_RATIONALE.value,
+        HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value,
+        HandoverPackageSectionType.BUGS_BLOCKERS_RISKS.value,
+        HandoverPackageSectionType.RESPONSIBILITIES_OWNERSHIP.value,
+        HandoverPackageSectionType.OPERATIONAL_HISTORICAL.value,
+    ],
+    "project_manager": [
+        HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value,
+        HandoverPackageSectionType.WORK_PROGRESS.value,
+        HandoverPackageSectionType.RESPONSIBILITIES_OWNERSHIP.value,
+        HandoverPackageSectionType.BUGS_BLOCKERS_RISKS.value,
+        HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value,
+        HandoverPackageSectionType.DECISIONS_RATIONALE.value,
+        HandoverPackageSectionType.TECHNICAL_ARCHITECTURE.value,
+        HandoverPackageSectionType.OPERATIONAL_HISTORICAL.value,
+    ],
+    "technical_lead": [
+        HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value,
+        HandoverPackageSectionType.DECISIONS_RATIONALE.value,
+        HandoverPackageSectionType.TECHNICAL_ARCHITECTURE.value,
+        HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value,
+        HandoverPackageSectionType.BUGS_BLOCKERS_RISKS.value,
+        HandoverPackageSectionType.RESPONSIBILITIES_OWNERSHIP.value,
+        HandoverPackageSectionType.WORK_PROGRESS.value,
+        HandoverPackageSectionType.OPERATIONAL_HISTORICAL.value,
+    ],
+}
+
 
 class PackageAssemblyService:
     """Orchestrates deterministic compilation of verified project knowledge into handover packages."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, *, llm_client: Any = None) -> None:
         self.session = session
+        self._unused_llm_client = llm_client
         self.case_repo = HandoverCaseRepository(session)
         self.package_repo = HandoverPackageRepository(session)
         self.version_repo = HandoverPackageVersionRepository(session)
@@ -189,12 +223,25 @@ class PackageAssemblyService:
 
         included_ki_ids: list[str] = []
         excluded_ki_ids: list[dict[str, Any]] = []
+        exclusion_breakdown: dict[str, int] = {
+            "pending_review": 0,
+            "conflicted": 0,
+            "rejected": 0,
+            "missing_evidence": 0,
+            "restricted_acl": 0,
+            "other": 0,
+        }
+        sample_verified_items: list[dict[str, Any]] = []
 
         for ki in filtered_kis:
             if (
                 ki.epistemic_status != EpistemicStatus.HUMAN_VERIFIED.value
                 or ki.review_status != KnowledgeReviewStatus.APPROVED.value
             ):
+                if ki.review_status == KnowledgeReviewStatus.REJECTED.value:
+                    exclusion_breakdown["rejected"] += 1
+                else:
+                    exclusion_breakdown["pending_review"] += 1
                 excluded_ki_ids.append({
                     "id": str(ki.id),
                     "title": ki.title or str(ki.id),
@@ -216,7 +263,28 @@ class PackageAssemblyService:
                         matched_section = sec_type
                         break
                 eligible_items_by_section[matched_section].append((ki, eligibility))
+                if len(sample_verified_items) < 5:
+                    sample_verified_items.append({
+                        "id": str(ki.id),
+                        "title": ki.title or "Verified Finding",
+                        "category": ki.category,
+                        "review_status": ki.review_status,
+                        "epistemic_status": ki.epistemic_status,
+                    })
             else:
+                blocker_text = " ".join(str(b).lower() for b in (eligibility.blockers or []))
+                if "conflict" in blocker_text:
+                    exclusion_breakdown["conflicted"] += 1
+                elif "evidence" in blocker_text:
+                    exclusion_breakdown["missing_evidence"] += 1
+                elif "access" in blocker_text or "acl" in blocker_text or "permission" in blocker_text:
+                    exclusion_breakdown["restricted_acl"] += 1
+                elif "reject" in blocker_text:
+                    exclusion_breakdown["rejected"] += 1
+                elif "pending" in blocker_text or "review" in blocker_text:
+                    exclusion_breakdown["pending_review"] += 1
+                else:
+                    exclusion_breakdown["other"] += 1
                 excluded_ki_ids.append({
                     "id": str(ki.id),
                     "title": ki.title or str(ki.id),
@@ -241,6 +309,9 @@ class PackageAssemblyService:
                     HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value
                 ].append((rel, eligibility))
 
+        handover_type = str((case.metadata_json or {}).get("handover_type") or "developer").lower()
+        ordered_sections = ROLE_SECTION_ORDER.get(handover_type, SECTION_ORDER)
+
         # Build snapshot data
         snapshot_data: dict[str, Any] = {
             "version_number": next_version_num,
@@ -248,10 +319,13 @@ class PackageAssemblyService:
             "assembled_by_user_id": str(user_id),
             "project_id": str(project_id),
             "case_id": str(case_id),
+            "handover_type": handover_type,
             "total_eligible_knowledge_items": len(included_ki_ids),
             "total_excluded_knowledge_items": len(excluded_ki_ids),
+            "exclusion_breakdown": exclusion_breakdown,
+            "sample_verified_items": sample_verified_items,
             "excluded_items": excluded_ki_ids,
-            "domains_included": request.include_domains or SECTION_ORDER,
+            "domains_included": request.include_domains or ordered_sections,
         }
 
         # Create Version record
@@ -271,7 +345,7 @@ class PackageAssemblyService:
         created_version = self.version_repo.create(version)
         self.version_repo.set_current(package.id, created_version.id)
 
-        # Generate Sections and Content Links
+        # Deterministic, evidence-backed section compilation (zero Ollama/LLM calls)
         section_hashes: list[str] = []
 
         for order, sec_type in enumerate(SECTION_ORDER, start=1):
@@ -281,13 +355,15 @@ class PackageAssemblyService:
             sec_items = eligible_items_by_section.get(sec_type, [])
             sec_rels = eligible_rels_by_section.get(sec_type, [])
 
-            # Generate structured section narrative content
             content_lines: list[str] = [
                 f"# {SECTION_TITLES[sec_type]}",
                 "",
-                f"Compiled {len(sec_items)} verified knowledge items and {len(sec_rels)} verified relationships.",
+                f"Compiled {len(sec_items)} human-approved knowledge items and {len(sec_rels)} verified relationships.",
                 "",
             ]
+            if not sec_items and not sec_rels:
+                content_lines.append("Insufficient approved information for this section.")
+                content_lines.append("")
 
             for ki, _ in sec_items:
                 title = ki.title or "Verified Finding"
@@ -296,6 +372,7 @@ class PackageAssemblyService:
                 if details:
                     content_lines.append(f"{details}")
                 content_lines.append(f"- **Epistemic Status**: {ki.epistemic_status}")
+                content_lines.append(f"- **Review Status**: {ki.review_status}")
                 content_lines.append(f"- **Support**: {ki.support_classification}")
                 content_lines.append("")
 
@@ -317,7 +394,7 @@ class PackageAssemblyService:
                 section_order=order,
                 knowledge_item_count=len(sec_items),
                 relationship_count=len(sec_rels),
-                metadata_json={"sha256": sec_hash},
+                metadata_json={"sha256": sec_hash, "llm_used": False, "handover_type": handover_type},
             )
             created_section = self.section_repo.create(section)
 

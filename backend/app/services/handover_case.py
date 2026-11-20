@@ -136,6 +136,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
         HandoverCaseStatus.APPROVED.value,
         HandoverCaseStatus.REJECTED.value,
         HandoverCaseStatus.READINESS_ASSESSED.value,
+        HandoverCaseStatus.ASSEMBLED.value,
         HandoverCaseStatus.ARCHIVED.value,
     },
     HandoverCaseStatus.UNDER_REVIEW.value: {
