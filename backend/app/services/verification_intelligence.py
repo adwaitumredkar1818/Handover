@@ -970,8 +970,12 @@ class AdvancedContradictionEvaluator:
             # Relationship / Dependency conflicts (circular or inverted dependencies)
             if case.target_type == VerificationTargetType.RELATIONSHIP.value and other.target_type == VerificationTargetType.RELATIONSHIP.value:
                 # Check for reversed relationships (e.g. A depends on B vs B depends on A)
-                if case.source_id and other.source_id and case.target_id and other.target_id:
-                    if case.source_id == other.target_id and case.target_id == other.source_id:
+                c_src = getattr(case, "source_id", None)
+                o_src = getattr(other, "source_id", None)
+                c_tgt = getattr(case, "target_id", None)
+                o_tgt = getattr(other, "target_id", None)
+                if c_src and o_src and c_tgt and o_tgt:
+                    if c_src == o_tgt and c_tgt == o_src:
                         results.append(
                             ContradictionCandidate(
                                 conflict_type=ConflictType.RELATIONSHIP_CONFLICT.value,
