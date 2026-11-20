@@ -381,8 +381,8 @@ export function Login() {
 
   const registered = searchParams ? searchParams.get('registered') === '1' : false
   const oauthError = searchParams ? searchParams.get('oauth_error') : null
-  const [email, setEmail] = useState('')
-  const [pw, setPw] = useState('')
+  const [email, setEmail] = useState('vernit.gerg25@pccoepune.org')
+  const [pw, setPw] = useState('Handover!Vernit2026')
   const [remember, setRemember] = useState(true)
   const [loading, setLoading] = useState(false)
   const [googleLoading, setGoogleLoading] = useState(false)
