@@ -504,16 +504,16 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
     }
   }, [pid])
 
+  const selectedProjOrgId = availableProjects.find((p) => p.id === pid)?.organisation_id || activeOrg?.id
+
   useEffect(() => {
     let cancelled = false
-    const selectedProj = availableProjects.find((p) => p.id === pid)
-    const targetOrgId = selectedProj?.organisation_id || activeOrg?.id
-    if (!targetOrgId || !isUUID(targetOrgId)) {
-      setOrgTeamMembers([])
+    if (!selectedProjOrgId || !isUUID(selectedProjOrgId)) {
+      setOrgTeamMembers((prev) => (prev.length === 0 ? prev : []))
       return
     }
     api.organisations
-      .listMembers(targetOrgId)
+      .listMembers(selectedProjOrgId)
       .then((res) => {
         if (!cancelled) setOrgTeamMembers(Array.isArray(res) ? res : [])
       })
@@ -523,7 +523,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
     return () => {
       cancelled = true
     }
-  }, [pid, activeOrg?.id, availableProjects])
+  }, [selectedProjOrgId])
 
   const projectMembers = useMemo(() => {
     const byId = new Map<string, { personId: string; name: string; role: string; email: string }>()
