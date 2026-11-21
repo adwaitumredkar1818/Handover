@@ -677,7 +677,7 @@ class AuthService:
             expires_at=expires_at,
             session_metadata=session_metadata,
         )
-        self._user_repo.update_last_login(user, now)
+        user.last_login_at = now
         roles, permissions = self._rbac_repo.get_user_platform_roles_and_permissions(user.id)
         access_token, expires_in = create_access_token(
             user_id=user.id,
@@ -685,8 +685,12 @@ class AuthService:
             settings=self._settings,
             now=now,
         )
+        auth_user = build_authenticated_user(
+            user,
+            roles=roles,
+            permissions=permissions,
+        )
         self._db.commit()
-        self._db.refresh(user)
 
         log_security_event(
             event_type="auth.login",
@@ -698,11 +702,7 @@ class AuthService:
             AccessTokenResponse(
                 access_token=access_token,
                 expires_in=expires_in,
-                user=build_authenticated_user(
-                    user,
-                    roles=roles,
-                    permissions=permissions,
-                ),
+                user=auth_user,
             ),
             raw_refresh_token,
         )
