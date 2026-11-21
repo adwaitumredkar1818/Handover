@@ -53,3 +53,42 @@ class ActiveSyncJobResponse(BaseSchema):
     mapping_id: str | None = None
     created_at: datetime
     started_at: datetime | None = None
+
+
+class NotificationPreferencesResponse(BaseSchema):
+    """User notification delivery preferences persisted in PostgreSQL."""
+
+    user_id: uuid.UUID
+    review_requests: bool = True
+    approvals: bool = True
+    ingestion_updates: bool = True
+    project_invitations: bool = True
+    membership_changes: bool = True
+    handover_assigned: bool = True
+    changes_requested: bool = True
+    handover_published: bool = True
+    successor_acknowledged: bool = True
+    verification_assigned: bool = True
+    source_sync_failed: bool = True
+    security_events: bool = True
+    email_digest_enabled: bool = False
+    email_delivery_available: bool = False
+    updated_at: datetime
+
+
+class NotificationPreferencesUpdateRequest(BaseSchema):
+    """Partial update for user notification preferences (security_events stays mandatory)."""
+
+    review_requests: bool | None = None
+    approvals: bool | None = None
+    ingestion_updates: bool | None = None
+    project_invitations: bool | None = None
+    membership_changes: bool | None = None
+    handover_assigned: bool | None = None
+    changes_requested: bool | None = None
+    handover_published: bool | None = None
+    successor_acknowledged: bool | None = None
+    verification_assigned: bool | None = None
+    source_sync_failed: bool | None = None
+    email_digest_enabled: bool | None = None
+

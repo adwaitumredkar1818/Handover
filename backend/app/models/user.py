@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, String, Uuid, false, func
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, String, Text, Uuid, false, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -58,6 +59,34 @@ class User(Base):
     email_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+    job_title: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+    )
+    bio: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    timezone: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="UTC",
+        server_default="UTC",
+    )
+    avatar_storage_key: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )
+    avatar_content_type: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    preferences_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON().with_variant(JSONB(astext_type=Text()), "postgresql"),
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

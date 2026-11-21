@@ -3,26 +3,31 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
+    get_app_settings,
     get_current_principal,
     get_db_session,
     resolve_project_context,
 )
 from app.core.cache.local_cache import local_response_cache
+from app.core.config import Settings
 from app.core.exceptions import NotFoundError
 from app.core.security import utc_now
 from app.models.enums import BackgroundJobStatus
 from app.models.job import BackgroundJob
 from app.models.notification import NotificationItem
+from app.models.user import User
 from app.schemas.notification import (
     ActiveSyncJobResponse,
     NotificationListResponse,
+    NotificationPreferencesResponse,
+    NotificationPreferencesUpdateRequest,
     NotificationResponse,
 )
 from app.services.rbac import AuthenticatedPrincipal, ProjectContext
@@ -186,6 +191,82 @@ def mark_all_notifications_read(
     local_response_cache.invalidate_prefix(f"notifications:{id(bind)}:")
     marked_count = int(getattr(result, "rowcount", 0) or 0)
     return {"marked_read": marked_count}
+
+
+def _build_notification_prefs_response(
+    user: User,
+    settings: Settings,
+) -> NotificationPreferencesResponse:
+    raw = dict(user.preferences_json or {})
+    stored = raw.get("notifications")
+    prefs: dict[str, Any] = dict(stored) if isinstance(stored, dict) else {}
+    email_avail = bool(settings.email.delivery_enabled and settings.email.provider != "none")
+    return NotificationPreferencesResponse(
+        user_id=user.id,
+        review_requests=bool(prefs.get("review_requests", True)),
+        approvals=bool(prefs.get("approvals", True)),
+        ingestion_updates=bool(prefs.get("ingestion_updates", True)),
+        project_invitations=bool(prefs.get("project_invitations", True)),
+        membership_changes=bool(prefs.get("membership_changes", True)),
+        handover_assigned=bool(prefs.get("handover_assigned", True)),
+        changes_requested=bool(prefs.get("changes_requested", True)),
+        handover_published=bool(prefs.get("handover_published", True)),
+        successor_acknowledged=bool(prefs.get("successor_acknowledged", True)),
+        verification_assigned=bool(prefs.get("verification_assigned", True)),
+        source_sync_failed=bool(prefs.get("source_sync_failed", True)),
+        security_events=True,
+        email_digest_enabled=bool(prefs.get("email_digest_enabled", False)) if email_avail else False,
+        email_delivery_available=email_avail,
+        updated_at=user.updated_at,
+    )
+
+
+@router.get(
+    "/notifications/preferences",
+    response_model=NotificationPreferencesResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Read persisted notification preferences for the authenticated user",
+)
+def get_notification_preferences(
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
+    session: Annotated[Session, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> NotificationPreferencesResponse:
+    user = session.get(User, principal.user.id)
+    if user is None:
+        raise NotFoundError("User account not found.", code="USER_NOT_FOUND")
+    return _build_notification_prefs_response(user, settings)
+
+
+@router.patch(
+    "/notifications/preferences",
+    response_model=NotificationPreferencesResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Persist notification preferences for the authenticated user",
+)
+def update_notification_preferences(
+    payload: NotificationPreferencesUpdateRequest,
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_current_principal)],
+    session: Annotated[Session, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> NotificationPreferencesResponse:
+    user = session.get(User, principal.user.id)
+    if user is None:
+        raise NotFoundError("User account not found.", code="USER_NOT_FOUND")
+
+    existing = dict(user.preferences_json or {})
+    notif_prefs = dict(existing.get("notifications") or {})
+    patch = payload.model_dump(exclude_none=True)
+    if not (settings.email.delivery_enabled and settings.email.provider != "none"):
+        patch.pop("email_digest_enabled", None)
+    notif_prefs.update(patch)
+    notif_prefs["security_events"] = True
+    existing["notifications"] = notif_prefs
+    user.preferences_json = existing
+    user.updated_at = utc_now()
+    session.commit()
+    session.refresh(user)
+    return _build_notification_prefs_response(user, settings)
 
 
 _INDEXING_TYPES = frozenset(

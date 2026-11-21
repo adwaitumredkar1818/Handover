@@ -1,5 +1,13 @@
 export type UUID = string;
 
+export interface UserPreferences {
+  theme: "light" | "dark" | "system";
+  date_format: "DD MMM YYYY" | "MM/DD/YYYY" | "YYYY-MM-DD";
+  density: "comfortable" | "compact";
+  reduced_motion: boolean;
+  default_landing_page: "/dashboard" | "/projects" | "/handovers/received";
+}
+
 export interface User {
   id: UUID;
   email: string;
@@ -7,8 +15,54 @@ export interface User {
   is_active?: boolean;
   status?: string;
   is_email_verified?: boolean;
+  email_verified_at?: string | null;
+  job_title?: string | null;
+  bio?: string | null;
+  timezone?: string;
+  has_avatar?: boolean;
+  avatar_url?: string | null;
+  auth_method?: "password" | "oauth" | "hybrid";
+  preferences?: UserPreferences;
   roles?: string[];
   permissions?: string[];
+  created_at?: string;
+  updated_at?: string;
+  last_login_at?: string | null;
+}
+
+export interface UserSession {
+  id: UUID;
+  token_family_id: UUID;
+  created_at: string;
+  expires_at: string;
+  last_used_at?: string | null;
+  revoked_at?: string | null;
+  revoked_reason?: string | null;
+  is_current_family: boolean;
+  session_metadata?: Record<string, string> | null;
+}
+
+export interface AccountDataExportResponse {
+  exported_at: string;
+  profile: User;
+  organisation_memberships: Array<Record<string, unknown>>;
+  project_memberships: Array<Record<string, unknown>>;
+  sessions: UserSession[];
+  notification_preferences: Record<string, unknown>;
+  recent_audit_events: Array<Record<string, unknown>>;
+}
+
+export interface AccountDeletionRequestResponse {
+  status: "pending_review" | "blocked";
+  message: string;
+  impact: {
+    active_organisations: number;
+    sole_owner_organisations: number;
+    active_projects: number;
+    active_handover_participations: number;
+    canonical_evidence_preserved: boolean;
+    audit_logs_preserved: boolean;
+  };
 }
 
 export interface AuthSessionResponse {
@@ -1565,14 +1619,24 @@ export interface NotificationListResponse {
 
 export interface NotificationPreferences {
   user_id: UUID;
-  in_app_enabled: boolean;
+  in_app_enabled?: boolean;
   email_digest_enabled: boolean;
-  invitations: boolean;
+  email_delivery_available?: boolean;
+  invitations?: boolean;
   review_requests: boolean;
   approvals: boolean;
   ingestion_updates: boolean;
-  integration_alerts: boolean;
-  project_updates: boolean;
+  project_invitations?: boolean;
+  membership_changes?: boolean;
+  handover_assigned?: boolean;
+  changes_requested?: boolean;
+  handover_published?: boolean;
+  successor_acknowledged?: boolean;
+  verification_assigned?: boolean;
+  source_sync_failed?: boolean;
+  security_events?: boolean;
+  integration_alerts?: boolean;
+  project_updates?: boolean;
   updated_at?: string | null;
 }
 

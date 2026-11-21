@@ -372,9 +372,9 @@ export function Radio({ checked, onChange, label, description }: { checked: bool
     </label>
   )
 }
-export function Switch({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label?: string }) {
+export function Switch({ checked, onChange, label, disabled }: { checked: boolean; onChange: (v: boolean) => void; label?: string; disabled?: boolean }) {
   return (
-    <button type="button" role="switch" aria-checked={checked} aria-label={label} onClick={() => onChange(!checked)} className={cn('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition', checked ? 'bg-brand' : 'bg-slate-300')}>
+    <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={() => !disabled && onChange(!checked)} className={cn('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition', checked ? 'bg-brand' : 'bg-slate-300', disabled && 'opacity-50 cursor-not-allowed')}>
       <span className={cn('inline-block size-4 rounded-full bg-white shadow transition', checked ? 'translate-x-[18px]' : 'translate-x-0.5')} />
     </button>
   )
@@ -410,10 +410,73 @@ export function Segmented<T extends string>({ options, value, onChange }: { opti
 }
 
 /* People */
-export function Avatar({ id, name, size = 28, className, ring }: { id?: string; name?: string; size?: number; className?: string; ring?: boolean }) {
+const avatarObjectUrlCache = new Map<string, string>();
+
+export function Avatar({
+  id,
+  name,
+  src,
+  size = 28,
+  className,
+  ring,
+}: {
+  id?: string;
+  name?: string;
+  src?: string | null;
+  size?: number;
+  className?: string;
+  ring?: boolean;
+}) {
   const p = id ? personById(id) : undefined
   const n = name ?? p?.name ?? '?'
-  const color = p?.color ?? '#718096'
+  const color = p?.color ?? '#315FBA'
+  const [resolvedSrc, setResolvedSrc] = useState<string | null>(() => {
+    if (!src) return null
+    return avatarObjectUrlCache.get(src) ?? null
+  })
+
+  useEffect(() => {
+    if (!src) {
+      setResolvedSrc(null)
+      return
+    }
+    const cached = avatarObjectUrlCache.get(src)
+    if (cached) {
+      setResolvedSrc(cached)
+      return
+    }
+    if (src.startsWith('blob:') || src.startsWith('data:')) {
+      setResolvedSrc(src)
+      return
+    }
+    let active = true
+    import('../../lib/api')
+      .then(({ api }) => api.users.fetchAvatarObjectUrl(src))
+      .then((url) => {
+        if (!active || !url) return
+        avatarObjectUrlCache.set(src, url)
+        setResolvedSrc(url)
+      })
+      .catch(() => {
+        if (active) setResolvedSrc(null)
+      })
+    return () => {
+      active = false
+    }
+  }, [src])
+
+  if (resolvedSrc) {
+    return (
+      <img
+        src={resolvedSrc}
+        alt={n}
+        title={n}
+        className={cn('inline-block shrink-0 rounded-full object-cover', ring && 'ring-2 ring-white', className)}
+        style={{ width: size, height: size }}
+      />
+    )
+  }
+
   return (
     <span title={n} className={cn('inline-flex shrink-0 items-center justify-center rounded-full font-semibold', ring && 'ring-2 ring-white', className)} style={{ width: size, height: size, fontSize: size * 0.38, background: `${color}1A`, color }}>
       {initials(n)}

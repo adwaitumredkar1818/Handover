@@ -499,7 +499,7 @@ export function TopNav({
               className="ml-1 flex items-center gap-1.5 rounded-full p-0.5 pr-1.5 hover:bg-tint transition cursor-pointer"
               aria-label="Account menu"
             >
-              <Avatar name={userName} size={30} />
+              <Avatar name={userName} src={user?.avatar_url} size={30} />
               <ChevronDown className="hidden size-3.5 text-slate-400 sm:block" />
             </button>
           )}
@@ -507,7 +507,7 @@ export function TopNav({
           {(close) => (
             <div>
               <div className="flex items-center gap-2.5 px-3 py-2.5">
-                <Avatar name={userName} size={34} />
+                <Avatar name={userName} src={user?.avatar_url} size={34} />
                 <div className="min-w-0">
                   <p
                     className="truncate text-sm font-semibold text-navy"

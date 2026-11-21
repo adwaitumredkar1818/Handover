@@ -118,13 +118,17 @@ class RefreshSessionRepository:
         user_id: uuid.UUID,
         reason: str,
         now: datetime,
+        exclude_family_id: uuid.UUID | None = None,
     ) -> int:
+        conditions = [
+            RefreshSession.user_id == user_id,
+            RefreshSession.revoked_at.is_(None),
+        ]
+        if exclude_family_id is not None:
+            conditions.append(RefreshSession.token_family_id != exclude_family_id)
         stmt = (
             update(RefreshSession)
-            .where(
-                RefreshSession.user_id == user_id,
-                RefreshSession.revoked_at.is_(None),
-            )
+            .where(*conditions)
             .values(revoked_at=now, revoked_reason=reason)
         )
         result = cast(CursorResult[Any], self._session.execute(stmt))

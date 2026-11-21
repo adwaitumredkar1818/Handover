@@ -1,5 +1,9 @@
 import type {
   User,
+  UserPreferences,
+  UserSession,
+  AccountDataExportResponse,
+  AccountDeletionRequestResponse,
   AuthSessionResponse,
   Organisation,
   OrganisationMember,
@@ -499,6 +503,88 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
+    async listSessions(): Promise<{ items: UserSession[] }> {
+      return request<{ items: UserSession[] }>("/auth/sessions");
+    },
+    async revokeSession(sessionId: string): Promise<{ session_id: string; revoked: boolean; message: string }> {
+      return request(`/auth/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "DELETE",
+      });
+    },
+    async revokeOtherSessions(): Promise<{ revoked_count: number; scope: "others" | "all"; message: string }> {
+      return request("/auth/sessions/revoke-others", { method: "POST" });
+    },
+    async revokeAllSessions(): Promise<{ revoked_count: number; scope: "others" | "all"; message: string }> {
+      return request("/auth/sessions/revoke-all", { method: "POST" });
+    },
+    async changePassword(data: { current_password: string; new_password: string }): Promise<{ message: string; revoked_other_sessions: number }> {
+      return request("/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async changeEmail(data: { new_email: string; current_password: string }): Promise<{ email: string; is_email_verified: boolean; email_delivery?: string | null; message: string }> {
+      return request("/auth/me/email-change", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    async exportMyData(): Promise<AccountDataExportResponse> {
+      return request<AccountDataExportResponse>("/auth/me/export");
+    },
+    async requestDeletion(data: {
+      confirmation_text: string;
+      current_password?: string;
+      reason?: string;
+    }): Promise<AccountDeletionRequestResponse> {
+      return request<AccountDeletionRequestResponse>("/auth/me/deletion-request", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+  },
+
+  // Self-service User Profile & Avatar
+  users: {
+    async updateMe(data: {
+      full_name?: string;
+      job_title?: string | null;
+      bio?: string | null;
+      timezone?: string;
+      preferences?: Partial<UserPreferences>;
+    }): Promise<User> {
+      return request<User>("/users/me", {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      });
+    },
+    async uploadAvatar(file: File): Promise<User> {
+      const form = new FormData();
+      form.append("file", file);
+      return request<User>("/users/me/avatar", {
+        method: "POST",
+        body: form,
+      });
+    },
+    async deleteAvatar(): Promise<User> {
+      return request<User>("/users/me/avatar", {
+        method: "DELETE",
+      });
+    },
+    async fetchAvatarObjectUrl(avatarUrl: string): Promise<string | null> {
+      const token = getToken();
+      if (!token || !avatarUrl) return null;
+      const cleanPath = avatarUrl.startsWith("/api/v1")
+        ? avatarUrl.slice("/api/v1".length)
+        : avatarUrl;
+      const res = await fetch(`${getApiBaseUrl()}${cleanPath}`, {
+        credentials: "include",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      return URL.createObjectURL(blob);
+    },
   },
 
   // Organisations
@@ -515,6 +601,17 @@ export const api = {
     },
     async get(orgId: string): Promise<Organisation> {
       return request<Organisation>(`/organisations/${orgId}`);
+    },
+    async update(orgId: string, data: { name?: string; description?: string | null }): Promise<Organisation> {
+      return request<Organisation>(`/organisations/${orgId}`, {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      });
+    },
+    async archive(orgId: string): Promise<Organisation> {
+      return request<Organisation>(`/organisations/${orgId}/archive`, {
+        method: "POST",
+      });
     },
     async listMembers(orgId: string): Promise<OrganisationMember[]> {
       const res = await request<unknown>(`/organisations/${orgId}/members`);
@@ -830,6 +927,17 @@ export const api = {
       const res = await request<unknown>(`/organisations/${orgId}/sources`);
       return unwrapList<SourceConnection>(res);
     },
+    async startOAuth(orgId: string, provider: "github" | "jira" | "slack"): Promise<{ authorization_url?: string }> {
+      return request<{ authorization_url?: string }>(
+        `/organisations/${orgId}/integrations/${provider}/oauth/start`,
+        { method: "POST" }
+      );
+    },
+    async disconnectConnection(connectionId: string): Promise<SourceConnection> {
+      return request<SourceConnection>(`/integrations/connections/${connectionId}/disconnect`, {
+        method: "POST",
+      });
+    },
     async connectSource(orgId: string, data: { provider: "github" | "jira" | "slack"; access_token: string; account_identifier: string; granted_scopes?: string[] }): Promise<SourceConnection> {
       const defaultScopes =
         data.provider === "github"
@@ -1028,7 +1136,7 @@ export const api = {
       data: Partial<Omit<import("./types").NotificationPreferences, "user_id" | "updated_at">>
     ): Promise<import("./types").NotificationPreferences> {
       return request("/notifications/preferences", {
-        method: "PUT",
+        method: "PATCH",
         body: JSON.stringify(data),
       });
     },

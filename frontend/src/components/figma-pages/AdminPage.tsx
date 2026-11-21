@@ -81,6 +81,7 @@ import {
   Radio,
 } from '../figma-ui'
 import { SourceIcon } from '../figma-ui/brand'
+import { AccountSettingsWorkspace } from '../settings/AccountSettingsWorkspace'
 
 /* 31. Workspace team */
 interface TeamRow {
@@ -1832,10 +1833,10 @@ function AdminPageContent({ view = 'settings' }: AdminPageProps) {
     case 'notifications':
       return <Notifications />
     case 'profile':
-      return <Profile />
+      return <AccountSettingsWorkspace mode="profile" />
     case 'settings':
     default:
-      return <Settings />
+      return <AccountSettingsWorkspace mode="settings" />
   }
 }
 

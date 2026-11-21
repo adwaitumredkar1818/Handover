@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -217,4 +217,82 @@ class ResetPasswordResponse(BaseSchema):
     """Confirmation of successful password reset."""
 
     message: str = Field(description="Human-readable success message")
+
+
+class ChangePasswordRequest(BaseSchema):
+    """Authenticated user password change payload."""
+
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class ChangePasswordResponse(BaseSchema):
+    """Confirmation of password update and other-session revocation."""
+
+    message: str
+    revoked_other_sessions: int = 0
+
+
+class ChangeEmailRequest(BaseSchema):
+    """Authenticated user email update payload requiring password confirmation."""
+
+    new_email: NormalisedEmail
+    current_password: str = Field(min_length=1, max_length=128)
+
+
+class ChangeEmailResponse(BaseSchema):
+    """Confirmation of email update and verification status."""
+
+    email: str
+    is_email_verified: bool
+    email_delivery: Literal["not_configured", "submitted", "failed"] | None = None
+    message: str
+
+
+class RevokeOtherSessionsResponse(BaseSchema):
+    """Confirmation of bulk session revocation."""
+
+    revoked_count: int
+    scope: Literal["others", "all"]
+    message: str
+
+
+class AccountDeletionRequest(BaseSchema):
+    """High-risk account deletion request requiring explicit confirmation."""
+
+    confirmation_text: str = Field(min_length=1, max_length=32)
+    current_password: str | None = Field(default=None, max_length=128)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class AccountDeletionImpact(BaseSchema):
+    """Pre-deletion impact assessment across memberships, handovers, and retention."""
+
+    active_organisations: int
+    sole_owner_organisations: int
+    active_projects: int
+    active_handover_participations: int
+    canonical_evidence_preserved: bool = True
+    audit_logs_preserved: bool = True
+
+
+class AccountDeletionRequestResponse(BaseSchema):
+    """Response for an account deletion request (never silently cascades shared evidence)."""
+
+    status: Literal["pending_review", "blocked"]
+    message: str
+    impact: AccountDeletionImpact
+
+
+class AccountDataExportResponse(BaseSchema):
+    """Structured personal data export scoped strictly to the authenticated user."""
+
+    exported_at: datetime
+    profile: UserSummaryResponse
+    organisation_memberships: list[dict[str, Any]]
+    project_memberships: list[dict[str, Any]]
+    sessions: list[RefreshSessionSummary]
+    notification_preferences: dict[str, Any]
+    recent_audit_events: list[dict[str, Any]]
+
 

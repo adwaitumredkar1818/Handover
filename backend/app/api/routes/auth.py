@@ -25,6 +25,13 @@ from app.core.security import (
 )
 from app.schemas.auth import (
     AccessTokenResponse,
+    AccountDataExportResponse,
+    AccountDeletionRequest,
+    AccountDeletionRequestResponse,
+    ChangeEmailRequest,
+    ChangeEmailResponse,
+    ChangePasswordRequest,
+    ChangePasswordResponse,
     ForgotPasswordRequest,
     ForgotPasswordResponse,
     LoginRequest,
@@ -37,6 +44,7 @@ from app.schemas.auth import (
     RequestEmailVerificationResponse,
     ResetPasswordRequest,
     ResetPasswordResponse,
+    RevokeOtherSessionsResponse,
     RevokeSessionResponse,
     SessionListResponse,
     SupabaseExchangeRequest,
@@ -343,3 +351,114 @@ def revoke_my_session(
 ) -> RevokeSessionResponse:
     """Revoke a session family belonging strictly to the authenticated user."""
     return auth_service.revoke_my_session(session_id=session_id, principal=principal)
+
+
+@router.post(
+    "/sessions/revoke-others",
+    response_model=RevokeOtherSessionsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Revoke all other active sessions for the current user",
+)
+def revoke_other_sessions(
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_permission("account.sessions.revoke")),
+    ],
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+) -> RevokeOtherSessionsResponse:
+    """Revoke all refresh session families except the caller's current session family."""
+    return auth_service.revoke_other_sessions(principal=principal, include_current=False)
+
+
+@router.post(
+    "/sessions/revoke-all",
+    response_model=RevokeOtherSessionsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Sign out from all devices (revoke every active session)",
+)
+def revoke_all_sessions(
+    response: Response,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_permission("account.sessions.revoke")),
+    ],
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+    settings: Annotated[Settings, Depends(get_app_settings)],
+) -> RevokeOtherSessionsResponse:
+    """Revoke every active refresh session for the user and clear the current cookie."""
+    result = auth_service.revoke_other_sessions(principal=principal, include_current=True)
+    clear_refresh_cookie(response, settings)
+    return result
+
+
+@router.post(
+    "/change-password",
+    response_model=ChangePasswordResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Change password for password-authenticated account",
+)
+def change_password(
+    payload: ChangePasswordRequest,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_permission("account.profile.read")),
+    ],
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+    _: Annotated[None, Depends(require_auth_rate_limit("login"))],
+) -> ChangePasswordResponse:
+    """Verify current password, enforce password policy, and revoke other sessions."""
+    return auth_service.change_password(principal=principal, payload=payload)
+
+
+@router.post(
+    "/me/email-change",
+    response_model=ChangeEmailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update account email and trigger re-verification",
+)
+def change_email(
+    payload: ChangeEmailRequest,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_permission("account.profile.read")),
+    ],
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+    _: Annotated[None, Depends(require_auth_rate_limit("login"))],
+) -> ChangeEmailResponse:
+    """Update account email after verifying current password and reset email verification."""
+    return auth_service.change_email(principal=principal, payload=payload)
+
+
+@router.get(
+    "/me/export",
+    response_model=AccountDataExportResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Export authenticated user's personal account data",
+)
+def export_my_account_data(
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_permission("account.profile.read")),
+    ],
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+) -> AccountDataExportResponse:
+    """Return a structured export of the user's profile, memberships, sessions, and audit events."""
+    return auth_service.export_my_account_data(principal=principal)
+
+
+@router.post(
+    "/me/deletion-request",
+    response_model=AccountDeletionRequestResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Submit an audited account deletion request with ownership impact checks",
+)
+def submit_account_deletion_request(
+    payload: AccountDeletionRequest,
+    principal: Annotated[
+        AuthenticatedPrincipal,
+        Depends(require_permission("account.profile.read")),
+    ],
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+) -> AccountDeletionRequestResponse:
+    """Evaluate sole-owner and handover impact before recording an audited deletion request."""
+    return auth_service.submit_deletion_request(principal=principal, payload=payload)

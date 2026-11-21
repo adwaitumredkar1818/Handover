@@ -11,6 +11,7 @@ import React, {
 } from "react";
 import { usePathname } from "next/navigation";
 import { api, setStoredToken, setStoredUser, getStoredUser, ApiError, clearApiCache } from "../lib/api";
+import { applyUserPreferences, clearUserPreferenceCache } from "../lib/userPreferences";
 import { getCachedGraph, invalidateGraphCache, setCachedGraph, setGraphCacheUser } from "../lib/graphCache";
 import {
   prefetchAllWorkspaceProjects,
@@ -58,6 +59,7 @@ interface LiveAppContextType {
   loginWithGoogle: () => Promise<void>;
   register: (email: string, password: string, fullName: string) => Promise<void>;
   logout: () => Promise<void>;
+  refreshUser: () => Promise<User | null>;
 
   // Organisations
   organisations: Organisation[];
@@ -1519,6 +1521,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
     setStoredToken(null);
     setStoredUser(null);
+    clearUserPreferenceCache();
     setToken(null);
     setUser(null);
     invalidateGraphCache();
@@ -1536,6 +1539,28 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       message: "You have been logged out.",
     });
   };
+
+  const refreshUser = async (): Promise<User | null> => {
+    try {
+      const me = await api.auth.me();
+      setUser(me);
+      setStoredUser(me);
+      return me;
+    } catch {
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    if (!user) return;
+    applyUserPreferences(user.preferences);
+    if (user.preferences?.theme === "system" && typeof window !== "undefined") {
+      const mq = window.matchMedia("(prefers-color-scheme: dark)");
+      const handler = () => applyUserPreferences(user.preferences);
+      mq.addEventListener?.("change", handler);
+      return () => mq.removeEventListener?.("change", handler);
+    }
+  }, [user]);
 
   // Org & Project actions
   const createOrganisation = async (name: string, slug?: string, description?: string) => {
@@ -1846,6 +1871,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     loginWithGoogle,
     register,
     logout,
+    refreshUser,
     organisations,
     activeOrg,
     setActiveOrg,

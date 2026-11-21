@@ -716,7 +716,7 @@ function SidebarContent({
             onClick={onNavigate}
             className="flex items-center gap-2.5 min-w-0 flex-1 overflow-hidden"
           >
-            <Avatar name={userName} size={30} />
+            <Avatar name={userName} src={user?.avatar_url} size={30} />
             {!collapsed && (
               <div className="min-w-0 flex-1">
                 <span

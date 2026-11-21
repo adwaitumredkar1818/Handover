@@ -7,13 +7,15 @@ import secrets
 import uuid
 from datetime import timedelta
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.exceptions import (
+    BadRequestError,
     ConflictError,
     ForbiddenError,
     GoneError,
@@ -54,6 +56,14 @@ from app.repositories.rbac import RbacRepository
 from app.repositories.user import UserRepository
 from app.schemas.auth import (
     AccessTokenResponse,
+    AccountDataExportResponse,
+    AccountDeletionImpact,
+    AccountDeletionRequest,
+    AccountDeletionRequestResponse,
+    ChangeEmailRequest,
+    ChangeEmailResponse,
+    ChangePasswordRequest,
+    ChangePasswordResponse,
     ForgotPasswordRequest,
     ForgotPasswordResponse,
     LoginRequest,
@@ -67,6 +77,7 @@ from app.schemas.auth import (
     RequestEmailVerificationResponse,
     ResetPasswordRequest,
     ResetPasswordResponse,
+    RevokeOtherSessionsResponse,
     RevokeSessionResponse,
     SessionListResponse,
     VerifyEmailRequest,
@@ -75,10 +86,40 @@ from app.schemas.auth import (
 
 if TYPE_CHECKING:
     from app.services.organisation import OrganisationService
-from app.schemas.user import AuthenticatedUserResponse, UserSummaryResponse
+from app.schemas.user import (
+    AuthenticatedUserResponse,
+    UserPreferencesSchema,
+    UserSummaryResponse,
+)
 from app.services.email import EmailDeliveryStatus, TransactionalEmailService, build_email_provider
 from app.services.rbac import AuthenticatedPrincipal
 from app.services.supabase_verifier import SupabaseTokenVerifier, VerifiedSupabaseIdentity
+
+
+def _resolve_auth_method(user: User) -> Literal["password", "oauth", "hybrid"]:
+    has_pw = bool(user.password_hash)
+    has_oauth = bool(user.supabase_auth_id)
+    if has_pw and has_oauth:
+        return "hybrid"
+    if has_oauth:
+        return "oauth"
+    return "password"
+
+
+def _resolve_user_preferences(user: User) -> UserPreferencesSchema:
+    raw = getattr(user, "preferences_json", None) or {}
+    ui = raw.get("ui", {}) if isinstance(raw, dict) else {}
+    try:
+        return UserPreferencesSchema.model_validate(ui if isinstance(ui, dict) else {})
+    except Exception:
+        return UserPreferencesSchema()
+
+
+def _resolve_avatar_url(user: User) -> str | None:
+    if not getattr(user, "avatar_storage_key", None):
+        return None
+    ts = int(user.updated_at.timestamp()) if user.updated_at else 0
+    return f"/api/v1/users/{user.id}/avatar?v={ts}"
 
 
 def build_user_summary(user: User, roles: list[str] | None = None) -> UserSummaryResponse:
@@ -98,6 +139,13 @@ def build_user_summary(user: User, roles: list[str] | None = None) -> UserSummar
         status=user.status,
         is_email_verified=user.is_email_verified,
         email_verified_at=user.email_verified_at,
+        job_title=getattr(user, "job_title", None),
+        bio=getattr(user, "bio", None),
+        timezone=getattr(user, "timezone", None) or "UTC",
+        has_avatar=bool(getattr(user, "avatar_storage_key", None)),
+        avatar_url=_resolve_avatar_url(user),
+        auth_method=_resolve_auth_method(user),
+        preferences=_resolve_user_preferences(user),
         roles=resolved_roles,
         created_at=user.created_at,
         updated_at=user.updated_at,
@@ -119,6 +167,13 @@ def build_authenticated_user(
         status=user.status,
         is_email_verified=user.is_email_verified,
         email_verified_at=user.email_verified_at,
+        job_title=getattr(user, "job_title", None),
+        bio=getattr(user, "bio", None),
+        timezone=getattr(user, "timezone", None) or "UTC",
+        has_avatar=bool(getattr(user, "avatar_storage_key", None)),
+        avatar_url=_resolve_avatar_url(user),
+        auth_method=_resolve_auth_method(user),
+        preferences=_resolve_user_preferences(user),
         roles=sorted(roles),
         permissions=sorted(permissions),
         created_at=user.created_at,
@@ -861,6 +916,357 @@ class AuthService:
             session_id=session_id,
             revoked=revoked_count > 0,
             message="Session revoked successfully.",
+        )
+
+    def revoke_other_sessions(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        include_current: bool = False,
+    ) -> RevokeOtherSessionsResponse:
+        """Revoke all other active sessions (or all sessions if include_current=True)."""
+        now = utc_now()
+        exclude_family = None if include_current else principal.session_family_id
+        revoked_count = self._refresh_repo.revoke_all_for_user(
+            user_id=principal.user.id,
+            reason=RevocationReason.REVOKED_BY_USER.value,
+            now=now,
+            exclude_family_id=exclude_family,
+        )
+        self._db.commit()
+        scope: Literal["others", "all"] = "all" if include_current else "others"
+        log_security_event(
+            event_type="auth.sessions_revoked",
+            outcome="success",
+            actor_user_id=str(principal.user.id),
+            message=f"User revoked {revoked_count} session(s) (scope={scope}).",
+        )
+        return RevokeOtherSessionsResponse(
+            revoked_count=revoked_count,
+            scope=scope,
+            message=(
+                f"Signed out of all devices ({revoked_count} session(s) revoked)."
+                if include_current
+                else f"Signed out of {revoked_count} other active session(s)."
+            ),
+        )
+
+    def change_password(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        payload: ChangePasswordRequest,
+    ) -> ChangePasswordResponse:
+        """Verify current password, enforce password policy, update hash, and revoke other sessions."""
+        user = self._user_repo.get_by_id(principal.user.id)
+        if user is None:
+            raise NotFoundError("User account was not found.", code="USER_NOT_FOUND")
+        if not user.password_hash:
+            raise BadRequestError(
+                "Password changes are managed by your external sign-in provider.",
+                code="OAUTH_MANAGED_ACCOUNT",
+            )
+        if not verify_password(payload.current_password, user.password_hash):
+            raise UnauthorizedError(
+                "Current password is incorrect.",
+                code="INVALID_CURRENT_PASSWORD",
+            )
+        if payload.current_password == payload.new_password:
+            raise BadRequestError(
+                "New password must differ from your current password.",
+                code="PASSWORD_UNCHANGED",
+            )
+
+        validate_password_strength(payload.new_password, email=user.email)
+        new_digest = hash_password(payload.new_password)
+        self._user_repo.update_password_hash(user, new_digest)
+
+        revoked_others = self._refresh_repo.revoke_all_for_user(
+            user_id=user.id,
+            reason=RevocationReason.REVOKED_BY_USER.value,
+            now=utc_now(),
+            exclude_family_id=principal.session_family_id,
+        )
+        self._db.commit()
+
+        log_security_event(
+            event_type="auth.password_changed",
+            outcome="success",
+            actor_user_id=str(user.id),
+            message="User changed account password and revoked other sessions.",
+        )
+        return ChangePasswordResponse(
+            message="Password updated. Other active sessions have been signed out.",
+            revoked_other_sessions=revoked_others,
+        )
+
+    def change_email(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        payload: ChangeEmailRequest,
+    ) -> ChangeEmailResponse:
+        """Update account email after password verification and trigger re-verification."""
+        user = self._user_repo.get_by_id(principal.user.id)
+        if user is None:
+            raise NotFoundError("User account was not found.", code="USER_NOT_FOUND")
+        if not user.password_hash:
+            raise BadRequestError(
+                "Email address changes are managed by your external sign-in provider.",
+                code="OAUTH_MANAGED_ACCOUNT",
+            )
+        if not verify_password(payload.current_password, user.password_hash):
+            raise UnauthorizedError(
+                "Current password is incorrect.",
+                code="INVALID_CURRENT_PASSWORD",
+            )
+        if payload.new_email == user.email:
+            raise BadRequestError(
+                "New email matches your current email address.",
+                code="EMAIL_UNCHANGED",
+            )
+        existing = self._user_repo.get_by_email(payload.new_email)
+        if existing is not None and existing.id != user.id:
+            raise ConflictError(
+                "An account with this email address already exists.",
+                code="EMAIL_ALREADY_IN_USE",
+            )
+
+        user.email = payload.new_email
+        user.is_email_verified = False
+        user.email_verified_at = None
+        self._db.flush()
+        delivery_status = self._dispatch_verification_email(user)
+        self._db.commit()
+
+        log_security_event(
+            event_type="auth.email_changed",
+            outcome="success",
+            actor_user_id=str(user.id),
+            message="User updated account email address; verification reset.",
+        )
+        return ChangeEmailResponse(
+            email=user.email,
+            is_email_verified=user.is_email_verified,
+            email_delivery=delivery_status,
+            message=(
+                "Email updated. Please verify your new email address."
+                if delivery_status == "submitted"
+                else "Email updated. Verification status reset (outbound email delivery is not configured in this environment)."
+            ),
+        )
+
+    def _compute_deletion_impact(self, user_id: uuid.UUID) -> AccountDeletionImpact:
+        from app.models.handover import HandoverCase
+        from app.models.organisation import Organisation, OrganisationMembership
+        from app.models.project import ProjectMembership
+
+        memberships = list(
+            self._db.scalars(
+                select(OrganisationMembership).where(
+                    OrganisationMembership.user_id == user_id,
+                    OrganisationMembership.status == "active",
+                )
+            ).all()
+        )
+        sole_owner_orgs = 0
+        for mem in memberships:
+            if mem.role and mem.role.name == RoleName.ORG_OWNER.value:
+                other_owners = list(
+                    self._db.scalars(
+                        select(OrganisationMembership.id).where(
+                            OrganisationMembership.organisation_id == mem.organisation_id,
+                            OrganisationMembership.status == "active",
+                            OrganisationMembership.role_id == mem.role_id,
+                            OrganisationMembership.user_id != user_id,
+                        )
+                    ).all()
+                )
+                org = self._db.get(Organisation, mem.organisation_id)
+                if org and org.status == OrganisationStatus.ACTIVE.value and len(other_owners) == 0:
+                    sole_owner_orgs += 1
+
+        proj_count = len(
+            list(
+                self._db.scalars(
+                    select(ProjectMembership.id).where(
+                        ProjectMembership.user_id == user_id,
+                        ProjectMembership.status == "active",
+                    )
+                ).all()
+            )
+        )
+        handover_count = len(
+            list(
+                self._db.scalars(
+                    select(HandoverCase.id).where(
+                        (HandoverCase.departing_member_id == user_id)
+                        | (HandoverCase.successor_id == user_id)
+                    )
+                ).all()
+            )
+        )
+        return AccountDeletionImpact(
+            active_organisations=len(memberships),
+            sole_owner_organisations=sole_owner_orgs,
+            active_projects=proj_count,
+            active_handover_participations=handover_count,
+            canonical_evidence_preserved=True,
+            audit_logs_preserved=True,
+        )
+
+    def export_my_account_data(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+    ) -> AccountDataExportResponse:
+        """Assemble a complete JSON export of the authenticated user's own account data."""
+        from app.models.audit import AuditLog
+        from app.models.organisation import Organisation, OrganisationMembership
+        from app.models.project import Project, ProjectMembership
+
+        user = self._user_repo.get_by_id(principal.user.id)
+        if user is None:
+            raise NotFoundError("User account was not found.", code="USER_NOT_FOUND")
+
+        org_rows = self._db.execute(
+            select(OrganisationMembership, Organisation)
+            .join(Organisation, Organisation.id == OrganisationMembership.organisation_id)
+            .where(OrganisationMembership.user_id == user.id)
+        ).all()
+        org_list = [
+            {
+                "organisation_id": str(org.id),
+                "organisation_name": org.name,
+                "organisation_slug": org.slug,
+                "role": mem.role.name if mem.role else None,
+                "status": mem.status,
+                "joined_at": mem.created_at.isoformat() if mem.created_at else None,
+            }
+            for mem, org in org_rows
+        ]
+
+        proj_rows = self._db.execute(
+            select(ProjectMembership, Project)
+            .join(Project, Project.id == ProjectMembership.project_id)
+            .where(ProjectMembership.user_id == user.id)
+        ).all()
+        proj_list = [
+            {
+                "project_id": str(proj.id),
+                "project_name": proj.name,
+                "role": pm.role.name if pm.role else None,
+                "status": pm.status,
+                "joined_at": pm.created_at.isoformat() if pm.created_at else None,
+            }
+            for pm, proj in proj_rows
+        ]
+
+        sessions = self.list_my_sessions(principal).items
+        audit_rows = list(
+            self._db.scalars(
+                select(AuditLog)
+                .where(AuditLog.actor_user_id == user.id)
+                .order_by(AuditLog.created_at.desc())
+                .limit(100)
+            ).all()
+        )
+        audit_list = [
+            {
+                "id": str(a.id),
+                "event_type": a.event_type,
+                "resource_type": a.resource_type,
+                "resource_id": a.resource_id,
+                "outcome": a.outcome,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            }
+            for a in audit_rows
+        ]
+
+        raw_prefs = getattr(user, "preferences_json", None) or {}
+        notif_prefs = raw_prefs.get("notifications", {}) if isinstance(raw_prefs, dict) else {}
+
+        log_security_event(
+            event_type="auth.account_data_exported",
+            outcome="success",
+            actor_user_id=str(user.id),
+            message="User exported personal account data.",
+        )
+        return AccountDataExportResponse(
+            exported_at=utc_now(),
+            profile=build_user_summary(user, roles=principal.roles),
+            organisation_memberships=org_list,
+            project_memberships=proj_list,
+            sessions=sessions,
+            notification_preferences=notif_prefs if isinstance(notif_prefs, dict) else {},
+            recent_audit_events=audit_list,
+        )
+
+    def submit_deletion_request(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        payload: AccountDeletionRequest,
+    ) -> AccountDeletionRequestResponse:
+        """Evaluate ownership/governance impact and record an audited account deletion request."""
+        user = self._user_repo.get_by_id(principal.user.id)
+        if user is None:
+            raise NotFoundError("User account was not found.", code="USER_NOT_FOUND")
+
+        if payload.confirmation_text.strip() != "DELETE":
+            raise BadRequestError(
+                "Type DELETE to confirm your account deletion request.",
+                code="DELETION_CONFIRMATION_REQUIRED",
+            )
+        if user.password_hash:
+            if not payload.current_password or not verify_password(payload.current_password, user.password_hash):
+                raise UnauthorizedError(
+                    "Current password verification is required for account deletion requests.",
+                    code="INVALID_CURRENT_PASSWORD",
+                )
+
+        impact = self._compute_deletion_impact(user.id)
+        if impact.sole_owner_organisations > 0:
+            return AccountDeletionRequestResponse(
+                status="blocked",
+                message=(
+                    f"You are the sole Owner of {impact.sole_owner_organisations} active organisation(s). "
+                    "Transfer organisation ownership to another member before requesting account deletion."
+                ),
+                impact=impact,
+            )
+
+        from app.repositories.audit import AuditLogRepository
+        from app.services.audit import AuditService
+
+        AuditService(audit_repository=AuditLogRepository(self._db)).record_event(
+            event_type="account.deletion_requested",
+            resource_type="user",
+            resource_id=str(user.id),
+            actor_user_id=user.id,
+            outcome="success",
+            metadata={
+                "reason": (payload.reason or "").strip() or None,
+                "active_organisations": impact.active_organisations,
+                "active_projects": impact.active_projects,
+                "active_handover_participations": impact.active_handover_participations,
+            },
+        )
+        self._db.commit()
+
+        log_security_event(
+            event_type="account.deletion_requested",
+            outcome="success",
+            actor_user_id=str(user.id),
+            message="User submitted an audited account deletion request.",
+        )
+        return AccountDeletionRequestResponse(
+            status="pending_review",
+            message=(
+                "Your account deletion request has been recorded in the audit log for governance review. "
+                "Shared project evidence, approved handover snapshots, and immutable audit logs are preserved."
+            ),
+            impact=impact,
         )
 
     def exchange_supabase_token(
