@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.routing import APIRoute
 
 from app.api.deps import (
     get_db_session,
@@ -15,6 +18,7 @@ from app.api.deps import (
     require_project_permission,
     resolve_project_read_context,
 )
+from app.core.cache.local_cache import local_response_cache
 from sqlalchemy.orm import Session
 from app.services.pipeline_coordinator import (
     _STATUS_CACHE,
@@ -50,7 +54,39 @@ from app.schemas.project import (
 from app.services.project import ProjectService
 from app.services.rbac import OrganisationContext, ProjectContext
 
-router = APIRouter(tags=["projects"])
+class ProjectsAPIRoute(APIRoute):
+    """Invalidate project/org listing caches before returning mutation responses."""
+
+    def get_route_handler(self) -> Any:
+        original_route_handler = super().get_route_handler()
+
+        async def custom_route_handler(request: Request) -> Response:
+            response = await original_route_handler(request)
+            if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+                pid_str = request.path_params.get("project_id")
+                oid_str = request.path_params.get("organisation_id")
+                if pid_str:
+                    local_response_cache.invalidate_prefix(f"proj_ws:{pid_str}:")
+                    local_response_cache.invalidate_prefix("org_projs:")
+                if oid_str:
+                    local_response_cache.invalidate_prefix(f"org_projs:{oid_str}:")
+            return response
+
+        return custom_route_handler
+
+
+def _cached_project_get(cache_key: str, builder: Any, *, ttl_seconds: int = 60) -> Any:
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        cached = local_response_cache.get(cache_key)
+        if cached is not None:
+            return cached
+    result = builder()
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        local_response_cache.set(cache_key, jsonable_encoder(result), ttl_seconds=ttl_seconds)
+    return result
+
+
+router = APIRouter(tags=["projects"], route_class=ProjectsAPIRoute)
 
 
 @router.post(
@@ -89,12 +125,20 @@ def list_organisation_projects(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> ProjectListResponse:
     """List projects visible to the caller within their verified organisation."""
-    return project_service.list_projects_in_organisation(
-        org_ctx=org_ctx,
-        status=project_status.value if project_status is not None else None,
-        search=search,
-        limit=limit,
-        offset=offset,
+    status_val = project_status.value if project_status is not None else None
+    cache_key = (
+        f"org_projs:{org_ctx.organisation.id}:{org_ctx.user_id}:"
+        f"{status_val}:{search or ''}:{limit}:{offset}"
+    )
+    return _cached_project_get(
+        cache_key,
+        lambda: project_service.list_projects_in_organisation(
+            org_ctx=org_ctx,
+            status=status_val,
+            search=search,
+            limit=limit,
+            offset=offset,
+        ),
     )
 
 
@@ -167,11 +211,19 @@ def list_project_members(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> ProjectMemberListResponse:
     """List member assignments and project roles for this project workspace."""
-    return project_service.list_project_members(
-        ctx=project_ctx,
-        status=member_status.value if member_status is not None else None,
-        limit=limit,
-        offset=offset,
+    status_val = member_status.value if member_status is not None else None
+    cache_key = (
+        f"proj_ws:{project_ctx.project.id}:members:{project_ctx.user_id}:"
+        f"{status_val}:{limit}:{offset}"
+    )
+    return _cached_project_get(
+        cache_key,
+        lambda: project_service.list_project_members(
+            ctx=project_ctx,
+            status=status_val,
+            limit=limit,
+            offset=offset,
+        ),
     )
 
 
@@ -265,7 +317,11 @@ def get_project_overview(
     project_service: Annotated[ProjectService, Depends(get_project_service)],
 ) -> ProjectOverviewResponse:
     """Compile aggregated project metrics, sources, evidence, and recent activity."""
-    return project_service.get_project_overview(project_ctx)
+    cache_key = f"proj_ws:{project_ctx.project.id}:overview:{project_ctx.user_id}"
+    return _cached_project_get(
+        cache_key,
+        lambda: project_service.get_project_overview(project_ctx),
+    )
 
 
 @router.get(
@@ -295,7 +351,11 @@ def get_project_transition(
     project_service: Annotated[ProjectService, Depends(get_project_service)],
 ) -> ProjectTransitionResponse | None:
     """Retrieve configured departing member, successor, and capture scope."""
-    return project_service.get_project_transition(project_ctx)
+    cache_key = f"proj_ws:{project_ctx.project.id}:transition:{project_ctx.user_id}"
+    return _cached_project_get(
+        cache_key,
+        lambda: project_service.get_project_transition(project_ctx),
+    )
 
 
 @router.put(

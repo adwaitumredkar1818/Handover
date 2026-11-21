@@ -999,6 +999,7 @@ function DashboardContent() {
     projects: liveProjects,
     activeProject: liveProject,
     overview,
+    isLoadingOverview,
     members: liveMembers,
     sourceMappings,
     handoverCases,
@@ -1075,7 +1076,7 @@ function DashboardContent() {
     color: '#0f766e',
   } : null) || storeProj || null
 
-  const loading = useFakeLoading(450, [p?.id, s.workspaceId])
+  const loading = isLoadingOverview && !overview
   const displayName = user?.full_name?.split(' ')[0] || user?.email?.split('@')[0] || 'there'
 
   const quick = {

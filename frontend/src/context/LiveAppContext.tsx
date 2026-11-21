@@ -1425,24 +1425,47 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     lastLoadedProjectIdRef.current = activeProjectId;
 
     let active = true;
+    let secondaryTimer: ReturnType<typeof setTimeout> | null = null;
     let prefetchTimer: ReturnType<typeof setTimeout> | null = null;
+    const currentPath = pathname || "";
+    const needsEvidenceNow =
+      currentPath.includes("/evidence") ||
+      currentPath.includes("/ingestion") ||
+      currentPath.includes("/sources") ||
+      currentPath.includes("/knowledge");
+    const needsVerificationNow =
+      currentPath.includes("/verification") || currentPath.includes("/conflicts");
+    const needsHandoversNow =
+      currentPath.includes("/handover") ||
+      currentPath.includes("/generated-handovers") ||
+      currentPath.includes("/onboarding");
+
     void Promise.resolve().then(() => {
       if (!active) return;
-      // Load active workspace context first; defer heavy background prefetches so active page stays fast
+      // Load essential workspace context immediately without saturating DB pool on home/dashboard
       void refreshOverview();
       void refreshMembers();
       void refreshSources();
-      void refreshEvidence();
-      void refreshVerification();
-      void refreshHandovers();
+      if (needsEvidenceNow) void refreshEvidence();
+      if (needsVerificationNow) void refreshVerification();
+      if (needsHandoversNow) void refreshHandovers();
+
+      secondaryTimer = setTimeout(() => {
+        if (!active) return;
+        if (!needsEvidenceNow) void refreshEvidence();
+        if (!needsVerificationNow) void refreshVerification();
+        if (!needsHandoversNow) void refreshHandovers();
+      }, 2500);
+
       prefetchTimer = setTimeout(() => {
         if (active) {
           void prefetchProjectAssets(activeProjectId, currentUserId);
         }
-      }, 3000);
+      }, 4500);
     });
     return () => {
       active = false;
+      if (secondaryTimer) clearTimeout(secondaryTimer);
       if (prefetchTimer) clearTimeout(prefetchTimer);
     };
   }, [
