@@ -254,4 +254,111 @@ describe('SuccessorOnboardingWorkspace', () => {
     })
     expect(screen.queryByText('Unpublished Draft Case')).not.toBeInTheDocument()
   })
+
+  it('keeps Successor Handover Onboarding accessible when the assigned published case is already acknowledged', async () => {
+    vi.spyOn(api.handover, 'listCases').mockResolvedValue({
+      items: [
+        {
+          id: caseId1,
+          project_id: projectId,
+          title: 'Travello Backend Transfer (Acknowledged)',
+          status: 'acknowledged',
+          version: 1,
+          departing_member_id: 'user-out',
+          successor_id: 'user-succ',
+          current_version_id: verId1,
+          handover_type: 'developer',
+          created_at: '2026-11-18T00:00:00Z',
+          updated_at: '2026-11-20T00:00:00Z',
+        },
+      ],
+      total: 1,
+    } as never)
+    vi.spyOn(api.handover, 'getCase').mockResolvedValue({
+      case: {
+        id: caseId1,
+        project_id: projectId,
+        title: 'Travello Backend Transfer (Acknowledged)',
+        status: 'acknowledged',
+        version: 1,
+        departing_member_id: 'user-out',
+        successor_id: 'user-succ',
+      },
+      packages: [],
+      signoffs: [],
+      status_history: [],
+      responsibility_transfers: [],
+    } as never)
+    vi.spyOn(api.handover, 'getVersions').mockResolvedValue([
+      {
+        id: verId1,
+        package_id: 'pkg-1',
+        version_number: 1,
+        is_current: true,
+        assembly_status: 'published',
+        assembled_at: '2026-11-20T00:00:00Z',
+        content_hash: 'hash-v1',
+        created_at: '2026-11-20T00:00:00Z',
+      },
+    ] as never)
+    vi.spyOn(api.handover, 'getResponsibilityWorkspace').mockResolvedValue({
+      transfers: [],
+    } as never)
+    vi.spyOn(api.handover, 'getVersionSections').mockResolvedValue({
+      case_id: caseId1,
+      version_id: verId1,
+      version_number: 1,
+      handover_type: 'developer',
+      mandatory_sections: [
+        {
+          section_number: 1,
+          section_key: 'executive_overview',
+          section_title: 'Project Overview',
+          is_role_priority: true,
+          readiness_status: 'ready',
+          knowledge_items: [
+            {
+              id: 'ki-1',
+              title: 'What Travello AI Does',
+              content: 'AI travel itinerary engine.',
+              epistemic_status: 'human_verified',
+              review_status: 'approved',
+              provenance_available: true,
+              provenance: [],
+            },
+          ],
+          relationships: [],
+          evidence_references: [],
+          responsibilities_summary: [],
+          conflicts: [],
+          recommended_steps: [],
+        },
+      ],
+      sections: [],
+      epistemic_summary: { human_verified_included: 1, pending_verification: 0 },
+    } as never)
+    vi.spyOn(api.handover, 'getSignoffWorkspace').mockResolvedValue({
+      publication: {
+        is_published: true,
+        deliveries: [
+          {
+            id: 'del-1',
+            version_id: verId1,
+            delivered_to_user_id: 'user-succ',
+            artifact_checksum: 'hash-v1',
+            acknowledged: true,
+            acknowledged_at: '2026-11-20T10:00:00Z',
+          },
+        ],
+      },
+    } as never)
+
+    render(<SuccessorOnboardingWorkspace projectId={projectId} />)
+
+    await waitFor(() => {
+      expect(screen.getByText(/Travello Backend Transfer \(Acknowledged\)/)).toBeInTheDocument()
+      expect(screen.getByText('AI travel itinerary engine.')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Project Onboarding & Orientation')).not.toBeInTheDocument()
+  })
 })

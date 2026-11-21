@@ -337,9 +337,15 @@ export function SuccessorOnboardingWorkspace({
 
   const assignedPublishedCases = useMemo(() => {
     if (!user?.id) return [];
+    const publishedStatuses = new Set([
+      "published",
+      "acknowledged",
+      "transferred",
+      "completed",
+    ]);
     return handoverCases.filter((hc) => {
       const st = (hc.status || "").toLowerCase();
-      const isPublished = st === "published" || st === "completed";
+      const isPublished = publishedStatuses.has(st);
       const isAssignedToMe =
         hc.successor_id === user.id || hc.incoming_owner_user_id === user.id;
       return isPublished && isAssignedToMe;
