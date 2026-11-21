@@ -17,27 +17,22 @@ import {
   Lock,
   LogOut,
   Mail,
-  Monitor,
-  Palette,
   Plug,
   RefreshCw,
   ScrollText,
   Shield,
   ShieldCheck,
   Smartphone,
-  Sparkles,
   Trash2,
   User as UserIcon,
   Users,
 } from 'lucide-react'
 import { useLiveApp } from '../../context/LiveAppContext'
 import { api } from '../../lib/api'
-import { applyUserPreferences, DEFAULT_USER_PREFERENCES } from '../../lib/userPreferences'
 import type {
   AccountDeletionRequestResponse,
   NotificationPreferences,
   SourceConnection,
-  UserPreferences,
   UserSession,
 } from '../../lib/types'
 import {
@@ -67,7 +62,6 @@ import type { SourceType } from '../../lib/figmaStore'
 export type SettingsSectionId =
   | 'profile'
   | 'security'
-  | 'appearance'
   | 'notifications'
   | 'connections'
   | 'privacy'
@@ -115,29 +109,12 @@ function parseUserAgentLabel(meta?: Record<string, string> | null): {
 
 function formatDateWithPrefs(
   iso: string | null | undefined,
-  format: UserPreferences['date_format'] = 'DD MMM YYYY',
   tz = 'UTC',
 ): string {
   if (!iso) return 'Not available'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return String(iso)
   try {
-    if (format === 'YYYY-MM-DD') {
-      return new Intl.DateTimeFormat('en-CA', {
-        timeZone: tz,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).format(d)
-    }
-    if (format === 'MM/DD/YYYY') {
-      return new Intl.DateTimeFormat('en-US', {
-        timeZone: tz,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).format(d)
-    }
     return new Intl.DateTimeFormat('en-GB', {
       timeZone: tz,
       day: '2-digit',
@@ -174,8 +151,8 @@ export function AccountSettingsWorkspace({ mode }: AccountSettingsWorkspaceProps
     const map: Record<string, SettingsSectionId> = {
       profile: 'profile',
       security: 'security',
-      appearance: 'appearance',
-      preferences: 'appearance',
+      appearance: 'profile',
+      preferences: 'notifications',
       notifications: 'notifications',
       accounts: 'connections',
       connections: 'connections',
@@ -204,7 +181,6 @@ export function AccountSettingsWorkspace({ mode }: AccountSettingsWorkspaceProps
     router.replace(`${base}?section=${next}`, { scroll: false })
   }
 
-  const prefs = user?.preferences ?? DEFAULT_USER_PREFERENCES
   const userTz = user?.timezone || 'UTC'
 
   // Org membership role lookup for current user
@@ -410,31 +386,6 @@ export function AccountSettingsWorkspace({ mode }: AccountSettingsWorkspaceProps
       setEmailError(err instanceof Error ? err.message : 'Failed to update email.')
     } finally {
       setSavingEmail(false)
-    }
-  }
-
-  // Section 3: Appearance & Preferences
-  const [prefForm, setPrefForm] = useState<UserPreferences>(prefs)
-  const [savingAppearance, setSavingAppearance] = useState(false)
-  useEffect(() => {
-    if (user?.preferences) setPrefForm(user.preferences)
-  }, [user?.preferences])
-
-  const handleSaveAppearance = async () => {
-    setSavingAppearance(true)
-    try {
-      const updated = await api.users.updateMe({ preferences: prefForm })
-      setUser(updated)
-      applyUserPreferences(updated.preferences)
-      addToast({ type: 'success', title: 'Appearance saved', message: 'Your preferences are persisted across sessions.' })
-    } catch (err) {
-      addToast({
-        type: 'error',
-        title: 'Save failed',
-        message: err instanceof Error ? err.message : 'Could not save appearance preferences.',
-      })
-    } finally {
-      setSavingAppearance(false)
     }
   }
 
@@ -684,7 +635,6 @@ export function AccountSettingsWorkspace({ mode }: AccountSettingsWorkspaceProps
   }> = [
     { id: 'profile', label: 'My Profile', group: 'Personal', icon: UserIcon },
     { id: 'security', label: 'Account & Security', group: 'Personal', icon: ShieldCheck },
-    { id: 'appearance', label: 'Appearance & Preferences', group: 'Personal', icon: Palette },
     { id: 'notifications', label: 'Notifications', group: 'Personal', icon: Bell },
     { id: 'connections', label: 'Connected Accounts', group: 'Personal', icon: Plug },
     { id: 'privacy', label: 'Privacy & Data', group: 'Personal', icon: Lock },
@@ -704,7 +654,7 @@ export function AccountSettingsWorkspace({ mode }: AccountSettingsWorkspaceProps
     <div className="space-y-6">
       <PageHeader
         title={mode === 'profile' ? 'Profile & Account' : 'Settings'}
-        subtitle="Manage your personal identity, security, appearance, notifications, connected accounts, and workspace controls."
+        subtitle="Manage your personal identity, security, notifications, connected accounts, and workspace controls."
         actions={
           <div className="flex flex-wrap gap-2">
             <Button variant="secondary" icon={Users} onClick={() => router.push('/settings/team')}>
@@ -880,7 +830,7 @@ export function AccountSettingsWorkspace({ mode }: AccountSettingsWorkspaceProps
                   </Field>
                   <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
                     <span className="text-xs text-muted">
-                      Member since {formatDateWithPrefs(user?.created_at, prefs.date_format, userTz)}
+                      Member since {formatDateWithPrefs(user?.created_at, userTz)}
                     </span>
                     <div className="flex gap-2">
                       {profileDirty && (
@@ -981,7 +931,7 @@ export function AccountSettingsWorkspace({ mode }: AccountSettingsWorkspaceProps
                   <div className="rounded-xl border border-line p-3">
                     <p className="text-xs text-muted">Last sign-in</p>
                     <p className="mt-1 font-medium text-navy">
-                      {formatDateWithPrefs(user?.last_login_at, prefs.date_format, userTz)}
+                      {formatDateWithPrefs(user?.last_login_at, userTz)}
                     </p>
                   </div>
                 </div>
@@ -1111,9 +1061,9 @@ export function AccountSettingsWorkspace({ mode }: AccountSettingsWorkspaceProps
                             <div className="min-w-0 flex-1">
                               <p className="truncate text-[13px] font-medium text-navy">{ua.label}</p>
                               <p className="text-xs text-muted">
-                                Created {formatDateWithPrefs(sess.created_at, prefs.date_format, userTz)}
+                                Created {formatDateWithPrefs(sess.created_at, userTz)}
                                 {sess.last_used_at
-                                  ? ` · Last used ${formatDateWithPrefs(sess.last_used_at, prefs.date_format, userTz)}`
+                                  ? ` · Last used ${formatDateWithPrefs(sess.last_used_at, userTz)}`
                                   : ''}
                               </p>
                             </div>
@@ -1163,115 +1113,6 @@ export function AccountSettingsWorkspace({ mode }: AccountSettingsWorkspaceProps
                 </Card>
               </div>
             </div>
-          )}
-
-          {/* 3. APPEARANCE & PREFERENCES */}
-          {section === 'appearance' && (
-            <Card className="p-5 sm:p-6 space-y-5">
-              <CardHeader
-                title="Appearance & Preferences"
-                subtitle="Persisted across sessions and devices without affecting Handover PDF reports or Relationship graphs"
-              />
-              <div className="grid gap-3 sm:grid-cols-3">
-                {(
-                  [
-                    { id: 'light', label: 'Light', desc: 'Crisp white surfaces', icon: Monitor },
-                    { id: 'dark', label: 'Dark', desc: 'Low-glare slate palette', icon: Palette },
-                    { id: 'system', label: 'System', desc: 'Follow OS preference', icon: Sparkles },
-                  ] as const
-                ).map((opt) => {
-                  const active = prefForm.theme === opt.id
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => {
-                        const next = { ...prefForm, theme: opt.id }
-                        setPrefForm(next)
-                        applyUserPreferences(next)
-                      }}
-                      className={cn(
-                        'rounded-xl border p-4 text-left transition cursor-pointer',
-                        active ? 'border-brand bg-tint/50 ring-1 ring-brand/30' : 'border-line hover:border-slate-300',
-                      )}
-                    >
-                      <p className="text-sm font-semibold text-navy">{opt.label}</p>
-                      <p className="mt-0.5 text-xs text-muted">{opt.desc}</p>
-                    </button>
-                  )
-                })}
-              </div>
-
-              <div className="grid gap-4 sm:grid-cols-3">
-                <Field label="Date format">
-                  <Select
-                    value={prefForm.date_format}
-                    onChange={(e) =>
-                      setPrefForm({
-                        ...prefForm,
-                        date_format: e.target.value as UserPreferences['date_format'],
-                      })
-                    }
-                  >
-                    <option value="DD MMM YYYY">DD MMM YYYY (21 Nov 2026)</option>
-                    <option value="MM/DD/YYYY">MM/DD/YYYY (11/21/2026)</option>
-                    <option value="YYYY-MM-DD">YYYY-MM-DD (2026-11-21)</option>
-                  </Select>
-                </Field>
-                <Field label="Interface density">
-                  <Select
-                    value={prefForm.density}
-                    onChange={(e) => {
-                      const next = {
-                        ...prefForm,
-                        density: e.target.value as UserPreferences['density'],
-                      }
-                      setPrefForm(next)
-                      applyUserPreferences(next)
-                    }}
-                  >
-                    <option value="comfortable">Comfortable</option>
-                    <option value="compact">Compact</option>
-                  </Select>
-                </Field>
-                <Field label="Default landing page">
-                  <Select
-                    value={prefForm.default_landing_page}
-                    onChange={(e) =>
-                      setPrefForm({
-                        ...prefForm,
-                        default_landing_page: e.target.value as UserPreferences['default_landing_page'],
-                      })
-                    }
-                  >
-                    <option value="/dashboard">Dashboard</option>
-                    <option value="/projects">My Projects</option>
-                    <option value="/handovers/received">Received Handovers</option>
-                  </Select>
-                </Field>
-              </div>
-
-              <div className="flex items-center justify-between rounded-xl border border-line p-4">
-                <div>
-                  <p className="text-sm font-medium text-navy">Reduce motion</p>
-                  <p className="text-xs text-muted">Minimise UI transitions and animations across the workspace.</p>
-                </div>
-                <Switch
-                  checked={prefForm.reduced_motion}
-                  onChange={(v) => {
-                    const next = { ...prefForm, reduced_motion: v }
-                    setPrefForm(next)
-                    applyUserPreferences(next)
-                  }}
-                />
-              </div>
-
-              <div className="flex justify-end border-t border-line pt-4">
-                <Button icon={Check} disabled={savingAppearance} onClick={handleSaveAppearance}>
-                  {savingAppearance ? 'Saving…' : 'Save preferences'}
-                </Button>
-              </div>
-            </Card>
           )}
 
           {/* 4. NOTIFICATIONS */}
@@ -1390,7 +1231,7 @@ export function AccountSettingsWorkspace({ mode }: AccountSettingsWorkspaceProps
                             <p className="mt-0.5 text-xs text-muted">
                               Account: {conn.display_name || conn.account_identifier || 'Authenticated'}
                               {conn.last_synced_at
-                                ? ` · Last synced ${formatDateWithPrefs(conn.last_synced_at, prefs.date_format, userTz)}`
+                                ? ` · Last synced ${formatDateWithPrefs(conn.last_synced_at, userTz)}`
                                 : ''}
                             </p>
                           ) : (

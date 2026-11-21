@@ -68,13 +68,6 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${manrope.variable} ${jetbrainsMono.variable}`} suppressHydrationWarning>
-      <head>
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem('th_theme')||'light';var d=localStorage.getItem('th_density')||'comfortable';var r=localStorage.getItem('th_reduced_motion')==='true';var eff=t==='dark'?'dark':(t==='system'&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');var el=document.documentElement;el.setAttribute('data-theme',eff);el.setAttribute('data-theme-mode',t);el.classList.toggle('dark',eff==='dark');el.setAttribute('data-density',d);el.setAttribute('data-reduced-motion',String(r));}catch(e){}})();`,
-          }}
-        />
-      </head>
       <body className="antialiased font-sans" suppressHydrationWarning>
         <QueryProvider>
           <FigmaStoreProvider>

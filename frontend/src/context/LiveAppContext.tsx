@@ -11,7 +11,6 @@ import React, {
 } from "react";
 import { usePathname } from "next/navigation";
 import { api, setStoredToken, setStoredUser, getStoredUser, ApiError, clearApiCache } from "../lib/api";
-import { applyUserPreferences, clearUserPreferenceCache } from "../lib/userPreferences";
 import { getCachedGraph, invalidateGraphCache, setCachedGraph, setGraphCacheUser } from "../lib/graphCache";
 import {
   prefetchAllWorkspaceProjects,
@@ -1521,7 +1520,6 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     }
     setStoredToken(null);
     setStoredUser(null);
-    clearUserPreferenceCache();
     setToken(null);
     setUser(null);
     invalidateGraphCache();
@@ -1550,17 +1548,6 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       return null;
     }
   };
-
-  useEffect(() => {
-    if (!user) return;
-    applyUserPreferences(user.preferences);
-    if (user.preferences?.theme === "system" && typeof window !== "undefined") {
-      const mq = window.matchMedia("(prefers-color-scheme: dark)");
-      const handler = () => applyUserPreferences(user.preferences);
-      mq.addEventListener?.("change", handler);
-      return () => mq.removeEventListener?.("change", handler);
-    }
-  }, [user]);
 
   // Org & Project actions
   const createOrganisation = async (name: string, slug?: string, description?: string) => {
