@@ -24,6 +24,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import PlainTextResponse
+from fastapi.routing import APIRoute
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -120,10 +121,24 @@ def _invalidate_handover_workspace_cache(project_id: uuid.UUID) -> None:
     invalidate_handover_sections_cache(project_id)
 
 
-def _auto_invalidate_on_mutation(request: Request, project_id: uuid.UUID):
-    yield
-    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
-        _invalidate_handover_workspace_cache(project_id)
+class HandoverAPIRoute(APIRoute):
+    """Invalidate per-project handover workspace cache before returning mutation responses."""
+
+    def get_route_handler(self) -> Any:
+        original_route_handler = super().get_route_handler()
+
+        async def custom_route_handler(request: Request) -> Response:
+            response = await original_route_handler(request)
+            if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+                pid_str = request.path_params.get("project_id")
+                if pid_str:
+                    try:
+                        _invalidate_handover_workspace_cache(uuid.UUID(pid_str))
+                    except ValueError:
+                        pass
+            return response
+
+        return custom_route_handler
 
 
 def _cached_handover_get(cache_key: str, builder: Any, *, ttl_seconds: int = 300) -> Any:
@@ -140,7 +155,7 @@ def _cached_handover_get(cache_key: str, builder: Any, *, ttl_seconds: int = 300
 router = APIRouter(
     prefix="/projects/{project_id}/handover",
     tags=["Handover Workspace"],
-    dependencies=[Depends(_auto_invalidate_on_mutation)],
+    route_class=HandoverAPIRoute,
 )
 
 

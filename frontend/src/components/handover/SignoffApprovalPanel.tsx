@@ -623,6 +623,50 @@ export function SignoffApprovalPanel({
                 }
                 return null
               })()}
+              {(() => {
+                const p1 = workspace.phases.find((ph) => ph.phase_number === 1)
+                const p2 = workspace.phases.find((ph) => ph.phase_number === 2)
+                const reopenTarget =
+                  !pub.is_published && p2?.latest_decision && !p2.latest_decision.is_superseded
+                    ? p2
+                    : !pub.is_published && p1?.latest_decision && !p1.latest_decision.is_superseded
+                    ? p1
+                    : null
+                return (
+                  <>
+                    {reopenTarget && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        icon={RotateCcw}
+                        onClick={() => {
+                          setReopenReason('')
+                          setReopenModal({
+                            signoffType: reopenTarget.signoff_type,
+                            phaseName: reopenTarget.phase_name,
+                          })
+                        }}
+                      >
+                        Go Back: Reopen Phase {reopenTarget.phase_number}
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => navTab('responsibilities')}
+                    >
+                      Back to Ownership
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => navTab('readiness')}
+                    >
+                      Back to Readiness
+                    </Button>
+                  </>
+                )
+              })()}
             </div>
           </div>
 

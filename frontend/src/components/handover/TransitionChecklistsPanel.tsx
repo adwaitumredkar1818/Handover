@@ -166,8 +166,9 @@ export function TransitionChecklistsPanel({
     try {
       const data = await api.handover.getChecklistWorkspace(projectId, caseId)
       setWorkspace(data)
-      if (data.checklists[0]?.id && !newChecklistId) {
-        setNewChecklistId(data.checklists[0].id)
+      const firstChecklistId = data.checklists[0]?.id
+      if (firstChecklistId) {
+        setNewChecklistId((prev) => prev || firstChecklistId)
       }
       const allItems = data.checklists.flatMap((c) => c.items)
       setSelectedItemId((prev) => {
@@ -179,7 +180,7 @@ export function TransitionChecklistsPanel({
     } finally {
       setIsLoading(false)
     }
-  }, [projectId, caseId, newChecklistId])
+  }, [projectId, caseId])
 
   useEffect(() => {
     void loadWorkspace()
@@ -219,6 +220,38 @@ export function TransitionChecklistsPanel({
       setActionError(err instanceof Error ? err.message : 'Failed to generate checklists.')
     } finally {
       setIsGenerating(false)
+    }
+  }
+
+  const handleQuickToggleItem = async (
+    item: HandoverChecklistItemDetail,
+    e: React.MouseEvent,
+  ) => {
+    e.stopPropagation()
+    setSelectedItemId(item.id)
+    if (item.status === 'completed') {
+      setReopenTargetStatus('in_progress')
+      setReopenReason('')
+      setReopenModalOpen(true)
+      return
+    }
+    if (isSavingItem) return
+    setIsSavingItem(true)
+    setActionError(null)
+    setActionSuccess(null)
+    try {
+      await api.handover.updateChecklistItem(projectId, item.id, {
+        status: 'completed',
+        expected_version: item.version,
+      })
+      await loadWorkspace()
+      onDataChanged?.()
+      setActionSuccess(`Marked "${item.item_text}" as completed.`)
+      setReadinessDirty(true)
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Could not update checklist item.')
+    } finally {
+      setIsSavingItem(false)
     }
   }
 
@@ -620,16 +653,38 @@ export function TransitionChecklistsPanel({
                       const sb = statusBadge(item.status, item.is_overdue)
                       const isSelected = selectedItem?.id === item.id
                       return (
-                        <button
+                        <div
                           key={item.id}
-                          type="button"
+                          role="button"
+                          tabIndex={0}
                           onClick={() => setSelectedItemId(item.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              setSelectedItemId(item.id)
+                            }
+                          }}
                           className={cn(
-                            'flex w-full items-start gap-3 px-5 py-3.5 text-left transition',
+                            'flex w-full cursor-pointer items-start gap-3 px-5 py-3.5 text-left transition',
                             isSelected ? 'bg-tint/40 ring-1 ring-inset ring-brand/25' : 'hover:bg-slate-50',
                           )}
                         >
-                          <span className="mt-0.5 shrink-0">
+                          <button
+                            type="button"
+                            disabled={isSavingItem}
+                            onClick={(e) => void handleQuickToggleItem(item, e)}
+                            title={
+                              item.status === 'completed'
+                                ? 'Reopen completed item'
+                                : 'Mark item completed'
+                            }
+                            aria-label={
+                              item.status === 'completed'
+                                ? `Reopen ${item.item_text}`
+                                : `Mark ${item.item_text} completed`
+                            }
+                            className="mt-0.5 shrink-0 rounded-full p-0.5 hover:bg-slate-200/70 disabled:opacity-50"
+                          >
                             {item.status === 'completed' ? (
                               <CheckCircle2 className="size-4 text-emerald-600" />
                             ) : item.status === 'blocked' ? (
@@ -637,7 +692,7 @@ export function TransitionChecklistsPanel({
                             ) : (
                               <span className="block size-4 rounded-full border-2 border-slate-300" />
                             )}
-                          </span>
+                          </button>
                           <div className="min-w-0 flex-1">
                             <p
                               className={cn(
@@ -673,7 +728,7 @@ export function TransitionChecklistsPanel({
                               )}
                             </div>
                           </div>
-                        </button>
+                        </div>
                       )
                     })}
                   </div>

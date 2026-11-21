@@ -30,8 +30,10 @@ import {
   Users,
 } from "lucide-react";
 import { Badge, Button, Card, CardHeader } from "../ui";
+import { FormattedMarkdown } from "../figma-ui/FormattedMarkdown";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { api } from "../../lib/api";
+import { getCachedGraph, setCachedGraph } from "../../lib/graphCache";
 import type {
   HandoverCaseItem,
   HandoverDeliveryRecord,
@@ -68,9 +70,17 @@ function resolveMemberName(
 
 function getSection(
   sections: HandoverMandatorySection[],
-  key: string
+  ...keys: string[]
 ): HandoverMandatorySection | undefined {
-  return sections.find((s) => s.section_key === key);
+  for (const key of keys) {
+    const found = sections.find((s) => s.section_key === key);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function normalizeInlineBullets(text: string): string {
+  return (text || "").replace(/\s+-\s+(?=\*\*|`|\[)/g, "\n- ");
 }
 
 function formatDate(iso?: string | null): string {
@@ -153,22 +163,69 @@ export function SuccessorHandoverOnboarding({
 
   const loadHandoverPackage = useCallback(async () => {
     if (!activeCase) return;
-    setIsLoadingPackage(true);
+    const knownVersionId = selectedVersionId || activeCase.current_version_id || "";
+    const pkgCacheKey = `succ_handover_pkg:${projectId}:${activeCase.id}:${knownVersionId || "cur"}`;
+    type CachedPkg = {
+      caseDetail: {
+        case: Record<string, unknown>;
+        responsibility_transfers: HandoverResponsibilityTransferDetail[];
+      };
+      versions: HandoverPackageVersionSummary[];
+      resolvedVersionId: string;
+      transfers: HandoverResponsibilityTransferDetail[];
+      sectionsData: HandoverVersionSectionsResponse | null;
+      deliveries: HandoverDeliveryRecord[];
+      completedSteps: Record<string, boolean>;
+      stepTimestamps: Record<string, string | null>;
+    };
+    const cachedPkg = getCachedGraph<CachedPkg>(pkgCacheKey, undefined, user?.id);
+    if (cachedPkg) {
+      setCaseDetail(cachedPkg.caseDetail);
+      setVersions(cachedPkg.versions);
+      if (cachedPkg.resolvedVersionId && cachedPkg.resolvedVersionId !== selectedVersionId) {
+        setSelectedVersionId(cachedPkg.resolvedVersionId);
+      }
+      setTransfers(cachedPkg.transfers);
+      setSectionsData(cachedPkg.sectionsData);
+      setDeliveries(cachedPkg.deliveries);
+      setCompletedSteps(cachedPkg.completedSteps);
+      setStepTimestamps(cachedPkg.stepTimestamps);
+      setIsLoadingPackage(false);
+    } else {
+      setIsLoadingPackage(true);
+    }
     setPackageError(null);
     setSaveFeedback(null);
     setActionBanner(null);
     try {
-      const [detailRes, versionsRes, respWorkspace] = await Promise.all([
-        api.handover.getCase(projectId, activeCase.id),
-        api.handover.getVersions(projectId, activeCase.id).catch(() => []),
-        api.handover.getResponsibilityWorkspace(projectId, activeCase.id).catch(() => null),
-      ]);
+      // Single-wave parallel fetch when knownVersionId is already available from activeCase
+      const [detailRes, versionsRes, respWorkspace, prefetchedSec, prefetchedSignoff, prefetchedProg] =
+        await Promise.all([
+          api.handover.getCase(projectId, activeCase.id),
+          api.handover.getVersions(projectId, activeCase.id).catch(() => []),
+          api.handover.getResponsibilityWorkspace(projectId, activeCase.id).catch(() => null),
+          knownVersionId
+            ? api.handover.getVersionSections(projectId, activeCase.id, knownVersionId)
+            : Promise.resolve(null),
+          knownVersionId
+            ? api.handover.getSignoffWorkspace(projectId, activeCase.id, knownVersionId).catch(() => null)
+            : Promise.resolve(null),
+          knownVersionId
+            ? api.onboarding
+                .getProgress(projectId, undefined, {
+                  caseId: activeCase.id,
+                  versionId: knownVersionId,
+                })
+                .catch(() => null)
+            : Promise.resolve(null),
+        ]);
 
-      setCaseDetail({
+      const nextCaseDetail = {
         case: detailRes.case as Record<string, unknown>,
         responsibility_transfers: (detailRes.responsibility_transfers ||
           []) as HandoverResponsibilityTransferDetail[],
-      });
+      };
+      setCaseDetail(nextCaseDetail);
 
       const publishedVersions = (versionsRes || []).filter(
         (v) => v.is_current || v.assembly_status === "published" || v.assembly_status === "assembled"
@@ -179,6 +236,7 @@ export function SuccessorHandoverOnboarding({
 
       const chosenVersion =
         effectiveVersions.find((v) => v.id === selectedVersionId) ||
+        effectiveVersions.find((v) => v.assembly_status === "published") ||
         effectiveVersions.find((v) => v.id === activeCase.current_version_id) ||
         effectiveVersions[0] ||
         null;
@@ -188,27 +246,27 @@ export function SuccessorHandoverOnboarding({
         setSelectedVersionId(resolvedVersionId);
       }
 
-      if (respWorkspace?.transfers) {
-        setTransfers(respWorkspace.transfers);
-      } else if (detailRes.responsibility_transfers) {
-        setTransfers(
-          detailRes.responsibility_transfers as HandoverResponsibilityTransferDetail[]
-        );
-      }
+      const nextTransfers = respWorkspace?.transfers
+        ? respWorkspace.transfers
+        : ((detailRes.responsibility_transfers || []) as HandoverResponsibilityTransferDetail[]);
+      setTransfers(nextTransfers);
 
       if (resolvedVersionId) {
-        const [secRes, signoffRes, progressRes] = await Promise.all([
-          api.handover.getVersionSections(projectId, activeCase.id, resolvedVersionId),
-          api.handover
-            .getSignoffWorkspace(projectId, activeCase.id, resolvedVersionId)
-            .catch(() => null),
-          api.onboarding
-            .getProgress(projectId, undefined, {
-              caseId: activeCase.id,
-              versionId: resolvedVersionId,
-            })
-            .catch(() => null),
-        ]);
+        const usePrefetched = resolvedVersionId === knownVersionId && prefetchedSec !== null;
+        const [secRes, signoffRes, progressRes] = usePrefetched
+          ? [prefetchedSec, prefetchedSignoff, prefetchedProg]
+          : await Promise.all([
+              api.handover.getVersionSections(projectId, activeCase.id, resolvedVersionId),
+              api.handover
+                .getSignoffWorkspace(projectId, activeCase.id, resolvedVersionId)
+                .catch(() => null),
+              api.onboarding
+                .getProgress(projectId, undefined, {
+                  caseId: activeCase.id,
+                  versionId: resolvedVersionId,
+                })
+                .catch(() => null),
+            ]);
         setSectionsData(secRes);
         const pubDeliveries =
           (signoffRes?.publication as { deliveries?: HandoverDeliveryRecord[] } | undefined)
@@ -222,6 +280,21 @@ export function SuccessorHandoverOnboarding({
         }
         setCompletedSteps(map);
         setStepTimestamps(tsMap);
+
+        setCachedGraph(
+          pkgCacheKey,
+          {
+            caseDetail: nextCaseDetail,
+            versions: effectiveVersions,
+            resolvedVersionId,
+            transfers: nextTransfers,
+            sectionsData: secRes,
+            deliveries: pubDeliveries,
+            completedSteps: map,
+            stepTimestamps: tsMap,
+          },
+          user?.id
+        );
       } else {
         setSectionsData(null);
         setDeliveries([]);
@@ -229,13 +302,15 @@ export function SuccessorHandoverOnboarding({
         setStepTimestamps({});
       }
     } catch (err: unknown) {
-      setPackageError(
-        err instanceof Error ? err.message : "Unable to load published handover package."
-      );
+      if (!cachedPkg) {
+        setPackageError(
+          err instanceof Error ? err.message : "Unable to load published handover package."
+        );
+      }
     } finally {
       setIsLoadingPackage(false);
     }
-  }, [activeCase, projectId, selectedVersionId]);
+  }, [activeCase, projectId, selectedVersionId, user?.id]);
 
   useEffect(() => {
     void loadHandoverPackage();
@@ -432,15 +507,15 @@ export function SuccessorHandoverOnboarding({
   const completionPct = Math.round((completedCount / SUCCESSOR_STEPS.length) * 100);
 
   const mandatorySections = sectionsData?.mandatory_sections || [];
-  const secOverview = getSection(mandatorySections, "executive_overview");
-  const secArch = getSection(mandatorySections, "architecture_technical");
+  const secOverview = getSection(mandatorySections, "project_overview", "executive_overview");
+  const secArch = getSection(mandatorySections, "architecture_technical_context", "architecture_technical");
   const secCompleted = getSection(mandatorySections, "completed_work");
   const secPending = getSection(mandatorySections, "pending_work");
-  const secDecisions = getSection(mandatorySections, "decisions_rationale");
+  const secDecisions = getSection(mandatorySections, "important_decisions_rationale", "decisions_rationale");
   const secDeps = getSection(mandatorySections, "dependencies");
-  const secRisks = getSection(mandatorySections, "risks_blockers");
-  const secResp = getSection(mandatorySections, "responsibilities_ownership");
-  const secContacts = getSection(mandatorySections, "contacts_escalation");
+  const secRisks = getSection(mandatorySections, "risks_and_blockers", "risks_blockers");
+  const secResp = getSection(mandatorySections, "responsibilities", "responsibilities_ownership");
+  const secContacts = getSection(mandatorySections, "evidence_references", "contacts_escalation");
   const secNext = getSection(mandatorySections, "recommended_next_steps");
 
   const departingUserId =
@@ -750,9 +825,12 @@ export function SuccessorHandoverOnboarding({
                     {approvedOverviewItems.length > 0 ? (
                       <ul className="mt-2 space-y-1.5 text-slate-700">
                         {approvedOverviewItems.slice(0, 4).map((ki, idx) => (
-                          <li key={idx}>
-                            <strong>{String(ki.title || "Overview")}:</strong>{" "}
-                            {String(ki.content || "")}
+                          <li key={idx} className="rounded-lg bg-slate-50/70 p-2.5">
+                            <p className="font-medium text-navy">{String(ki.title || "Overview")}</p>
+                            <FormattedMarkdown
+                              content={normalizeInlineBullets(String(ki.content || ""))}
+                              className="mt-1 text-xs text-slate-700"
+                            />
                           </li>
                         ))}
                       </ul>
@@ -774,7 +852,10 @@ export function SuccessorHandoverOnboarding({
                         {(secArch?.knowledge_items || []).slice(0, 5).map((ki, idx) => (
                           <li key={idx} className="rounded-lg bg-slate-50/70 p-2.5">
                             <p className="font-medium text-navy">{String(ki.title || "Component")}</p>
-                            <p className="mt-0.5 text-muted">{String(ki.content || "")}</p>
+                            <FormattedMarkdown
+                              content={normalizeInlineBullets(String(ki.content || ""))}
+                              className="mt-1 text-xs text-slate-700"
+                            />
                           </li>
                         ))}
                       </ul>
@@ -793,9 +874,12 @@ export function SuccessorHandoverOnboarding({
                     {(secCompleted?.knowledge_items?.length || 0) > 0 ? (
                       <ul className="mt-2 space-y-1.5 text-slate-700">
                         {(secCompleted?.knowledge_items || []).slice(0, 4).map((ki, idx) => (
-                          <li key={idx}>
-                            <strong>{String(ki.title || "Deliverable")}:</strong>{" "}
-                            {String(ki.content || "")}
+                          <li key={idx} className="rounded-lg bg-slate-50/70 p-2.5">
+                            <p className="font-medium text-navy">{String(ki.title || "Deliverable")}</p>
+                            <FormattedMarkdown
+                              content={normalizeInlineBullets(String(ki.content || ""))}
+                              className="mt-1 text-xs text-slate-700"
+                            />
                           </li>
                         ))}
                       </ul>
@@ -954,10 +1038,16 @@ export function SuccessorHandoverOnboarding({
                 {(secContacts?.knowledge_items?.length || 0) > 0 && (
                   <div className="rounded-xl border border-line p-4 text-xs">
                     <p className="font-semibold text-navy">Key Contacts &amp; Escalation</p>
-                    <ul className="mt-2 space-y-1 text-slate-700">
+                    <ul className="mt-2 space-y-3 text-slate-700">
                       {(secContacts?.knowledge_items || []).slice(0, 4).map((ki, i) => (
-                        <li key={i}>
-                          <strong>{String(ki.title || "Contact")}:</strong> {String(ki.content || "")}
+                        <li key={i} className="space-y-1">
+                          <p className="font-semibold text-navy">
+                            {String(ki.title || "Contact")}
+                          </p>
+                          <FormattedMarkdown
+                            content={normalizeInlineBullets(String(ki.content || ""))}
+                            className="space-y-1 text-slate-700"
+                          />
                         </li>
                       ))}
                     </ul>
@@ -1019,7 +1109,10 @@ export function SuccessorHandoverOnboarding({
                             <p className="font-semibold text-navy">
                               {String(ki.title || "Item")}
                             </p>
-                            <p className="mt-1 text-slate-700">{String(ki.content || "")}</p>
+                            <FormattedMarkdown
+                              content={normalizeInlineBullets(String(ki.content || ""))}
+                              className="mt-1.5 text-xs leading-relaxed text-slate-700"
+                            />
                             {Array.isArray(ki.provenance) && ki.provenance.length > 0 && (
                               <p className="mt-1.5 text-[11px] text-muted">
                                 Evidence:{" "}
@@ -1077,9 +1170,10 @@ export function SuccessorHandoverOnboarding({
                           </p>
                           <Badge tone="green">Approved</Badge>
                         </div>
-                        <p className="mt-1.5 leading-relaxed text-slate-700">
-                          {String(ki.content || "")}
-                        </p>
+                        <FormattedMarkdown
+                          content={normalizeInlineBullets(String(ki.content || ""))}
+                          className="mt-1.5 text-xs leading-relaxed text-slate-700"
+                        />
                         {Array.isArray(ki.provenance) && ki.provenance.length > 0 && (
                           <p className="mt-2 text-[11px] text-muted">
                             Source:{" "}
@@ -1095,6 +1189,30 @@ export function SuccessorHandoverOnboarding({
                   <div className="rounded-xl border border-dashed border-line p-5 text-xs text-muted">
                     {secDecisions?.insufficient_info_message ||
                       "No human-verified technical decisions with rationale are recorded in this version."}
+                  </div>
+                )}
+
+                {(secArch?.knowledge_items?.length || 0) > 0 && (
+                  <div className="space-y-2.5">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted">
+                      Technical &amp; Architectural Guidance ({secArch?.knowledge_items?.length || 0})
+                    </p>
+                    <ul className="space-y-2.5">
+                      {(secArch?.knowledge_items || []).slice(0, 6).map((ki, idx) => (
+                        <li key={idx} className="rounded-xl border border-line p-4 text-xs">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-semibold text-navy">
+                              {String(ki.title || "Architecture & Technical Context")}
+                            </p>
+                            <Badge tone="blue">Architecture</Badge>
+                          </div>
+                          <FormattedMarkdown
+                            content={normalizeInlineBullets(String(ki.content || ""))}
+                            className="mt-1.5 text-xs leading-relaxed text-slate-700"
+                          />
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 )}
 

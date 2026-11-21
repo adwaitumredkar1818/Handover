@@ -1356,6 +1356,13 @@ export function HandoverLayout({
   const versionParam = searchParams?.get('version')
   const { activeProject, members, user, refreshHandovers } = useLiveApp()
   const { h, project, role } = useHandover(id)
+  const [editOpen, setEditOpen] = useState(false)
+  const [editTitle, setEditTitle] = useState('')
+  const [editDescription, setEditDescription] = useState('')
+  const [editSuccessorId, setEditSuccessorId] = useState('')
+  const [editHandoverType, setEditHandoverType] = useState<'developer' | 'project_manager' | 'technical_lead'>('developer')
+  const [editDue, setEditDue] = useState('')
+  const [isSavingEdit, setIsSavingEdit] = useState(false)
 
   // Canonical package version & eight-domain sections state
   const [versions, setVersions] = useState<HandoverPackageVersionSummary[]>([])
@@ -1630,8 +1637,76 @@ export function HandoverLayout({
   const idx = STAGE_LABELS.findIndex(([k]) => k === h.status)
 
   const isLockedLifecycle = ['approved', 'published', 'completed'].includes(h.status)
+  const stageOrder = ['overview', 'readiness', 'checklists', 'responsibilities', 'review', 'report'] as const
+  const normalizedLayoutTab = tab === 'knowledge' ? 'overview' : tab
+  const activeStageIdx = stageOrder.indexOf(normalizedLayoutTab as (typeof stageOrder)[number])
+  const prevStage = activeStageIdx > 0 ? stageOrder[activeStageIdx - 1] : null
+
+  const openEditModal = () => {
+    setEditTitle(h.scope || '')
+    setEditDescription(h.scope || '')
+    setEditSuccessorId(h.incomingId || '')
+    setEditHandoverType((h.handoverType as 'developer' | 'project_manager' | 'technical_lead') || 'developer')
+    setEditDue(h.due || '')
+    setEditOpen(true)
+  }
+
+  const handleSaveEdit = async () => {
+    if (!isUUID(resolvedProjectId) || !isUUID(h.id)) return
+    setIsSavingEdit(true)
+    try {
+      await api.handover.updateCase(resolvedProjectId, h.id, {
+        title: editTitle.trim() || undefined,
+        description: editDescription.trim() || undefined,
+        successor_id: editSuccessorId || undefined,
+        handover_type: editHandoverType,
+        target_handover_date: editDue || null,
+      })
+      s.toast('Handover updated', 'Case metadata and participants saved.', 'success')
+      setEditOpen(false)
+      await refreshHandovers()
+      retryLoadSections()
+    } catch (err: unknown) {
+      s.toast('Update failed', err instanceof Error ? err.message : 'Unable to save handover details.', 'error')
+    } finally {
+      setIsSavingEdit(false)
+    }
+  }
+
   const actions: ReactNode[] = []
+  if (prevStage) {
+    actions.push(
+      <Button
+        key="prev-stage"
+        variant="secondary"
+        icon={ArrowLeft}
+        onClick={() =>
+          router.push(
+            prevStage === 'review'
+              ? `/handovers/${h.id}/review`
+              : prevStage === 'report'
+              ? `/handovers/${h.id}/report`
+              : prevStage === 'overview'
+              ? `/handovers/${h.id}`
+              : `/handovers/${h.id}?tab=${prevStage}`
+          )
+        }
+      >
+        Previous: {TAB_LABELS[prevStage] || prevStage}
+      </Button>
+    )
+  }
   if (!isLockedLifecycle) {
+    actions.push(
+      <Button
+        key="edit-case"
+        variant="secondary"
+        icon={Pencil}
+        onClick={openEditModal}
+      >
+        Edit Details
+      </Button>
+    )
     actions.push(
       <Button
         key="refresh-draft"
@@ -1874,6 +1949,58 @@ export function HandoverLayout({
         />
       </div>
       {children(h, role, sectionsCtx)}
+      <Modal
+        open={editOpen}
+        onClose={() => setEditOpen(false)}
+        title="Edit Handover Details"
+        subtitle="Update case title, scope, handover type, designated successor, or target date."
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setEditOpen(false)}>
+              Cancel
+            </Button>
+            <Button disabled={isSavingEdit} onClick={() => void handleSaveEdit()}>
+              {isSavingEdit ? 'Saving…' : 'Save Changes'}
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-4">
+          <Field label="Handover Title">
+            <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} />
+          </Field>
+          <Field label="Scope & Notes">
+            <Textarea rows={3} value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
+          </Field>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Handover Type">
+              <Select
+                value={editHandoverType}
+                onChange={(e) => setEditHandoverType(e.target.value as 'developer' | 'project_manager' | 'technical_lead')}
+              >
+                <option value="developer">Developer Handover</option>
+                <option value="project_manager">Project Manager Handover</option>
+                <option value="technical_lead">Technical Lead Handover</option>
+              </Select>
+            </Field>
+            <Field label="Target Handover Date">
+              <Input type="date" value={editDue} onChange={(e) => setEditDue(e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Designated Successor">
+            <Select value={editSuccessorId} onChange={(e) => setEditSuccessorId(e.target.value)}>
+              <option value="">Unassigned</option>
+              {members
+                .filter((m) => m.user_id !== h.outgoingId)
+                .map((m) => (
+                  <option key={m.user_id} value={m.user_id}>
+                    {m.full_name || m.email || m.user_id} ({m.role_name || 'member'})
+                  </option>
+                ))}
+            </Select>
+          </Field>
+        </div>
+      </Modal>
     </>
   )
 }
@@ -1914,7 +2041,7 @@ export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?:
   const { activeProject, members, user, refreshHandovers } = useLiveApp()
   const searchParams = useSearchParams()
   const queryTab = searchParams?.get('tab') as HTab | null
-  const tab = initialTab || queryTab || 'overview'
+  const tab = queryTab || initialTab || 'overview'
   const [open, setOpen] = useState<AnyFinding>()
   const [checklists, setChecklists] = useState<any[]>([])
   const [isLoadingChecklists, setIsLoadingChecklists] = useState(false)

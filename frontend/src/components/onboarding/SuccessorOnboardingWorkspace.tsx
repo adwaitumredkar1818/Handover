@@ -29,6 +29,7 @@ import { Card, CardHeader, Button, Badge } from "../ui";
 import { PageSkeleton } from "../loading";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { api } from "../../lib/api";
+import { getCachedGraph, setCachedGraph } from "../../lib/graphCache";
 import { SuccessorHandoverOnboarding } from "./SuccessorHandoverOnboarding";
 import type {
   EvidenceSummary,
@@ -239,60 +240,102 @@ export function SuccessorOnboardingWorkspace({
 
   const loadWorkspaceData = useCallback(async () => {
     if (!projectId) return;
-    setIsLoading(true);
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId)) {
       setErrorMessage("Invalid project identifier.");
       setIsLoading(false);
       return;
     }
+    const cacheKey = `onboarding_ws:${projectId}`;
+    type OnboardingWorkspaceCache = {
+      project: Project;
+      members: ProjectMember[];
+      handoverCases: HandoverCaseItem[];
+      onboardingRes: {
+        completed_steps?: Record<string, boolean>;
+        steps?: Array<{ step_id: string; is_completed: boolean; completed_at?: string | null }>;
+      } | null;
+      overview: ProjectOverview | null;
+      findings: Record<string, unknown>[];
+      findingsTotal: number;
+      evidence: EvidenceSummary[];
+      sources: ProjectSourceMapping[];
+    };
+    const cached = getCachedGraph<OnboardingWorkspaceCache>(cacheKey, undefined, user?.id);
+    if (cached) {
+      setProject(cached.project);
+      setActiveProject(cached.project);
+      setMembers(cached.members);
+      setHandoverCases(cached.handoverCases);
+      applyOnboardingPayload(cached.onboardingRes);
+      if (cached.overview) setOverview(cached.overview);
+      setFindings(cached.findings || []);
+      setFindingsTotal(cached.findingsTotal || 0);
+      setEvidence(cached.evidence || []);
+      setSources(cached.sources || []);
+      setIsLoading(false);
+    } else {
+      setIsLoading(true);
+    }
     setErrorMessage(null);
     try {
-      const [
-        projRes,
-        overviewRes,
-        membersRes,
-        findingsRes,
-        evidenceRes,
-        sourcesRes,
-        casesRes,
-        onboardingRes,
-      ] = await Promise.all([
+      // Phase 1: only the 4 calls needed to decide General Orientation vs Successor Handover Onboarding
+      const [projRes, membersRes, casesRes, onboardingRes] = await Promise.all([
         api.projects.get(projectId),
-        api.projects.getOverview(projectId).catch(() => null),
         api.members.list(projectId).catch(() => []),
+        api.handover.listCases(projectId).catch(() => ({ items: [], total: 0 })),
+        api.onboarding.getProgress(projectId).catch(() => null),
+      ]);
+
+      setProject(projRes);
+      setActiveProject(projRes);
+      setMembers(membersRes);
+      const casesList = casesRes.items || [];
+      setHandoverCases(casesList);
+      applyOnboardingPayload(onboardingRes);
+      setIsLoading(false);
+
+      // Phase 2: orientation-only extras in background (do not block SuccessorHandoverOnboarding mount)
+      const [overviewRes, findingsRes, evidenceRes, sourcesRes] = await Promise.all([
+        api.projects.getOverview(projectId).catch(() => null),
         api.knowledgeIntelligence
           .listFindings(projectId, undefined, 25, 0)
           .catch(() => ({ items: [], total: 0 })),
         api.evidence.list(projectId, { limit: 10 }).catch(() => []),
         api.sources.listProjectMappings(projectId).catch(() => []),
-        api.handover
-          .listCases(projectId)
-          .catch(() => ({ items: [], total: 0 })),
-        api.onboarding
-          .getProgress(projectId)
-          .catch(() => null),
       ]);
 
-      setProject(projRes);
-      setActiveProject(projRes);
       setOverview(overviewRes);
-      setMembers(membersRes);
       setFindings(findingsRes.items || []);
       setFindingsTotal(findingsRes.total || 0);
       setEvidence(evidenceRes || []);
       setSources(sourcesRes || []);
-      setHandoverCases(casesRes.items || []);
-      applyOnboardingPayload(onboardingRes);
-    } catch (err: unknown) {
-      setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : "Unable to load project onboarding details."
+
+      setCachedGraph(
+        cacheKey,
+        {
+          project: projRes,
+          members: membersRes,
+          handoverCases: casesList,
+          onboardingRes,
+          overview: overviewRes,
+          findings: findingsRes.items || [],
+          findingsTotal: findingsRes.total || 0,
+          evidence: evidenceRes || [],
+          sources: sourcesRes || [],
+        },
+        user?.id
       );
-    } finally {
+    } catch (err: unknown) {
+      if (!cached) {
+        setErrorMessage(
+          err instanceof Error
+            ? err.message
+            : "Unable to load project onboarding details."
+        );
+      }
       setIsLoading(false);
     }
-  }, [applyOnboardingPayload, projectId, setActiveProject]);
+  }, [applyOnboardingPayload, projectId, setActiveProject, user?.id]);
 
   useEffect(() => {
     void loadWorkspaceData();

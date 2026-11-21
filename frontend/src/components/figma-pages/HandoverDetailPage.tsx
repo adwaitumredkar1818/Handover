@@ -991,7 +991,14 @@ export function RecipientWorkspace({ id }: { id: string }) {
                       handoverId={h.id}
                       caseStatus={h.rawStatus || h.status}
                       onRetry={sectionsCtx.retryLoadSections}
-                      onNavigateTab={navigateTab}
+                      onNavigateTab={(nextTab) => {
+                        const matched = CANONICAL_DOMAINS.find((d) => d.tab === nextTab)
+                        if (matched) {
+                          setSelectedDomain(matched.sectionType)
+                        } else {
+                          navigateTab(nextTab)
+                        }
+                      }}
                     />
                   </div>
                 </div>
