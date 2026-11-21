@@ -2986,9 +2986,14 @@ export const api = {
   onboarding: {
     async getProgress(
       projectId: string,
-      targetUserId?: string
+      targetUserId?: string,
+      opts?: { caseId?: string; versionId?: string }
     ): Promise<OnboardingProgressResponse> {
-      const q = targetUserId ? `?target_user_id=${encodeURIComponent(targetUserId)}` : "";
+      const params = new URLSearchParams();
+      if (targetUserId) params.set("target_user_id", targetUserId);
+      if (opts?.caseId) params.set("case_id", opts.caseId);
+      if (opts?.versionId) params.set("version_id", opts.versionId);
+      const q = params.toString() ? `?${params.toString()}` : "";
       return request<OnboardingProgressResponse>(
         `/projects/${projectId}/handover/onboarding/progress${q}`
       );
@@ -2996,10 +3001,15 @@ export const api = {
     async updateStep(
       projectId: string,
       stepId: string,
-      isCompleted: boolean = true
+      isCompleted: boolean = true,
+      opts?: { caseId?: string; versionId?: string }
     ): Promise<OnboardingStepProgressItem> {
+      const params = new URLSearchParams();
+      if (opts?.caseId) params.set("case_id", opts.caseId);
+      if (opts?.versionId) params.set("version_id", opts.versionId);
+      const q = params.toString() ? `?${params.toString()}` : "";
       return request<OnboardingStepProgressItem>(
-        `/projects/${projectId}/handover/onboarding/progress/${encodeURIComponent(stepId)}`,
+        `/projects/${projectId}/handover/onboarding/progress/${encodeURIComponent(stepId)}${q}`,
         {
           method: "PUT",
           body: JSON.stringify({ is_completed: isCompleted }),
@@ -3008,10 +3018,15 @@ export const api = {
     },
     async deleteStep(
       projectId: string,
-      stepId: string
+      stepId: string,
+      opts?: { caseId?: string; versionId?: string }
     ): Promise<{ status: string; step_id: string }> {
+      const params = new URLSearchParams();
+      if (opts?.caseId) params.set("case_id", opts.caseId);
+      if (opts?.versionId) params.set("version_id", opts.versionId);
+      const q = params.toString() ? `?${params.toString()}` : "";
       return request<{ status: string; step_id: string }>(
-        `/projects/${projectId}/handover/onboarding/progress/${encodeURIComponent(stepId)}`,
+        `/projects/${projectId}/handover/onboarding/progress/${encodeURIComponent(stepId)}${q}`,
         {
           method: "DELETE",
         }

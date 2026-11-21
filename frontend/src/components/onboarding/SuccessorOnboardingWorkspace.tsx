@@ -29,6 +29,7 @@ import { Card, CardHeader, Button, Badge } from "../ui";
 import { PageSkeleton } from "../loading";
 import { useLiveApp } from "../../context/LiveAppContext";
 import { api } from "../../lib/api";
+import { SuccessorHandoverOnboarding } from "./SuccessorHandoverOnboarding";
 import type {
   EvidenceSummary,
   HandoverCaseItem,
@@ -125,13 +126,18 @@ function getStatusTone(status: string): "green" | "amber" | "blue" | "gray" {
 
 export function SuccessorOnboardingWorkspace({
   projectId,
+  initialCaseId,
+  initialVersionId,
 }: {
   projectId: string;
+  initialCaseId?: string | null;
+  initialVersionId?: string | null;
 }) {
   const router = useRouter();
   const { user, setActiveProject } = useLiveApp();
 
   const [stepIndex, setStepIndex] = useState(0);
+  const [preferGeneralOrientation, setPreferGeneralOrientation] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
@@ -166,8 +172,7 @@ export function SuccessorOnboardingWorkspace({
           is_completed: boolean;
           completed_at?: string | null;
         }>;
-      } | null,
-      allowLocalMerge: boolean
+      } | null
     ) => {
       const mergedCompleted: Record<string, boolean> = {
         ...(onboardingRes?.completed_steps || {}),
@@ -177,27 +182,10 @@ export function SuccessorOnboardingWorkspace({
         timestamps[s.step_id] = s.completed_at ?? null;
       }
 
-      if (allowLocalMerge && typeof window !== "undefined") {
-        try {
-          const raw = localStorage.getItem(storageKey);
-          if (raw) {
-            const localSteps = JSON.parse(raw) as Record<string, boolean>;
-            for (const [stepId, isDone] of Object.entries(localSteps)) {
-              if (isDone && !mergedCompleted[stepId]) {
-                mergedCompleted[stepId] = true;
-                void api.onboarding.updateStep(projectId, stepId, true).catch(() => {});
-              }
-            }
-          }
-        } catch {
-          // ignore
-        }
-      }
-
       setCompletedSteps(mergedCompleted);
       setStepTimestamps(timestamps);
     },
-    [projectId, storageKey]
+    []
   );
 
   const setStepCompletion = useCallback(
@@ -205,17 +193,7 @@ export function SuccessorOnboardingWorkspace({
       if (isInspectingOther) return;
       setSaveFeedback(null);
       setIsSavingStep(true);
-      setCompletedSteps((prev) => {
-        const next = { ...prev, [id]: nextVal };
-        if (typeof window !== "undefined") {
-          try {
-            localStorage.setItem(storageKey, JSON.stringify(next));
-          } catch {
-            // ignore
-          }
-        }
-        return next;
-      });
+      setCompletedSteps((prev) => ({ ...prev, [id]: nextVal }));
       try {
         const updated = await api.onboarding.updateStep(projectId, id, nextVal);
         setStepTimestamps((prev) => ({
@@ -223,6 +201,7 @@ export function SuccessorOnboardingWorkspace({
           [id]: updated.completed_at ?? null,
         }));
       } catch (err: unknown) {
+        setCompletedSteps((prev) => ({ ...prev, [id]: !nextVal }));
         setSaveFeedback(
           err instanceof Error
             ? `Could not sync step to server: ${err.message}`
@@ -232,7 +211,7 @@ export function SuccessorOnboardingWorkspace({
         setIsSavingStep(false);
       }
     },
-    [isInspectingOther, projectId, storageKey]
+    [isInspectingOther, projectId]
   );
 
   const handleResetProgress = useCallback(async () => {
@@ -249,13 +228,6 @@ export function SuccessorOnboardingWorkspace({
       setCompletedSteps({});
       setStepTimestamps({});
       setStepIndex(0);
-      if (typeof window !== "undefined") {
-        try {
-          localStorage.removeItem(storageKey);
-        } catch {
-          // ignore
-        }
-      }
     } catch (err: unknown) {
       setSaveFeedback(
         err instanceof Error ? err.message : "Unable to reset onboarding progress."
@@ -263,7 +235,7 @@ export function SuccessorOnboardingWorkspace({
     } finally {
       setIsSavingStep(false);
     }
-  }, [completedSteps, isInspectingOther, projectId, storageKey]);
+  }, [completedSteps, isInspectingOther, projectId]);
 
   const loadWorkspaceData = useCallback(async () => {
     if (!projectId) return;
@@ -310,7 +282,7 @@ export function SuccessorOnboardingWorkspace({
       setEvidence(evidenceRes || []);
       setSources(sourcesRes || []);
       setHandoverCases(casesRes.items || []);
-      applyOnboardingPayload(onboardingRes, true);
+      applyOnboardingPayload(onboardingRes);
     } catch (err: unknown) {
       setErrorMessage(
         err instanceof Error
@@ -332,7 +304,7 @@ export function SuccessorOnboardingWorkspace({
     try {
       const target = targetId && targetId !== user?.id ? targetId : undefined;
       const res = await api.onboarding.getProgress(projectId, target);
-      applyOnboardingPayload(res, !target);
+      applyOnboardingPayload(res);
     } catch (err: unknown) {
       setSaveFeedback(
         err instanceof Error ? err.message : "Unable to load member onboarding progress."
@@ -363,6 +335,17 @@ export function SuccessorOnboardingWorkspace({
     );
   }, [user?.id, overview?.successor?.id, myMemberRecord?.transition_role, myRoleKey]);
 
+  const assignedPublishedCases = useMemo(() => {
+    if (!user?.id) return [];
+    return handoverCases.filter((hc) => {
+      const st = (hc.status || "").toLowerCase();
+      const isPublished = st === "published" || st === "completed";
+      const isAssignedToMe =
+        hc.successor_id === user.id || hc.incoming_owner_user_id === user.id;
+      return isPublished && isAssignedToMe;
+    });
+  }, [handoverCases, user?.id]);
+
   const currentStep = ONBOARDING_STEPS[stepIndex] ?? ONBOARDING_STEPS[0];
   const completedCount = useMemo(
     () => ONBOARDING_STEPS.filter((s) => Boolean(completedSteps[s.id])).length,
@@ -371,9 +354,6 @@ export function SuccessorOnboardingWorkspace({
   const completionPct = Math.round((completedCount / ONBOARDING_STEPS.length) * 100);
 
   const handleNext = () => {
-    if (!isInspectingOther) {
-      void setStepCompletion(currentStep.id, true);
-    }
     if (stepIndex < ONBOARDING_STEPS.length - 1) {
       setStepIndex((i) => i + 1);
     }
@@ -400,6 +380,26 @@ export function SuccessorOnboardingWorkspace({
     () => members.find((m) => m.user_id === inspectedMemberId) || null,
     [inspectedMemberId, members]
   );
+
+  if (
+    !isLoading &&
+    !errorMessage &&
+    project &&
+    assignedPublishedCases.length > 0 &&
+    !preferGeneralOrientation
+  ) {
+    return (
+      <SuccessorHandoverOnboarding
+        projectId={projectId}
+        project={project}
+        members={members}
+        publishedCases={assignedPublishedCases}
+        initialCaseId={initialCaseId}
+        initialVersionId={initialVersionId}
+        onSwitchToOrientation={() => setPreferGeneralOrientation(true)}
+      />
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -481,6 +481,46 @@ export function SuccessorOnboardingWorkspace({
           Viewing read-only onboarding checklist for{" "}
           <strong>{inspectedMember.full_name || inspectedMember.email}</strong>. Switch back to
           &ldquo;My Onboarding Progress&rdquo; to update your own steps.
+        </div>
+      )}
+
+      {!isLoading && project && isExplicitSuccessor && assignedPublishedCases.length === 0 && (
+        <div className="flex flex-col justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 sm:flex-row sm:items-center">
+          <div>
+            <p className="font-semibold">No published Handover has been assigned to you yet.</p>
+            <p className="mt-0.5 text-amber-800">
+              Draft or unapproved cases are not eligible for successor onboarding until formally
+              approved and published. You can still complete general project orientation below.
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <Link href={`/projects/${projectId}/handovers`}>
+              <Button size="sm" variant="secondary">
+                Handover Workspace
+              </Button>
+            </Link>
+            <Link href={`/projects/${projectId}`}>
+              <Button size="sm" variant="primary">
+                Project Workspace
+              </Button>
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {!isLoading && project && assignedPublishedCases.length > 0 && preferGeneralOrientation && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-sky-200 bg-sky-50 px-4 py-2.5 text-xs text-sky-900">
+          <span>
+            You are viewing <strong>General Project Orientation</strong>. Your assigned published
+            Handover onboarding is ready whenever you want to return.
+          </span>
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={() => setPreferGeneralOrientation(false)}
+          >
+            Open Successor Handover Onboarding
+          </Button>
         </div>
       )}
 
@@ -678,12 +718,15 @@ export function SuccessorOnboardingWorkspace({
                           : typeof item.domain === "string"
                             ? item.domain
                             : null;
-                      const verif =
-                        typeof item.verification_status === "string"
-                          ? item.verification_status
-                          : typeof item.epistemic_status === "string"
-                            ? item.epistemic_status
-                            : null;
+                      const isHumanApproved =
+                        item.verification_status === "approved" ||
+                        item.review_status === "approved" ||
+                        item.is_human_verified === true;
+                      const verifLabel = isHumanApproved
+                        ? "Human Verified"
+                        : typeof item.verification_status === "string"
+                          ? item.verification_status.replace(/_/g, " ")
+                          : "Pending Review";
 
                       return (
                         <li
@@ -694,11 +737,9 @@ export function SuccessorOnboardingWorkspace({
                             <span className="font-semibold text-navy">{title}</span>
                             <div className="flex flex-wrap items-center gap-1.5">
                               {domain && <Badge tone="blue">{domain}</Badge>}
-                              {verif && (
-                                <Badge tone={getStatusTone(verif)}>
-                                  {verif.replace(/_/g, " ")}
-                                </Badge>
-                              )}
+                              <Badge tone={isHumanApproved ? "green" : "amber"}>
+                                {verifLabel}
+                              </Badge>
                             </div>
                           </div>
                           {body && (
@@ -980,8 +1021,8 @@ export function SuccessorOnboardingWorkspace({
               </div>
             )}
 
-            {/* Footer Navigation */}
-            <div className="mt-6 flex items-center justify-between border-t border-line pt-4">
+            {/* Footer Navigation (Navigation never auto-completes steps) */}
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-4">
               <Button
                 variant="secondary"
                 size="sm"
@@ -991,27 +1032,41 @@ export function SuccessorOnboardingWorkspace({
               >
                 Previous
               </Button>
-              {stepIndex < ONBOARDING_STEPS.length - 1 ? (
-                <Button
-                  variant="primary"
-                  size="sm"
-                  icon={ArrowRight}
-                  disabled={isSavingStep}
-                  onClick={handleNext}
-                >
-                  Save &amp; Continue
-                </Button>
-              ) : (
-                <Button
-                  variant="primary"
-                  size="sm"
-                  icon={CheckCircle2}
-                  disabled={isSavingStep}
-                  onClick={() => void handleCompleteOnboarding()}
-                >
-                  Finish Onboarding
-                </Button>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {!isInspectingOther && stepIndex < ONBOARDING_STEPS.length - 1 && (
+                  <Button
+                    variant={completedSteps[currentStep.id] ? "secondary" : "primary"}
+                    size="sm"
+                    icon={completedSteps[currentStep.id] ? CheckCircle2 : Check}
+                    disabled={isSavingStep}
+                    onClick={() =>
+                      void setStepCompletion(currentStep.id, !completedSteps[currentStep.id])
+                    }
+                  >
+                    {completedSteps[currentStep.id] ? "Reviewed ✓ (Undo)" : "Mark Step Reviewed"}
+                  </Button>
+                )}
+                {stepIndex < ONBOARDING_STEPS.length - 1 ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    iconRight={ArrowRight}
+                    onClick={handleNext}
+                  >
+                    Next Step
+                  </Button>
+                ) : (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={CheckCircle2}
+                    disabled={isSavingStep}
+                    onClick={() => void handleCompleteOnboarding()}
+                  >
+                    Finish Onboarding
+                  </Button>
+                )}
+              </div>
             </div>
           </Card>
         </div>

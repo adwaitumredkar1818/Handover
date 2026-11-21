@@ -11,11 +11,19 @@ function OnboardingRouter() {
   const searchParams = useSearchParams();
   const { activeProject, projects, user } = useLiveApp();
   const queryProjectId = searchParams.get("project");
+  const queryCaseId = searchParams.get("caseId");
+  const queryVersionId = searchParams.get("versionId");
   const effectiveProjectId =
     queryProjectId || activeProject?.id || (user && projects.length > 0 ? projects[0]?.id : null);
 
   if (effectiveProjectId) {
-    return <SuccessorOnboardingWorkspace projectId={effectiveProjectId} />;
+    return (
+      <SuccessorOnboardingWorkspace
+        projectId={effectiveProjectId}
+        initialCaseId={queryCaseId}
+        initialVersionId={queryVersionId}
+      />
+    );
   }
 
   return <AuthPage view="onboarding" />;

@@ -15,6 +15,7 @@ Provides:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
 from datetime import datetime, timezone
@@ -1614,6 +1615,20 @@ def export_handover_package(
 # ---------------------------------------------------------------------------
 
 
+def _onboarding_scope_prefix(
+    case_id: uuid.UUID | None,
+    version_id: uuid.UUID | None,
+) -> str | None:
+    """Return deterministic 20-char prefix scoping onboarding progress to a handover case and version."""
+    if case_id and version_id:
+        digest = hashlib.sha256(f"{case_id}:{version_id}".encode("utf-8")).hexdigest()[:16]
+        return f"sh:{digest}:"
+    if case_id:
+        digest = hashlib.sha256(str(case_id).encode("utf-8")).hexdigest()[:16]
+        return f"sh:{digest}:"
+    return None
+
+
 @router.get(
     "/onboarding/progress",
     response_model=OnboardingProgressResponse,
@@ -1628,6 +1643,12 @@ def get_onboarding_progress(
     target_user_id: uuid.UUID | None = Query(
         None, description="Optional user ID (requires project.manage if not self)"
     ),
+    case_id: uuid.UUID | None = Query(
+        None, description="Optional handover case ID for successor-scoped progress"
+    ),
+    version_id: uuid.UUID | None = Query(
+        None, description="Optional published package version ID for version-scoped progress"
+    ),
 ) -> OnboardingProgressResponse:
     effective_user_id = project_ctx.principal.user.id
     if target_user_id and target_user_id != effective_user_id:
@@ -1637,26 +1658,34 @@ def get_onboarding_progress(
             )
         effective_user_id = target_user_id
 
-    records = (
-        session.execute(
-            select(ProjectOnboardingProgress).where(
-                ProjectOnboardingProgress.project_id == project_ctx.project.id,
-                ProjectOnboardingProgress.user_id == effective_user_id,
+    scope_prefix = _onboarding_scope_prefix(case_id, version_id)
+    stmt = select(ProjectOnboardingProgress).where(
+        ProjectOnboardingProgress.project_id == project_ctx.project.id,
+        ProjectOnboardingProgress.user_id == effective_user_id,
+    )
+    if scope_prefix:
+        stmt = stmt.where(ProjectOnboardingProgress.step_id.like(f"{scope_prefix}%"))
+    else:
+        stmt = stmt.where(~ProjectOnboardingProgress.step_id.like("sh:%"))
+
+    records = session.execute(stmt).scalars().all()
+
+    completed_map: dict[str, bool] = {}
+    items: list[OnboardingStepProgressItem] = []
+    for r in records:
+        display_step = (
+            r.step_id[len(scope_prefix) :]
+            if scope_prefix and r.step_id.startswith(scope_prefix)
+            else r.step_id
+        )
+        completed_map[display_step] = r.is_completed
+        items.append(
+            OnboardingStepProgressItem(
+                step_id=display_step,
+                is_completed=r.is_completed,
+                completed_at=r.completed_at,
             )
         )
-        .scalars()
-        .all()
-    )
-
-    completed_map = {r.step_id: r.is_completed for r in records}
-    items = [
-        OnboardingStepProgressItem(
-            step_id=r.step_id,
-            is_completed=r.is_completed,
-            completed_at=r.completed_at,
-        )
-        for r in records
-    ]
 
     return OnboardingProgressResponse(
         project_id=project_ctx.project.id,
@@ -1679,13 +1708,22 @@ def update_onboarding_step(
         ProjectContext, Depends(require_project_permission("project.read"))
     ],
     session: Annotated[Session, Depends(get_db_session)],
+    case_id: uuid.UUID | None = Query(
+        None, description="Optional handover case ID for successor-scoped progress"
+    ),
+    version_id: uuid.UUID | None = Query(
+        None, description="Optional published package version ID for version-scoped progress"
+    ),
 ) -> OnboardingStepProgressItem:
     clean_step = step_id.strip()
-    if not clean_step or len(clean_step) > 64:
+    if not clean_step or len(clean_step) > 40:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Step ID must be non-empty and at most 64 characters.",
+            detail="Step ID must be non-empty and at most 40 characters.",
         )
+
+    scope_prefix = _onboarding_scope_prefix(case_id, version_id)
+    stored_step_id = f"{scope_prefix}{clean_step}" if scope_prefix else clean_step
 
     user_id = project_ctx.principal.user.id
     record = (
@@ -1693,7 +1731,7 @@ def update_onboarding_step(
             select(ProjectOnboardingProgress).where(
                 ProjectOnboardingProgress.project_id == project_ctx.project.id,
                 ProjectOnboardingProgress.user_id == user_id,
-                ProjectOnboardingProgress.step_id == clean_step,
+                ProjectOnboardingProgress.step_id == stored_step_id,
             )
         )
         .scalars()
@@ -1706,7 +1744,7 @@ def update_onboarding_step(
             organisation_id=project_ctx.project.organisation_id,
             project_id=project_ctx.project.id,
             user_id=user_id,
-            step_id=clean_step,
+            step_id=stored_step_id,
             is_completed=payload.is_completed,
             completed_at=now if payload.is_completed else None,
         )
@@ -1720,7 +1758,7 @@ def update_onboarding_step(
     session.refresh(record)
 
     return OnboardingStepProgressItem(
-        step_id=record.step_id,
+        step_id=clean_step,
         is_completed=record.is_completed,
         completed_at=record.completed_at,
     )
@@ -1737,15 +1775,23 @@ def delete_onboarding_step(
         ProjectContext, Depends(require_project_permission("project.read"))
     ],
     session: Annotated[Session, Depends(get_db_session)],
+    case_id: uuid.UUID | None = Query(
+        None, description="Optional handover case ID for successor-scoped progress"
+    ),
+    version_id: uuid.UUID | None = Query(
+        None, description="Optional published package version ID for version-scoped progress"
+    ),
 ) -> dict[str, str]:
     clean_step = step_id.strip()
+    scope_prefix = _onboarding_scope_prefix(case_id, version_id)
+    stored_step_id = f"{scope_prefix}{clean_step}" if scope_prefix else clean_step
     user_id = project_ctx.principal.user.id
     record = (
         session.execute(
             select(ProjectOnboardingProgress).where(
                 ProjectOnboardingProgress.project_id == project_ctx.project.id,
                 ProjectOnboardingProgress.user_id == user_id,
-                ProjectOnboardingProgress.step_id == clean_step,
+                ProjectOnboardingProgress.step_id == stored_step_id,
             )
         )
         .scalars()
