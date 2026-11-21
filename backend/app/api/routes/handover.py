@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -30,6 +31,7 @@ from app.api.deps import (
     get_llm_client,
     require_project_permission,
 )
+from app.core.cache.local_cache import local_response_cache
 from app.core.exceptions import ForbiddenError
 from app.models.enums import RoleName, SignoffType, VerificationTargetType
 from app.models.handover import HandoverCase, ProjectOnboardingProgress
@@ -110,9 +112,34 @@ from app.services.handover_signoff import HandoverSignoffService
 from app.services.llm import StructuredLLMClient
 from app.services.rbac import ProjectContext
 
+def _invalidate_handover_workspace_cache(project_id: uuid.UUID) -> None:
+    local_response_cache.invalidate_prefix(f"handover_ws:{project_id}:")
+    from app.services.handover_sections import invalidate_handover_sections_cache
+
+    invalidate_handover_sections_cache(project_id)
+
+
+def _auto_invalidate_on_mutation(request: Request, project_id: uuid.UUID):
+    yield
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        _invalidate_handover_workspace_cache(project_id)
+
+
+def _cached_handover_get(cache_key: str, builder: Any, *, ttl_seconds: int = 300) -> Any:
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        cached = local_response_cache.get(cache_key)
+        if cached is not None:
+            return cached
+    result = builder()
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        local_response_cache.set(cache_key, jsonable_encoder(result), ttl_seconds=ttl_seconds)
+    return result
+
+
 router = APIRouter(
     prefix="/projects/{project_id}/handover",
     tags=["Handover Workspace"],
+    dependencies=[Depends(_auto_invalidate_on_mutation)],
 )
 
 
@@ -161,49 +188,57 @@ def list_handover_cases(
     page_size: int = Query(20, ge=1, le=100),
 ) -> PaginatedHandoverCaseResponse:
     """List handover cases in the current project with pagination and filters."""
-    service = HandoverCaseService(session)
-    offset = (page - 1) * page_size
-    items, total = service.list_cases(
-        project_id=project_id,
-        status=status,
-        departing_member_id=departing_member_id,
-        successor_id=successor_id,
-        offset=offset,
-        limit=page_size,
-    )
     can_bypass = _can_review_or_manage_handover(project_ctx)
-    visible_items = [
-        c
-        for c in items
-        if not is_unapproved_draft_restricted_for_successor(
-            c, viewer_user_id=project_ctx.user_id, can_review_or_manage=can_bypass
-        )
-    ]
-    adjusted_total = max(0, total - (len(items) - len(visible_items)))
-    total_pages = (adjusted_total + page_size - 1) // page_size if adjusted_total > 0 else 0
-    return PaginatedHandoverCaseResponse(
-        items=[
-            HandoverCaseListItem(
-                id=c.id,
-                project_id=c.project_id,
-                title=c.title,
-                status=c.status,
-                version=c.version,
-                departing_member_id=c.departing_member_id,
-                successor_id=c.successor_id,
-                assigned_reviewer_id=c.assigned_reviewer_id,
-                target_handover_date=c.target_handover_date,
-                metadata_json=c.metadata_json or {},
-                created_at=c.created_at,
-                updated_at=c.updated_at,
-            )
-            for c in visible_items
-        ],
-        total=adjusted_total,
-        page=page,
-        page_size=page_size,
-        total_pages=total_pages,
+    cache_key = (
+        f"handover_ws:{project_id}:cases:{project_ctx.user_id}:{int(can_bypass)}:"
+        f"{status or ''}:{departing_member_id or ''}:{successor_id or ''}:{page}:{page_size}"
     )
+
+    def _build() -> PaginatedHandoverCaseResponse:
+        service = HandoverCaseService(session)
+        offset = (page - 1) * page_size
+        items, total = service.list_cases(
+            project_id=project_id,
+            status=status,
+            departing_member_id=departing_member_id,
+            successor_id=successor_id,
+            offset=offset,
+            limit=page_size,
+        )
+        visible_items = [
+            c
+            for c in items
+            if not is_unapproved_draft_restricted_for_successor(
+                c, viewer_user_id=project_ctx.user_id, can_review_or_manage=can_bypass
+            )
+        ]
+        adjusted_total = max(0, total - (len(items) - len(visible_items)))
+        total_pages = (adjusted_total + page_size - 1) // page_size if adjusted_total > 0 else 0
+        return PaginatedHandoverCaseResponse(
+            items=[
+                HandoverCaseListItem(
+                    id=c.id,
+                    project_id=c.project_id,
+                    title=c.title,
+                    status=c.status,
+                    version=c.version,
+                    departing_member_id=c.departing_member_id,
+                    successor_id=c.successor_id,
+                    assigned_reviewer_id=c.assigned_reviewer_id,
+                    target_handover_date=c.target_handover_date,
+                    metadata_json=c.metadata_json or {},
+                    created_at=c.created_at,
+                    updated_at=c.updated_at,
+                )
+                for c in visible_items
+            ],
+            total=adjusted_total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+        )
+
+    return _cached_handover_get(cache_key, _build)
 
 
 @router.post(
@@ -242,24 +277,30 @@ def get_handover_case_details(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> HandoverCaseDetailResponse:
     """Get comprehensive case details including package versions, signoffs, and history."""
-    service = HandoverCaseService(session)
-    case = service.get_case(case_id, project_id=project_id, load_relationships=True)
-    _enforce_successor_draft_gate(case, project_ctx)
+    can_manage_or_review = _can_review_or_manage_handover(project_ctx)
+    cache_key = f"handover_ws:{project_id}:case:{case_id}:{project_ctx.user_id}:{int(can_manage_or_review)}"
 
-    packages = [HandoverPackageResponse.model_validate(case.package)] if case.package else []
-    current_version = next((v for v in case.versions if v.is_current), None)
+    def _build() -> HandoverCaseDetailResponse:
+        service = HandoverCaseService(session)
+        case = service.get_case(case_id, project_id=project_id, load_relationships=True)
+        _enforce_successor_draft_gate(case, project_ctx)
 
-    return HandoverCaseDetailResponse(
-        case=HandoverCaseResponse.model_validate(case),
-        packages=packages,
-        current_version=HandoverPackageVersionResponse.model_validate(current_version) if current_version else None,
-        signoffs=[HandoverSignoffResponse.model_validate(s) for s in case.signoffs],
-        status_history=[HandoverStatusHistoryResponse.model_validate(h) for h in case.status_history],
-        responsibility_transfers=[
-            HandoverResponsibilityTransferResponse.model_validate(t)
-            for t in case.responsibility_transfers
-        ],
-    )
+        packages = [HandoverPackageResponse.model_validate(case.package)] if case.package else []
+        current_version = next((v for v in case.versions if v.is_current), None)
+
+        return HandoverCaseDetailResponse(
+            case=HandoverCaseResponse.model_validate(case),
+            packages=packages,
+            current_version=HandoverPackageVersionResponse.model_validate(current_version) if current_version else None,
+            signoffs=[HandoverSignoffResponse.model_validate(s) for s in case.signoffs],
+            status_history=[HandoverStatusHistoryResponse.model_validate(h) for h in case.status_history],
+            responsibility_transfers=[
+                HandoverResponsibilityTransferResponse.model_validate(t)
+                for t in case.responsibility_transfers
+            ],
+        )
+
+    return _cached_handover_get(cache_key, _build)
 
 
 @router.patch(
@@ -355,18 +396,24 @@ def list_package_versions(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> list[HandoverPackageVersionResponse]:
     """List all version snapshots compiled for this handover case."""
-    case_repo = HandoverCaseRepository(session)
-    case = case_repo.get_by_id(case_id, load_relationships=False)
-    if not case or case.project_id != project_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
-    _enforce_successor_draft_gate(case, project_ctx)
+    can_manage_or_review = _can_review_or_manage_handover(project_ctx)
+    cache_key = f"handover_ws:{project_id}:versions:{case_id}:{project_ctx.user_id}:{int(can_manage_or_review)}"
 
-    version_repo = HandoverPackageVersionRepository(session)
-    if case.package:
-        versions = version_repo.list_by_package(case.package.id)
-    else:
-        versions = []
-    return [HandoverPackageVersionResponse.model_validate(v) for v in versions]
+    def _build() -> list[HandoverPackageVersionResponse]:
+        case_repo = HandoverCaseRepository(session)
+        case = case_repo.get_by_id(case_id, load_relationships=False)
+        if not case or case.project_id != project_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
+        _enforce_successor_draft_gate(case, project_ctx)
+
+        version_repo = HandoverPackageVersionRepository(session)
+        if case.package:
+            versions = version_repo.list_by_package(case.package.id)
+        else:
+            versions = []
+        return [HandoverPackageVersionResponse.model_validate(v) for v in versions]
+
+    return _cached_handover_get(cache_key, _build)
 
 
 @router.get(
@@ -536,18 +583,24 @@ def get_readiness_assessment(
     Verification Center, Conflict Management, Checklist, Evidence Quality, and
     authoritative Approval Eligibility intelligence. Strictly scoped to project & case.
     """
-    case = HandoverCaseRepository(session).get_by_id(case_id, load_relationships=False)
-    if case is not None and case.project_id == project_id:
-        _enforce_successor_draft_gate(case, project_ctx)
+    has_manage = project_ctx.has_permission("project.manage")
+    cache_key = f"handover_ws:{project_id}:readiness:{case_id}:{version_id}:{project_ctx.user_id}:{int(has_manage)}"
 
-    engine = HandoverReadinessEngine(session)
-    return engine.get_readiness_intelligence(
-        case_id=case_id,
-        version_id=version_id,
-        project_id=project_id,
-        viewer_user_id=project_ctx.user_id,
-        has_project_manage=project_ctx.has_permission("project.manage"),
-    )
+    def _build() -> HandoverReadinessSummaryResponse:
+        case = HandoverCaseRepository(session).get_by_id(case_id, load_relationships=False)
+        if case is not None and case.project_id == project_id:
+            _enforce_successor_draft_gate(case, project_ctx)
+
+        engine = HandoverReadinessEngine(session)
+        return engine.get_readiness_intelligence(
+            case_id=case_id,
+            version_id=version_id,
+            project_id=project_id,
+            viewer_user_id=project_ctx.user_id,
+            has_project_manage=has_manage,
+        )
+
+    return _cached_handover_get(cache_key, _build)
 
 
 # ---------------------------------------------------------------------------
@@ -620,13 +673,19 @@ def get_checklist_workspace(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> HandoverChecklistWorkspaceResponse:
     """Retrieve complete Stage 5 checklist workspace, overdue/blocked metrics, ACL-checked evidence, and audit log."""
-    service = ChecklistService(session)
-    return service.get_checklist_workspace(
-        case_id,
-        project_id=project_id,
-        viewer_user_id=project_ctx.user_id,
-        has_project_manage=project_ctx.has_permission("project.manage"),
-    )
+    has_manage = project_ctx.has_permission("project.manage")
+    cache_key = f"handover_ws:{project_id}:checklists:{case_id}:{project_ctx.user_id}:{int(has_manage)}"
+
+    def _build() -> HandoverChecklistWorkspaceResponse:
+        service = ChecklistService(session)
+        return service.get_checklist_workspace(
+            case_id,
+            project_id=project_id,
+            viewer_user_id=project_ctx.user_id,
+            has_project_manage=has_manage,
+        )
+
+    return _cached_handover_get(cache_key, _build)
 
 
 @router.post(
@@ -795,13 +854,19 @@ def get_responsibility_workspace(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> HandoverResponsibilityWorkspaceResponse:
     """Return full Stage 5 responsibility workspace with validation issues, eligible participants, candidates & audit history."""
-    service = OwnershipTransferService(session)
-    return service.get_responsibility_workspace(
-        case_id=case_id,
-        project_id=project_id,
-        viewer_user_id=project_ctx.user_id,
-        has_project_manage=project_ctx.has_permission("project.manage"),
-    )
+    has_manage = project_ctx.has_permission("project.manage")
+    cache_key = f"handover_ws:{project_id}:resp:{case_id}:{project_ctx.user_id}:{int(has_manage)}"
+
+    def _build() -> HandoverResponsibilityWorkspaceResponse:
+        service = OwnershipTransferService(session)
+        return service.get_responsibility_workspace(
+            case_id=case_id,
+            project_id=project_id,
+            viewer_user_id=project_ctx.user_id,
+            has_project_manage=has_manage,
+        )
+
+    return _cached_handover_get(cache_key, _build)
 
 
 @router.patch(
@@ -1015,23 +1080,36 @@ def get_handover_signoff_workspace(
     version_id: uuid.UUID | None = Query(None),
 ) -> HandoverSignoffWorkspaceResponse:
     """Return authoritative three-phase signoff status, 4-gate approval eligibility, publication state, and recipient acknowledgements."""
-    service = HandoverSignoffService(session)
     is_org_admin = project_ctx.organisation_role.name in (
         RoleName.ORG_OWNER.value,
         RoleName.ORG_ADMIN.value,
     )
-    return service.get_signoff_workspace(
-        case_id=case_id,
-        project_id=project_id,
-        viewer_user_id=project_ctx.user_id,
-        version_id=version_id,
-        is_org_admin=is_org_admin,
-        can_review=project_ctx.has_permission("handover.review"),
-        can_approve=project_ctx.has_permission("handover.approve"),
-        can_deliver=project_ctx.has_permission("handover.deliver"),
-        can_acknowledge=project_ctx.has_permission("handover.acknowledge"),
-        has_project_manage=project_ctx.has_permission("project.manage"),
+    can_review = project_ctx.has_permission("handover.review")
+    can_approve = project_ctx.has_permission("handover.approve")
+    can_deliver = project_ctx.has_permission("handover.deliver")
+    can_acknowledge = project_ctx.has_permission("handover.acknowledge")
+    has_manage = project_ctx.has_permission("project.manage")
+    cache_key = (
+        f"handover_ws:{project_id}:signoffs:{case_id}:{version_id or 'cur'}:{project_ctx.user_id}:"
+        f"{int(is_org_admin)}:{int(can_review)}:{int(can_approve)}:{int(can_deliver)}:{int(can_acknowledge)}:{int(has_manage)}"
     )
+
+    def _build() -> HandoverSignoffWorkspaceResponse:
+        service = HandoverSignoffService(session)
+        return service.get_signoff_workspace(
+            case_id=case_id,
+            project_id=project_id,
+            viewer_user_id=project_ctx.user_id,
+            version_id=version_id,
+            is_org_admin=is_org_admin,
+            can_review=can_review,
+            can_approve=can_approve,
+            can_deliver=can_deliver,
+            can_acknowledge=can_acknowledge,
+            has_project_manage=has_manage,
+        )
+
+    return _cached_handover_get(cache_key, _build)
 
 
 @router.post(

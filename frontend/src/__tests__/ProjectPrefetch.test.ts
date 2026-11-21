@@ -14,7 +14,34 @@ const mockGetTraceability = vi.fn(async (..._args: unknown[]) => ({ chains: [{ i
 const mockGetDependencies = vi.fn(async (..._args: unknown[]) => ({ nodes: [{ id: "d1" }], edges: [], cycles: [], root_blockers: [] }));
 const mockGetTimeline = vi.fn(async (..._args: unknown[]) => ({ items: [{ id: "ev1" }] }));
 
+const mockGetVerifSummary = vi.fn(async (..._args: unknown[]) => ({ project_id: "proj-123", total_cases: 1 }));
+const mockGetVerifQueue = vi.fn(async (..._args: unknown[]) => ({
+  items: [{ id: "vc-1" }],
+  total: 1,
+  limit: 50,
+  offset: 0,
+  available_domains: [],
+  available_sources: [],
+  available_people: [],
+  case_details: {
+    "vc-1": { id: "vc-1", case_status: "pending_review", evidence_references: [] },
+  },
+}));
+
+vi.mock("../lib/verificationApi", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/verificationApi")>();
+  return {
+    ...actual,
+    verificationApi: {
+      ...actual.verificationApi,
+      getSummary: (...args: unknown[]) => mockGetVerifSummary(...args),
+      getQueue: (...args: unknown[]) => mockGetVerifQueue(...args),
+    },
+  };
+});
+
 vi.mock("../lib/api", () => ({
+  getApiBaseUrl: () => "http://127.0.0.1:8000/api/v1",
   api: {
     knowledgeIntelligence: {
       listFindings: (...args: unknown[]) => mockListFindings(...args),
@@ -38,6 +65,7 @@ vi.mock("../lib/api", () => ({
 }));
 
 import { prefetchProjectAssets } from "../lib/projectPrefetch";
+import { DEFAULT_VERIFICATION_FILTERS } from "../lib/verificationApi";
 
 describe("prefetchProjectAssets", () => {
   beforeEach(() => {
@@ -49,6 +77,8 @@ describe("prefetchProjectAssets", () => {
   it("warms all Knowledge Intelligence and Relationship Explorer graph caches and skips subsequent redundant calls", async () => {
     await prefetchProjectAssets("proj-123", "user-1");
 
+    expect(mockGetVerifSummary).toHaveBeenCalledTimes(1);
+    expect(mockGetVerifQueue).toHaveBeenCalledTimes(1);
     expect(mockListFindings).toHaveBeenCalledTimes(1);
     expect(mockGetKiGraph).toHaveBeenCalledTimes(3);
     expect(mockGetContributorsGraph).toHaveBeenCalledTimes(1);
@@ -80,10 +110,24 @@ describe("prefetchProjectAssets", () => {
     expect(getCachedGraph("rel_attributions:proj-123", undefined, "user-1")).toEqual([{ id: "attr1" }]);
     expect(getCachedGraph("rel_traceability:proj-123", undefined, "user-1")).toBeTruthy();
     expect(getCachedGraph("rel_dependencies:proj-123", undefined, "user-1")).toBeTruthy();
+    expect(
+      getCachedGraph(
+        `verif_q:proj-123:${JSON.stringify(DEFAULT_VERIFICATION_FILTERS)}`,
+        undefined,
+        "user-1"
+      )
+    ).toBeTruthy();
+    expect(getCachedGraph("verif_case:proj-123:vc-1", undefined, "user-1")).toEqual({
+      id: "vc-1",
+      case_status: "pending_review",
+      evidence_references: [],
+    });
     expect(getCachedGraph("rel_timeline:proj-123", undefined, "user-1")).toEqual([{ id: "ev1" }]);
 
     // Second call skips all network requests since everything is cached
     await prefetchProjectAssets("proj-123", "user-1");
+    expect(mockGetVerifSummary).toHaveBeenCalledTimes(1);
+    expect(mockGetVerifQueue).toHaveBeenCalledTimes(1);
     expect(mockListFindings).toHaveBeenCalledTimes(1);
     expect(mockGetKiGraph).toHaveBeenCalledTimes(3);
     expect(mockGetRelGraph).toHaveBeenCalledTimes(1);

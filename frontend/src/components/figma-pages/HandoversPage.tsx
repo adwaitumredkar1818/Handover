@@ -477,8 +477,9 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
       ? projectParam
       : activeProject?.id || availableProjects[0]?.id || ''
   )
-  const [pidMembers, setPidMembers] = useState<Array<{ user_id?: string; id: string; full_name?: string | null; email?: string | null; role_name?: string | null }>>([])
-  const [orgTeamMembers, setOrgTeamMembers] = useState<Array<{ user_id?: string; id: string; full_name?: string | null; email?: string | null; role_name?: string | null }>>([])
+  const [pidMembers, setPidMembers] = useState<Array<{ user_id?: string; id: string; full_name?: string | null; user_full_name?: string | null; email?: string | null; user_email?: string | null; role_name?: string | null }>>([])
+  const [orgTeamMembers, setOrgTeamMembers] = useState<Array<{ user_id?: string; id: string; full_name?: string | null; user_full_name?: string | null; email?: string | null; user_email?: string | null; role_name?: string | null }>>([])
+  const [isLoadingStepMembers, setIsLoadingStepMembers] = useState(false)
 
   useEffect(() => {
     if (activeProject?.id && (!pid || !isUUID(pid) || pid === 'northwind')) {
@@ -492,6 +493,7 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
       setPidMembers([])
       return
     }
+    setIsLoadingStepMembers(true)
     api.members
       .list(pid)
       .then((res) => {
@@ -499,6 +501,9 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
       })
       .catch(() => {
         if (!cancelled) setPidMembers([])
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingStepMembers(false)
       })
     return () => {
       cancelled = true
@@ -528,15 +533,28 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
 
   const projectMembers = useMemo(() => {
     const byId = new Map<string, { personId: string; name: string; role: string; email: string }>()
-    const addList = (list: Array<{ user_id?: string; id: string; full_name?: string | null; email?: string | null; role_name?: string | null }>, fallbackRole: string) => {
+    const addList = (
+      list: Array<{
+        user_id?: string
+        id: string
+        full_name?: string | null
+        user_full_name?: string | null
+        email?: string | null
+        user_email?: string | null
+        role_name?: string | null
+      }>,
+      fallbackRole: string
+    ) => {
       for (const m of list) {
         const personId = m.user_id || m.id
         if (!personId || byId.has(personId)) continue
+        const resolvedName = m.full_name || m.user_full_name
+        const resolvedEmail = m.email || m.user_email || ''
         byId.set(personId, {
           personId,
-          name: m.full_name || (m.email ? m.email.split('@')[0] : '') || 'Member',
+          name: resolvedName || (resolvedEmail ? resolvedEmail.split('@')[0] : '') || 'Member',
           role: m.role_name || fallbackRole,
-          email: m.email || '',
+          email: resolvedEmail,
         })
       }
     }
@@ -856,6 +874,9 @@ export function CreateHandover({ defaultProjectId }: { defaultProjectId?: string
             <>
               <h2 className="mt-1 text-lg font-semibold text-navy">Select outgoing and incoming members</h2>
               <p className="mt-1 text-sm text-muted">The outgoing member verifies findings; the incoming member receives the published handover (optional at creation).</p>
+              {isLoadingStepMembers && (
+                <p className="mt-2 text-xs text-muted">Loading project &amp; organisation team members…</p>
+              )}
               <div className="mt-6 grid items-end gap-4 sm:grid-cols-[1fr_auto_1fr]">
                 <Field label="Outgoing member">
                   <Select value={out} onChange={(e) => setOut(e.target.value)}>
@@ -1628,7 +1649,7 @@ export function HandoverLayout({
       key="assistant"
       variant="secondary"
       icon={Bot}
-      onClick={() => router.push(`/handovers/${h.id}/assistant`)}
+      onClick={() => router.push('/assistant')}
     >
       Ask Assistant
     </Button>
@@ -1833,17 +1854,6 @@ export function HandoverLayout({
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-2">
-              <span className="hidden items-center gap-1.5 sm:flex"><Eye className="size-3.5" />View as</span>
-              <Segmented
-                value={role}
-                onChange={(v) => s.setPerspective((m) => ({ ...m, [h.id]: v }))}
-                options={(['manager', 'outgoing', 'incoming'] as const).map((r) => ({
-                  id: r,
-                  label: ROLE_LABEL[r].replace(' Member', '').replace('Project ', '')
-                }))}
-              />
-            </div>
           </div>
         </Card>
         <Tabs
@@ -1998,6 +2008,8 @@ export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?:
             router.push(`/handovers/${h.id}/review`)
           } else if (nextTab === 'recipient') {
             router.push(`/handovers/${h.id}/recipient`)
+          } else if (nextTab === 'report') {
+            router.push(`/handovers/${h.id}/report`)
           } else {
             router.push(`/handovers/${h.id}?tab=${nextTab}${versionSuffix}`)
           }

@@ -43,6 +43,7 @@ import {
   cn,
 } from '../figma-ui/index'
 import { CardSkeleton } from '../loading'
+import { getCachedGraph, setCachedGraph } from '../../lib/graphCache'
 import { api } from '../../lib/api'
 import type {
   HandoverDeliveryRecord,
@@ -176,11 +177,21 @@ export function SignoffApprovalPanel({
 
   const loadWorkspace = useCallback(async () => {
     if (!projectId || !caseId) return
-    setIsLoading(true)
+    const cacheKey = `handover_signoff_ws:${projectId}:${caseId}:${selectedVersionId || 'cur'}`
+    const cached = getCachedGraph<HandoverSignoffWorkspaceResponse>(cacheKey)
+    if (cached) {
+      setWorkspace(cached)
+      if (cached.assigned_reviewer_id) setSelectedReviewerId(cached.assigned_reviewer_id)
+      if (cached.successor_id) setPublishRecipientIds([cached.successor_id])
+      setIsLoading(false)
+    } else {
+      setIsLoading(true)
+    }
     setError(null)
     try {
       const data = await api.handover.getSignoffWorkspace(projectId, caseId, selectedVersionId)
       setWorkspace(data)
+      setCachedGraph(cacheKey, data)
       if (data.assigned_reviewer_id) {
         setSelectedReviewerId(data.assigned_reviewer_id)
       }
@@ -188,7 +199,9 @@ export function SignoffApprovalPanel({
         setPublishRecipientIds([data.successor_id])
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to load signoff and publication workspace.')
+      if (!cached) {
+        setError(err instanceof Error ? err.message : 'Failed to load signoff and publication workspace.')
+      }
     } finally {
       setIsLoading(false)
     }
@@ -515,6 +528,101 @@ export function SignoffApprovalPanel({
                   {formatLabel(st)}
                 </Badge>
               ))}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line/70 pt-3">
+              {(() => {
+                const p1 = workspace.phases.find((ph) => ph.phase_number === 1)
+                const p2 = workspace.phases.find((ph) => ph.phase_number === 2)
+                if (p1?.viewer_can_act && p1.status !== 'completed') {
+                  return (
+                    <Button
+                      size="sm"
+                      icon={Send}
+                      onClick={() => {
+                        setDecisionComments('')
+                        setDecisionConditions('')
+                        setAffectedSections([])
+                        setDecisionModal({
+                          signoffType: 'departing_signoff',
+                          decision: 'approved',
+                          title: 'Submit Phase 1 Departing Sign-Off',
+                          subtitle: `Confirm package v${workspace.selected_version_number} is complete and ready for independent review.`,
+                        })
+                      }}
+                    >
+                      Next Step: Submit Phase 1 Sign-Off
+                    </Button>
+                  )
+                }
+                if (p2?.viewer_can_act && p2.status !== 'completed') {
+                  return (
+                    <Button
+                      size="sm"
+                      variant="success"
+                      icon={ShieldCheck}
+                      disabled={Boolean(elig && !elig.is_eligible_for_approval)}
+                      onClick={() => {
+                        setDecisionComments('')
+                        setDecisionConditions('')
+                        setAffectedSections([])
+                        setDecisionModal({
+                          signoffType: 'reviewer_approval',
+                          decision: 'approved',
+                          title: 'Approve Handover Package',
+                          subtitle: `Grant Phase 2 approval for immutable package v${workspace.selected_version_number}.`,
+                        })
+                      }}
+                    >
+                      Next Step: Approve Handover Package
+                    </Button>
+                  )
+                }
+                if (p2 && p2.status !== 'completed' && !pub.is_published) {
+                  return (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      icon={UserCheck}
+                      onClick={() => setAssignModalOpen(true)}
+                    >
+                      Next Step: Assign Independent Reviewer
+                    </Button>
+                  )
+                }
+                if (pub.is_eligible_to_publish && !pub.is_published) {
+                  return (
+                    <Button
+                      size="sm"
+                      icon={Send}
+                      onClick={() => setPublishModalOpen(true)}
+                    >
+                      Next Step: Publish Approved Package
+                    </Button>
+                  )
+                }
+                if (pub.is_published) {
+                  return (
+                    <>
+                      <Button
+                        size="sm"
+                        icon={BookOpen}
+                        onClick={() => navTab('recipient')}
+                      >
+                        Next Step: Open Recipient View
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        icon={FileCheck2}
+                        onClick={() => navTab('report')}
+                      >
+                        Export Final Report
+                      </Button>
+                    </>
+                  )
+                }
+                return null
+              })()}
             </div>
           </div>
 

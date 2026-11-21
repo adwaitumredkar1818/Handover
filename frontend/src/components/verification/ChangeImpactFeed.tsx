@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { SourceIcon } from "../brand/brand";
 import { api } from "../../lib/api";
+import { getCachedGraph, setCachedGraph } from "../../lib/graphCache";
 import type { ChangeImpactItem } from "../../types/verification";
 
 interface ChangeImpactFeedProps {
@@ -40,16 +41,32 @@ export function ChangeImpactFeed({ projectId, onSelectFinding }: ChangeImpactFee
   const [searchQuery, setSearchQuery] = useState("");
 
   const loadFeed = useCallback(async (isRefresh = false) => {
-    if (isRefresh) setRefreshing(true);
-    else setLoading(true);
+    const cacheKey = `verif_change_impact:${projectId}`;
+    const cached = !isRefresh
+      ? getCachedGraph<{ items: ChangeImpactItem[]; total: number }>(cacheKey)
+      : null;
+    if (cached) {
+      setItems(cached.items || []);
+      setTotal(cached.total || 0);
+      setLoading(false);
+    } else if (isRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     setError(null);
 
     try {
       const res = await api.verification.getChangeImpact(projectId, 100, 0);
-      setItems(res.items || []);
-      setTotal(res.total || 0);
+      const nextItems = res.items || [];
+      const nextTotal = res.total || 0;
+      setCachedGraph(cacheKey, { items: nextItems, total: nextTotal });
+      setItems(nextItems);
+      setTotal(nextTotal);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load change impact feed.");
+      if (!cached) {
+        setError(err instanceof Error ? err.message : "Failed to load change impact feed.");
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);

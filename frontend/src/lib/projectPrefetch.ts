@@ -1,6 +1,6 @@
 import { api } from "./api";
 import { getCachedGraph, setCachedGraph } from "./graphCache";
-import { verificationApi } from "./verificationApi";
+import { DEFAULT_VERIFICATION_FILTERS, verificationApi } from "./verificationApi";
 
 const inFlightPrefetches = new Map<string, Promise<void>>();
 const PREFETCH_CONCURRENCY = 1;
@@ -44,6 +44,26 @@ export function prefetchProjectAssets(
 
   const job = (async () => {
     const tasks: Array<() => Promise<unknown>> = [];
+
+    // 0. Verification Center: Summary + Findings Queue + inline Case Details
+    const verifKey = `verif_q:${projectId}:${JSON.stringify(DEFAULT_VERIFICATION_FILTERS)}`;
+    if (!getCachedGraph(verifKey, undefined, userId)) {
+      tasks.push(() =>
+        Promise.all([
+          verificationApi.getSummary(projectId),
+          verificationApi.getQueue(projectId, DEFAULT_VERIFICATION_FILTERS),
+        ])
+          .then(([summary, queue]) => {
+            setCachedGraph(verifKey, { summary, queue }, userId);
+            if (queue.case_details) {
+              for (const [cid, detail] of Object.entries(queue.case_details)) {
+                setCachedGraph(`verif_case:${projectId}:${cid}`, detail, userId);
+              }
+            }
+          })
+          .catch(() => {})
+      );
+    }
 
     // 1. Knowledge Intelligence: Domains + 3 graph modes
     const kiDomainsKey = `ki_domains:${projectId}:all`;
@@ -368,13 +388,20 @@ export async function prefetchAllWorkspaceProjects(
             .catch(() => {});
         },
         () => {
-          const key = `verif_q:${pid}:${JSON.stringify({ limit: 50, offset: 0 })}`;
+          const key = `verif_q:${pid}:${JSON.stringify(DEFAULT_VERIFICATION_FILTERS)}`;
           if (getCachedGraph(key, undefined, userId)) return Promise.resolve();
           return Promise.all([
             verificationApi.getSummary(pid),
-            verificationApi.getQueue(pid, { limit: 50, offset: 0 }),
+            verificationApi.getQueue(pid, DEFAULT_VERIFICATION_FILTERS),
           ])
-            .then(([summary, queue]) => setCachedGraph(key, { summary, queue }, userId))
+            .then(([summary, queue]) => {
+              setCachedGraph(key, { summary, queue }, userId);
+              if (queue.case_details) {
+                for (const [cid, detail] of Object.entries(queue.case_details)) {
+                  setCachedGraph(`verif_case:${pid}:${cid}`, detail, userId);
+                }
+              }
+            })
             .catch(() => {});
         },
         () => {

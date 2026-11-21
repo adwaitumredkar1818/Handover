@@ -16,6 +16,7 @@ import {
   Input, Modal, Select, Textarea, cn
 } from '../figma-ui/index'
 import { Logo } from '../figma-ui/brand'
+import { FormattedMarkdown } from '../figma-ui/FormattedMarkdown'
 import {
   HandoverLayout, HandoverNotFound, useHandover, HandoverWorkspace, Link,
   getMemberDisplayName, HANDOVER_TYPE_LABELS, isUUID
@@ -57,6 +58,8 @@ export function Review({ id }: { id: string }) {
             router.push(`/handovers/${h.id}/review`)
           } else if (nextTab === 'recipient') {
             router.push(`/handovers/${h.id}/recipient`)
+          } else if (nextTab === 'report') {
+            router.push(`/handovers/${h.id}/report`)
           } else {
             router.push(`/handovers/${h.id}?tab=${nextTab}${versionSuffix}`)
           }
@@ -419,7 +422,7 @@ export function Report({ id }: { id: string }) {
                             .map(([label, text]) => (
                               <div key={label} className="handover-finding-card rounded-lg border border-line bg-slate-50/40 p-3.5">
                                 <p className="font-semibold text-navy">{label}</p>
-                                <p className="mt-1 whitespace-pre-wrap text-[13px] text-slate-700">{text}</p>
+                                <FormattedMarkdown content={text || ''} className="mt-1.5 text-[13px] text-slate-700" />
                               </div>
                             ))}
                         </div>
@@ -492,7 +495,7 @@ export function Report({ id }: { id: string }) {
                                   <Badge tone="blue">Consolidated ({consolidatedCount} findings)</Badge>
                                 )}
                               </div>
-                              <p className="mt-1 whitespace-pre-wrap text-[13px] text-slate-700">{ki.content}</p>
+                              <FormattedMarkdown content={ki.content || ''} className="mt-1.5 text-[13px] text-slate-700" />
                               <p className="mt-1.5 text-[11px] text-muted">
                                 {ki.provenance_available
                                   ? `Sources: ${ki.provenance.slice(0, 8).map((ev) => ev.source_name || 'Restricted').join(', ')}${ki.provenance.length > 8 ? ` (+${ki.provenance.length - 8} more)` : ''}`
@@ -576,7 +579,7 @@ export function Report({ id }: { id: string }) {
                                 {ki.title}
                                 <ShieldCheck className="ml-1.5 inline size-3.5 text-ok" />
                               </p>
-                              <p className="mt-1 whitespace-pre-wrap text-[13px] text-slate-700">{ki.content}</p>
+                              <FormattedMarkdown content={ki.content || ''} className="mt-1.5 text-[13px] text-slate-700" />
                               <p className="mt-1.5 text-[11px] text-muted">
                                 {ki.provenance_available
                                   ? `Sources: ${ki.provenance.map((ev) => ev.source_name).join(', ')}`
@@ -671,6 +674,8 @@ export function RecipientWorkspace({ id }: { id: string }) {
             router.push(`/handovers/${h.id}/review`)
           } else if (nextTab === 'recipient') {
             router.push(`/handovers/${h.id}/recipient`)
+          } else if (nextTab === 'report') {
+            router.push(`/handovers/${h.id}/report`)
           } else {
             router.push(`/handovers/${h.id}?tab=${nextTab}${versionSuffix}`)
           }
@@ -734,7 +739,7 @@ export function RecipientWorkspace({ id }: { id: string }) {
                     size="sm"
                     variant="secondary"
                     icon={Bot}
-                    onClick={() => router.push(`/handovers/${h.id}/assistant`)}
+                    onClick={() => router.push('/assistant')}
                   >
                     Ask Handover Assistant
                   </Button>
@@ -883,7 +888,7 @@ export function RecipientWorkspace({ id }: { id: string }) {
                           <p className="text-[13.5px] font-semibold text-navy">{ki.title}</p>
                           <Badge tone="green" icon={ShieldCheck}>Human Verified</Badge>
                         </div>
-                        <p className="mt-1.5 whitespace-pre-wrap text-[13px] text-slate-700">{ki.content}</p>
+                        <FormattedMarkdown content={ki.content || ''} className="mt-1.5 text-[13px] text-slate-700" />
                         {ki.provenance.length > 0 && (
                           <div className="mt-2.5 flex flex-wrap gap-1.5">
                             {ki.provenance.map((ev, eIdx) =>
@@ -1093,8 +1098,8 @@ export function Assistant({ id }: { id: string }) {
         const displayConvs = handoverConvs.length > 0 ? handoverConvs : allConvs
         setConversations(displayConvs)
 
-        if (handoverConvs.length > 0) {
-          const latest = handoverConvs[0]!
+        if (displayConvs.length > 0) {
+          const latest = displayConvs[0]!
           setActiveConvId(latest.id)
           try {
             const detail = await api.assistant.getConversation(resolvedPid, latest.id)

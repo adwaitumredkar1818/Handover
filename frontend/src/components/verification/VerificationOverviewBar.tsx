@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { RefreshCw, Search, ShieldCheck } from "lucide-react";
+import { CheckCircle2, RefreshCw, Search, ShieldCheck } from "lucide-react";
 import type { QueueFilters, VerificationSummary, VerificationStatus } from "../../lib/verificationApi";
 import { CATEGORY_LABELS, STATUS_META, formatDomainLabel } from "./verificationTheme";
 import type { ProjectMember } from "../../lib/types";
@@ -27,6 +27,8 @@ interface VerificationOverviewBarProps {
   actionBusy: boolean;
   canReview?: boolean;
   onSync: () => void;
+  onVerifyAll?: () => void;
+  verifyingAll?: boolean;
   statusNotice: string | null;
   errorMsg: string | null;
 }
@@ -43,9 +45,17 @@ export function VerificationOverviewBar({
   actionBusy,
   canReview = true,
   onSync,
+  onVerifyAll,
+  verifyingAll = false,
   statusNotice,
   errorMsg,
 }: VerificationOverviewBarProps) {
+  const unverifiedCount = summary
+    ? summary.candidate_count +
+      summary.pending_review_count +
+      summary.conflicted_count +
+      summary.unresolved_count
+    : 0;
   const countFor = (st: VerificationStatus): number => {
     if (!summary) return 0;
     const m: Record<VerificationStatus, number> = {
@@ -75,20 +85,44 @@ export function VerificationOverviewBar({
         </div>
 
         <div className="flex flex-col items-end gap-1">
-          <button
-            type="button"
-            disabled={actionBusy || !canReview}
-            title={
-              canReview
-                ? "Sync findings from Knowledge Intelligence and run automated checks"
-                : "Requires Project Manager or Reviewer role to sync and run checks"
-            }
-            onClick={onSync}
-            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${actionBusy ? "animate-spin" : ""}`} />
-            Sync &amp; Run Checks
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {onVerifyAll && (
+              <button
+                type="button"
+                disabled={!canReview || actionBusy || unverifiedCount === 0}
+                title={
+                  !canReview
+                    ? "Requires Project Manager or Reviewer role to verify findings"
+                    : unverifiedCount === 0
+                    ? "All eligible findings are already verified"
+                    : `Verify all ${unverifiedCount} pending/candidate finding(s)`
+                }
+                onClick={onVerifyAll}
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+              >
+                <CheckCircle2 className={`w-3.5 h-3.5 ${verifyingAll ? "animate-pulse" : ""}`} />
+                {verifyingAll
+                  ? "Verifying..."
+                  : unverifiedCount > 0
+                  ? `Verify All (${unverifiedCount})`
+                  : "All Verified"}
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={actionBusy || !canReview}
+              title={
+                canReview
+                  ? "Sync findings from Knowledge Intelligence and run automated checks"
+                  : "Requires Project Manager or Reviewer role to sync and run checks"
+              }
+              onClick={onSync}
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${actionBusy && !verifyingAll ? "animate-spin" : ""}`} />
+              Sync &amp; Run Checks
+            </button>
+          </div>
           {!canReview && (
             <span className="text-[11px] text-slate-500">
               View-only · Reviewer or Project Manager role required to run checks

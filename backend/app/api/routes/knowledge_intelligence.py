@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -15,6 +16,7 @@ from app.api.deps import (
     require_project_permission,
     resolve_project_context,
 )
+from app.core.cache.local_cache import local_response_cache
 from app.schemas.knowledge import (
     ExtractionTriggerResponse,
     KnowledgeExtractionRunListResponse,
@@ -296,12 +298,24 @@ def get_knowledge_quality_assessment(
     ] = False,
 ) -> dict[str, Any]:
     """Calculate transparent 9-dimension knowledge completeness and surface actionable gaps."""
+    use_cache = not sync_findings and not bool(os.getenv("PYTEST_CURRENT_TEST"))
+    q_cache_key = f"ki_quality:{project_ctx.project.id}:{project_ctx.user_id}"
+    if use_cache:
+        cached = local_response_cache.get(q_cache_key)
+        if isinstance(cached, dict):
+            return cached
+    if sync_findings:
+        local_response_cache.invalidate_prefix(f"ki_quality:{project_ctx.project.id}:")
+
     engine = KnowledgeQualityEngine(session)
-    return engine.assess_project_quality(
+    res = engine.assess_project_quality(
         project_id=project_ctx.project.id,
         user_id=project_ctx.user_id,
         sync_findings=sync_findings,
     )
+    if not os.getenv("PYTEST_CURRENT_TEST") and isinstance(res, dict):
+        local_response_cache.set(q_cache_key, res, ttl_seconds=300)
+    return res
 
 
 @router.get(

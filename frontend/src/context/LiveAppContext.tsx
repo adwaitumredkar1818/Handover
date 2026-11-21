@@ -17,6 +17,7 @@ import {
   prefetchOrganisationAssets,
   prefetchProjectAssets,
 } from "../lib/projectPrefetch";
+import { DEFAULT_VERIFICATION_FILTERS, verificationApi } from "../lib/verificationApi";
 import { createClient as createSupabaseClient } from "../lib/supabase/client";
 import { registerPerson } from "../lib/figmaStore";
 import type {
@@ -1130,15 +1131,46 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       return;
     }
     const targetProjectId = activeProject.id;
-    setIsLoadingVerification(true);
+    const cacheKey = `verif_q:${targetProjectId}:${JSON.stringify(DEFAULT_VERIFICATION_FILTERS)}`;
+    const cached = getCachedGraph<{
+      summary: VerificationSummaryData;
+      queue: {
+        items?: VerificationCaseQueueItem[];
+        case_details?: Record<string, unknown>;
+      };
+    }>(cacheKey, undefined, user.id);
+    if (cached) {
+      setVerificationSummary(cached.summary);
+      setVerificationQueue(cached.queue.items || []);
+      if (cached.queue.case_details) {
+        for (const [cid, detail] of Object.entries(cached.queue.case_details)) {
+          setCachedGraph(`verif_case:${targetProjectId}:${cid}`, detail, user.id);
+        }
+      }
+      setIsLoadingVerification(false);
+    } else {
+      setIsLoadingVerification(true);
+    }
     try {
       const [sum, q] = await Promise.allSettled([
-        api.verification.getSummary(activeProject.id),
-        api.verification.getQueue(activeProject.id),
+        verificationApi.getSummary(targetProjectId),
+        verificationApi.getQueue(targetProjectId, DEFAULT_VERIFICATION_FILTERS),
       ]);
       if (activeProjectIdRef.current !== targetProjectId) return;
-      if (sum.status === "fulfilled") setVerificationSummary(sum.value as unknown as VerificationSummaryData);
-      if (q.status === "fulfilled") setVerificationQueue((q.value.items || []) as unknown as VerificationCaseQueueItem[]);
+      if (sum.status === "fulfilled") {
+        setVerificationSummary(sum.value as unknown as VerificationSummaryData);
+      }
+      if (q.status === "fulfilled") {
+        setVerificationQueue((q.value.items || []) as unknown as VerificationCaseQueueItem[]);
+        if (q.value.case_details) {
+          for (const [cid, detail] of Object.entries(q.value.case_details)) {
+            setCachedGraph(`verif_case:${targetProjectId}:${cid}`, detail, user.id);
+          }
+        }
+      }
+      if (sum.status === "fulfilled" && q.status === "fulfilled") {
+        setCachedGraph(cacheKey, { summary: sum.value, queue: q.value }, user.id);
+      }
     } catch (err) {
       console.warn("Verification data unavailable:", err instanceof Error ? err.message : String(err));
     } finally {
@@ -1374,6 +1406,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       void refreshMembers();
       void refreshSources();
       void refreshEvidence();
+      void refreshVerification();
       void refreshHandovers();
       prefetchTimer = setTimeout(() => {
         if (active) {

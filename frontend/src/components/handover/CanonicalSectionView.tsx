@@ -304,7 +304,7 @@ export function ProvenanceDetailModal({
 
         <div className="rounded-xl border border-line bg-slate-50/70 p-3.5">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Verified Content</p>
-          <p className="mt-1.5 whitespace-pre-wrap leading-relaxed text-navy">{item.content}</p>
+          <FormattedMarkdown content={item.content || ''} className="mt-1.5 text-[13px] leading-relaxed text-navy" />
         </div>
 
         <div className="rounded-xl border border-line p-3.5">
@@ -466,9 +466,10 @@ function VerifiedKnowledgeCard({
             )}
             {item.is_stale && <Badge tone="amber">Outdated</Badge>}
           </div>
-          <p className="mt-2 whitespace-pre-wrap text-[13px] leading-relaxed text-slate-700">
-            {displayedContent}
-          </p>
+          <FormattedMarkdown
+            content={displayedContent || ''}
+            className="mt-2 text-[13px] leading-relaxed text-slate-700"
+          />
           {isLong && (
             <button
               type="button"

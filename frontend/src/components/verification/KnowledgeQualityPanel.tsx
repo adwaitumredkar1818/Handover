@@ -15,6 +15,7 @@ import {
   Users,
 } from "lucide-react";
 import { api } from "../../lib/api";
+import { getCachedGraph, setCachedGraph } from "../../lib/graphCache";
 
 interface KnowledgeQualityPanelProps {
   projectId: string;
@@ -103,8 +104,16 @@ export function KnowledgeQualityPanel({ projectId }: KnowledgeQualityPanelProps)
 
   const loadQuality = useCallback(
     async (isRefresh = false) => {
-      if (isRefresh) setRefreshing(true);
-      else setLoading(true);
+      const cacheKey = `verif_quality:${projectId}`;
+      const cached = !isRefresh ? getCachedGraph<QualityData>(cacheKey) : null;
+      if (cached) {
+        setData(cached);
+        setLoading(false);
+      } else if (isRefresh) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
       setError(null);
 
       try {
@@ -120,14 +129,18 @@ export function KnowledgeQualityPanel({ projectId }: KnowledgeQualityPanelProps)
           : Array.isArray(res.gaps)
           ? res.gaps
           : [];
-        setData({
+        const normalized: QualityData = {
           dimension_scores: res.dimension_scores || {},
           overall_score: overall,
           gaps,
           total_items: res.total_items ?? 0,
-        });
+        };
+        setCachedGraph(cacheKey, normalized);
+        setData(normalized);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load knowledge quality metrics.");
+        if (!cached) {
+          setError(err instanceof Error ? err.message : "Failed to load knowledge quality metrics.");
+        }
       } finally {
         setLoading(false);
         setRefreshing(false);

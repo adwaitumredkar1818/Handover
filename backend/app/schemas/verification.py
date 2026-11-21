@@ -75,6 +75,7 @@ class VerificationQueueResponse(BaseSchema):
     available_domains: list[str] = Field(default_factory=list)
     available_sources: list[str] = Field(default_factory=list)
     available_people: list[str] = Field(default_factory=list)
+    case_details: dict[str, VerificationCaseDetailResponse] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +236,9 @@ class VerificationCaseDetailResponse(BaseSchema):
     updated_at: datetime
 
 
+VerificationQueueResponse.model_rebuild()
+
+
 # ---------------------------------------------------------------------------
 # Action Payloads (Right Panel)
 # ---------------------------------------------------------------------------
@@ -314,6 +318,27 @@ class MarkUnresolvedRequest(BaseSchema):
 
 class AssignReviewerRequest(BaseSchema):
     assigned_reviewer_id: uuid.UUID | None = None
+
+
+class VerifyAllFindingsRequest(BaseSchema):
+    status: str | None = None
+    domain: str | None = None
+    person: str | None = None
+    source: str | None = None
+    reviewer_id: uuid.UUID | None = None
+    category: str | None = None
+    search: str | None = None
+    reviewer_note: str | None = Field(default=None, max_length=4000)
+    decision_reason: str | None = Field(default=None, max_length=2000)
+
+
+class VerifyAllFindingsResponse(BaseSchema):
+    project_id: uuid.UUID
+    verified_count: int = 0
+    knowledge_items_verified: int = 0
+    relationships_verified: int = 0
+    already_verified_count: int = 0
+    summary: VerificationSummaryResponse
 
 
 class SyncAndAssessResponse(BaseSchema):

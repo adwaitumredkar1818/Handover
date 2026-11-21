@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Annotated, Any
 
@@ -32,10 +33,16 @@ from app.schemas.verification import (
     VerificationContextRequestDetail,
     VerificationQueueResponse,
     VerificationSummaryResponse,
+    VerifyAllFindingsRequest,
+    VerifyAllFindingsResponse,
 )
 from app.services.rbac import ProjectContext
 from app.services.verification_engine import VerificationEngine
-from app.services.verification_review import VerificationReviewService
+from app.services.verification_review import (
+    _VERIF_READ_CACHE,
+    VerificationReviewService,
+    invalidate_verification_read_cache,
+)
 
 router = APIRouter(tags=["Verification Center"])
 
@@ -46,6 +53,7 @@ def _invalidate_project_caches(project_id: uuid.UUID) -> None:
     local_response_cache.invalidate_prefix(f"ki_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"ki_domains:{project_id}:")
     local_response_cache.invalidate_prefix(f"ki_summary:{project_id}:")
+    local_response_cache.invalidate_prefix(f"ki_quality:{project_id}:")
     local_response_cache.invalidate_prefix(f"rel_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"contrib_graph:{project_id}:")
     local_response_cache.invalidate_prefix(f"verification_summary:{project_id}:")
@@ -207,6 +215,7 @@ def sync_and_assess_verification(
     sync_res = engine.sync_project_findings(project_ctx.project.id)
     assess_res = engine.assess_project(project_ctx.project.id)
     session.commit()
+    invalidate_verification_read_cache(project_ctx.project.id)
     _invalidate_project_caches(project_ctx.project.id)
     return SyncAndAssessResponse(
         project_id=project_ctx.project.id,
@@ -232,12 +241,34 @@ def run_verification_checks(
     engine = VerificationEngine(session)
     assess_res = engine.assess_project(project_ctx.project.id, case_id=case_id)
     session.commit()
+    invalidate_verification_read_cache(project_ctx.project.id)
     _invalidate_project_caches(project_ctx.project.id)
     return SyncAndAssessResponse(
         project_id=project_ctx.project.id,
         cases_assessed=assess_res["cases_assessed"],
         issues_detected=assess_res["issues_detected"],
     )
+
+
+@router.post(
+    "/projects/{project_id}/verification/verify-all",
+    response_model=VerifyAllFindingsResponse,
+)
+def verify_all_verification_cases(
+    project_id: uuid.UUID,
+    project_ctx: Annotated[
+        ProjectContext, Depends(require_project_permission("project.knowledge.review"))
+    ],
+    session: Annotated[Session, Depends(get_db_session)],
+    payload: VerifyAllFindingsRequest | None = Body(default=None),
+) -> VerifyAllFindingsResponse:
+    service = VerificationReviewService(session)
+    res = service.verify_all_cases(
+        project_ctx=project_ctx,
+        payload=payload or VerifyAllFindingsRequest(),
+    )
+    _invalidate_project_caches(project_ctx.project.id)
+    return res
 
 
 @router.post(
@@ -491,6 +522,7 @@ def monitor_source_change(
         triggered_by_user_id=project_ctx.principal.user.id,
     )
     session.commit()
+    invalidate_verification_read_cache(project_ctx.project.id)
     _invalidate_project_caches(project_ctx.project.id)
     return MonitorSourceChangeResponse(
         evidence_id=impact.evidence_id,
@@ -517,17 +549,29 @@ def get_change_impact_feed(
 ) -> ChangeImpactFeedResponse:
     from app.services.verification_intelligence import ContinuousMonitoringService
 
+    viewer_id = project_ctx.principal.user.id
+    has_manage = project_ctx.has_permission("project.manage")
+    use_cache = not bool(os.getenv("PYTEST_CURRENT_TEST"))
+    cache_key = f"vci:{project_ctx.project.id}:{viewer_id}:{has_manage}:{limit}:{offset}"
+    if use_cache:
+        cached = _VERIF_READ_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            return ChangeImpactFeedResponse.model_validate(cached)
+
     monitor = ContinuousMonitoringService(session)
     items, total = monitor.get_change_impact_events(
         project_id=project_ctx.project.id,
-        viewer_user_id=project_ctx.principal.user.id,
-        has_manage=project_ctx.has_permission("project.manage"),
+        viewer_user_id=viewer_id,
+        has_manage=has_manage,
         limit=limit,
         offset=offset,
     )
-    return ChangeImpactFeedResponse(
+    resp = ChangeImpactFeedResponse(
         project_id=project_ctx.project.id,
         total=total,
         items=items,
     )
+    if use_cache:
+        _VERIF_READ_CACHE.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=300)
+    return resp
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.exceptions import ForbiddenError
 from app.models.enums import (
@@ -221,7 +221,7 @@ class SourceAccessPolicyService:
                         EvidenceItem.id.in_(unique_ids),
                         EvidenceItem.project_id == project_id,
                     )
-                    .options(selectinload(EvidenceItem.source_access_policy))
+                    .options(joinedload(EvidenceItem.source_access_policy))
                 )
                 .scalars()
                 .all()
@@ -280,7 +280,7 @@ class SourceAccessPolicyService:
                             != SourceVisibilityPolicy.PROJECT_MEMBERS_VERIFIED.value,
                         ),
                     )
-                    .options(selectinload(EvidenceItem.source_access_policy))
+                    .options(joinedload(EvidenceItem.source_access_policy))
                 )
                 .scalars()
                 .all()

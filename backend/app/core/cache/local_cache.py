@@ -54,6 +54,20 @@ class LocalTTLCache:
                 self._store.pop(k, None)
             return len(keys)
 
+    def keys_with_prefix(self, prefix: str) -> list[str]:
+        now = time.monotonic()
+        with self._lock:
+            valid: list[str] = []
+            expired: list[str] = []
+            for k, (expires_at, _) in self._store.items():
+                if expires_at <= now:
+                    expired.append(k)
+                elif k.startswith(prefix):
+                    valid.append(k)
+            for k in expired:
+                self._store.pop(k, None)
+            return valid
+
     def clear(self) -> None:
         with self._lock:
             self._store.clear()

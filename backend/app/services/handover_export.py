@@ -17,6 +17,9 @@ from __future__ import annotations
 import base64
 import html as html_lib
 import io
+import re
+import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,6 +60,60 @@ from app.services.handover_sections import (
     normalize_handover_type,
     redact_secrets,
 )
+
+
+_PDF_CACHE_LOCK = threading.Lock()
+_PDF_CACHE: dict[str, tuple[float, bytes]] = {}
+_PDF_CACHE_TTL_SECONDS = 300.0
+_PDF_CACHE_MAX_ENTRIES = 24
+
+
+def _inline_markdown_html(escaped_text: str) -> str:
+    """Convert escaped inline markdown (`code`, **bold**) to HTML."""
+    out = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", escaped_text)
+    out = re.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", out)
+    return out
+
+
+def _markdown_to_html(text: str) -> str:
+    """Safely render lightweight markdown bullets, bold, and inline code to HTML."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    lines = raw.splitlines()
+    blocks: list[str] = []
+    list_items: list[str] = []
+
+    def _flush_list() -> None:
+        if list_items:
+            blocks.append('<ul class="finding-ul">' + "".join(list_items) + "</ul>")
+            list_items.clear()
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            _flush_list()
+            continue
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            body = _inline_markdown_html(html_lib.escape(stripped[2:].strip()))
+            list_items.append(f"<li>{body}</li>")
+        else:
+            _flush_list()
+            body = _inline_markdown_html(html_lib.escape(stripped))
+            blocks.append(f'<p class="finding-p">{body}</p>')
+    _flush_list()
+    return "".join(blocks)
+
+
+def _load_logo_data_uri_cached() -> str:
+    logo_path = Path(__file__).resolve().parents[3] / "frontend" / "public" / "handover-logo.png"
+    if logo_path.is_file():
+        encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
+    return ""
+
+
+_CACHED_LOGO_URI: str | None = None
 
 
 class HandoverExportService:
@@ -676,11 +733,10 @@ class HandoverExportService:
     @staticmethod
     def _load_logo_data_uri() -> str:
         """Load the canonical frontend Handover logo PNG as a data URI for offline Chromium/PyMuPDF rendering."""
-        logo_path = Path(__file__).resolve().parents[3] / "frontend" / "public" / "handover-logo.png"
-        if logo_path.is_file():
-            encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
-            return f"data:image/png;base64,{encoded}"
-        return ""
+        global _CACHED_LOGO_URI
+        if _CACHED_LOGO_URI is None:
+            _CACHED_LOGO_URI = _load_logo_data_uri_cached()
+        return _CACHED_LOGO_URI
 
     @staticmethod
     def _render_html_to_pdf_bytes(html_doc: str, *, footer_label: str) -> bytes:
@@ -689,11 +745,19 @@ class HandoverExportService:
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-gpu",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-extensions",
+                    ],
+                )
                 try:
                     context = browser.new_context(viewport={"width": 1024, "height": 1448})
                     page = context.new_page()
-                    page.set_content(html_doc, wait_until="load", timeout=15000)
+                    page.set_content(html_doc, wait_until="domcontentloaded", timeout=15000)
                     footer_html = (
                         '<div style="width:100%;font-family:Inter,system-ui,sans-serif;font-size:8px;'
                         'color:#718096;padding:0 14mm;display:flex;justify-content:space-between;align-items:center;">'
@@ -813,7 +877,7 @@ class HandoverExportService:
             briefing_cards = "".join(
                 f'<div class="handover-finding-card">'
                 f'<p class="finding-title">{esc(label)}</p>'
-                f'<p class="finding-body">{esc(str(val))}</p>'
+                f'<div class="finding-body">{_markdown_to_html(str(val))}</div>'
                 f"</div>"
                 for label, val in briefing_rows
                 if str(val).strip()
@@ -863,7 +927,9 @@ class HandoverExportService:
                     if not isinstance(ki, dict):
                         continue
                     ki_title = esc(str(ki.get("title") or "Verified Finding"))
-                    ki_content = esc(str(ki.get("content") or ki.get("structured_summary") or ki.get("summary") or ""))
+                    ki_content_html = _markdown_to_html(
+                        str(ki.get("content") or ki.get("structured_summary") or ki.get("summary") or "")
+                    )
                     is_item_verified = (
                         ki.get("epistemic_status", "human_verified") == "human_verified"
                         and ki.get("review_status", "approved") == "approved"
@@ -894,7 +960,7 @@ class HandoverExportService:
                     cards_html.append(
                         f'<div class="handover-finding-card">'
                         f'<p class="finding-title">{ki_title} {ep_icon}{cons_badge}</p>'
-                        f'<p class="finding-body">{ki_content}</p>'
+                        f'<div class="finding-body">{ki_content_html}</div>'
                         f'<p class="finding-src">{src_line}</p>'
                         f"</div>"
                     )
@@ -1121,7 +1187,13 @@ class HandoverExportService:
     page-break-inside: avoid;
   }}
   .finding-title {{ margin: 0; font-size: 13px; font-weight: 600; color: #203653; }}
-  .finding-body {{ margin: 4px 0 0 0; font-size: 12.5px; color: #334155; white-space: pre-wrap; line-height: 1.5; }}
+  .finding-body {{ margin: 4px 0 0 0; font-size: 12.5px; color: #334155; line-height: 1.5; }}
+  .finding-p {{ margin: 0 0 4px 0; }}
+  .finding-p:last-child {{ margin-bottom: 0; }}
+  .finding-ul {{ margin: 4px 0 0 0; padding-left: 18px; }}
+  .finding-ul li {{ margin-bottom: 3px; }}
+  .finding-body strong {{ font-weight: 600; color: #203653; }}
+  .finding-body code {{ background: #f1f5f9; border-radius: 4px; padding: 1px 4px; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11.5px; color: #334155; }}
   .finding-src {{ margin: 6px 0 0 0; font-size: 11px; color: #718096; }}
   .rel-list {{ margin: 4px 0 0 0; padding-left: 18px; font-size: 12.5px; color: #334155; }}
   .rel-list li {{ margin-bottom: 3px; }}
@@ -1171,7 +1243,24 @@ class HandoverExportService:
 </body>
 </html>"""
 
-        return self._render_html_to_pdf_bytes(
+        pdf_cache_key = (
+            f"{project_id}:{case_id}:{data.get('package_version_number')}:{data.get('package_hash')}:"
+            f"{role_override or data.get('handover_type')}:{data.get('approval_watermark')}:"
+            f"{user_id}:{data.get('omitted_restricted_items_count', 0)}"
+        )
+        now_ts = time.monotonic()
+        with _PDF_CACHE_LOCK:
+            cached_entry = _PDF_CACHE.get(pdf_cache_key)
+            if cached_entry and (now_ts - cached_entry[0]) < _PDF_CACHE_TTL_SECONDS:
+                return cached_entry[1]
+
+        pdf_bytes = self._render_html_to_pdf_bytes(
             html_doc,
             footer_label=f"{watermark} · {data['project_name']} · v{data['package_version_number']} · Hash {str(data['package_hash'])[:16]}",
         )
+        with _PDF_CACHE_LOCK:
+            if len(_PDF_CACHE) >= _PDF_CACHE_MAX_ENTRIES:
+                oldest_key = min(_PDF_CACHE, key=lambda k: _PDF_CACHE[k][0])
+                _PDF_CACHE.pop(oldest_key, None)
+            _PDF_CACHE[pdf_cache_key] = (time.monotonic(), pdf_bytes)
+        return pdf_bytes

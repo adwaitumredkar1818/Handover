@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -27,6 +28,7 @@ from app.core.security import (
     utc_now,
 )
 from app.models.enums import (
+    EvidenceProcessingStatus,
     EvidenceSourceType,
     InvitationStatus,
     OrganisationStatus,
@@ -35,7 +37,10 @@ from app.models.enums import (
     ProjectStatus,
     RoleName,
     RoleScopeType,
+    SourcePermissionVerificationStatus,
 )
+from app.models.evidence import EvidenceItem
+from app.models.integration import SourceAccessPolicy
 from app.models.organisation import OrganisationInvitation
 from app.models.project import Project, ProjectMembership, ProjectTransition
 from app.repositories.organisation import OrganisationRepository
@@ -1105,28 +1110,66 @@ class ProjectService:
 
         transition = self._project_repo.get_transition(project.id)
         source_metrics = self._project_repo.get_source_metrics(project.id)
-        all_evidence = self._project_repo.list_active_evidence_items(project.id)
-        acl_service = SourceAccessPolicyService()
         has_project_manage = ctx.has_permission("project.manage")
-        accessible_evidence = [
-            item
-            for item in all_evidence
-            if acl_service.can_user_access_evidence(
-                evidence=item,
-                user_id=ctx.principal.user.id,
-                has_project_manage=has_project_manage,
+
+        policies = list(
+            self._db.execute(
+                select(SourceAccessPolicy).where(SourceAccessPolicy.project_id == project.id)
             )
-        ]
+            .scalars()
+            .all()
+        )
+        viewer_str = str(ctx.principal.user.id)
+        allowed_policy_ids: set[uuid.UUID] = set()
+        revoked_policy_ids: set[uuid.UUID] = set()
+        for pol in policies:
+            if pol.sync_permission_status == SourcePermissionVerificationStatus.REVOKED.value:
+                revoked_policy_ids.add(pol.id)
+            elif viewer_str in (pol.allowed_user_ids or []):
+                allowed_policy_ids.add(pol.id)
+
+        grouped_ev = self._db.execute(
+            select(
+                EvidenceItem.source_type,
+                EvidenceItem.processing_status,
+                EvidenceItem.acl_scope,
+                EvidenceItem.source_access_policy_id,
+                func.count(EvidenceItem.id),
+            )
+            .where(
+                EvidenceItem.project_id == project.id,
+                EvidenceItem.deleted_at.is_(None),
+                EvidenceItem.processing_status != EvidenceProcessingStatus.DELETED.value,
+            )
+            .group_by(
+                EvidenceItem.source_type,
+                EvidenceItem.processing_status,
+                EvidenceItem.acl_scope,
+                EvidenceItem.source_access_policy_id,
+            )
+        ).all()
+
         by_provider: dict[str, int] = {}
         by_status: dict[str, int] = {}
         doc_count = 0
-        for item in accessible_evidence:
-            by_provider[item.source_type] = by_provider.get(item.source_type, 0) + 1
-            by_status[item.processing_status] = by_status.get(item.processing_status, 0) + 1
-            if item.source_type == EvidenceSourceType.DOCUMENT_UPLOAD.value:
-                doc_count += 1
+        total_accessible_records = 0
+        for src_type, proc_status, acl_scope, pol_id, cnt in grouped_ev:
+            if pol_id and pol_id in revoked_policy_ids:
+                continue
+            if acl_scope == "source_restricted":
+                if pol_id not in allowed_policy_ids and not (
+                    has_project_manage and src_type == EvidenceSourceType.DOCUMENT_UPLOAD.value
+                ):
+                    continue
+            cnt_i = int(cnt or 0)
+            total_accessible_records += cnt_i
+            by_provider[src_type] = by_provider.get(src_type, 0) + cnt_i
+            by_status[proc_status] = by_status.get(proc_status, 0) + cnt_i
+            if src_type == EvidenceSourceType.DOCUMENT_UPLOAD.value:
+                doc_count += cnt_i
+
         evidence_metrics = {
-            "total_records": len(accessible_evidence),
+            "total_records": total_accessible_records,
             "by_provider": by_provider,
             "by_status": by_status,
             "document_count": doc_count,
@@ -1259,7 +1302,7 @@ class ProjectService:
             dumped_overview,
             ttl=CachePolicies.DASHBOARD_STATS,
         )
-        local_response_cache.set(local_key, dumped_overview, ttl_seconds=60)
+        local_response_cache.set(local_key, dumped_overview, ttl_seconds=300)
         return response
 
     def get_project_activity(

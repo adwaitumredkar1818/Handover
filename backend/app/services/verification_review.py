@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.cache.local_cache import LocalTTLCache
@@ -41,6 +42,7 @@ from app.models.verification import (
     VerificationContextRequest,
     VerificationEvidenceRef,
     VerificationFindingRevision,
+    VerificationIssue,
     VerificationReviewEvent,
 )
 from app.repositories.audit import AuditLogRepository
@@ -63,6 +65,8 @@ from app.schemas.verification import (
     VerificationReviewEventDetail,
     VerificationRevisionDetail,
     VerificationSummaryResponse,
+    VerifyAllFindingsRequest,
+    VerifyAllFindingsResponse,
 )
 from app.services.audit import AuditService
 from app.services.handover_sections import redact_secrets
@@ -115,12 +119,175 @@ _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 }
 
 
-_VERIF_READ_CACHE = LocalTTLCache(max_items=512)
+_VERIF_READ_CACHE = LocalTTLCache(max_items=2048)
+
+_STATUS_TO_SUMMARY_FIELD: dict[str, str] = {
+    VerificationCaseStatus.CANDIDATE.value: "candidate_count",
+    VerificationCaseStatus.PENDING_REVIEW.value: "pending_review_count",
+    VerificationCaseStatus.CONFLICTED.value: "conflicted_count",
+    VerificationCaseStatus.UNRESOLVED.value: "unresolved_count",
+    VerificationCaseStatus.VERIFIED.value: "verified_count",
+    VerificationCaseStatus.REJECTED.value: "rejected_count",
+}
 
 
 def invalidate_verification_read_cache(project_id: uuid.UUID) -> None:
     _VERIF_READ_CACHE.invalidate_prefix(f"vsum:{project_id}:")
     _VERIF_READ_CACHE.invalidate_prefix(f"vq:{project_id}:")
+    _VERIF_READ_CACHE.invalidate_prefix(f"vcase:{project_id}:")
+    _VERIF_READ_CACHE.invalidate_prefix(f"vrest:{project_id}:")
+    _VERIF_READ_CACHE.invalidate_prefix(f"vunrest:{project_id}:")
+    _VERIF_READ_CACHE.delete(f"vfacets:{project_id}")
+    _VERIF_READ_CACHE.invalidate_prefix(f"vci:{project_id}:")
+    from app.core.cache.local_cache import local_response_cache
+    from app.services.handover_sections import invalidate_handover_sections_cache
+
+    local_response_cache.invalidate_prefix(f"handover_ws:{project_id}:")
+    invalidate_handover_sections_cache(project_id)
+
+
+def patch_verification_read_cache_for_case(
+    *,
+    project_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    case_id: uuid.UUID,
+    previous_status: str,
+    new_status: str,
+    version: int,
+    updated_at: datetime,
+    last_reviewed_at: datetime | None,
+    current_claim: str | None = None,
+    domain: str | None = None,
+    claim_changed: bool = False,
+    domain_changed: bool = False,
+    assigned_reviewer_id: uuid.UUID | None = None,
+    assigned_reviewer_name: str | None = None,
+    assigned_reviewer_changed: bool = False,
+    pending_context_delta: int = 0,
+    patched_case_detail: dict[str, Any] | None = None,
+) -> None:
+    """Update cached summary and queue entries in-place when a single case changes."""
+    status_changed = previous_status != new_status
+    if status_changed or pending_context_delta:
+        prev_field = _STATUS_TO_SUMMARY_FIELD.get(previous_status)
+        new_field = _STATUS_TO_SUMMARY_FIELD.get(new_status)
+        for skey in _VERIF_READ_CACHE.keys_with_prefix(f"vsum:{project_id}:"):
+            sdata = _VERIF_READ_CACHE.get(skey)
+            if not isinstance(sdata, dict):
+                continue
+            if status_changed:
+                if prev_field and prev_field in sdata:
+                    sdata[prev_field] = max(0, int(sdata[prev_field]) - 1)
+                if new_field and new_field in sdata:
+                    sdata[new_field] = int(sdata[new_field]) + 1
+            if pending_context_delta:
+                sdata["pending_context_requests_count"] = max(
+                    0,
+                    int(sdata.get("pending_context_requests_count", 0)) + pending_context_delta,
+                )
+            _VERIF_READ_CACHE.set(skey, sdata, ttl_seconds=300)
+
+    q_prefix = f"vq:{project_id}:"
+    case_id_str = str(case_id)
+    updated_iso = updated_at.isoformat()
+    reviewed_iso = last_reviewed_at.isoformat() if last_reviewed_at else None
+
+    for qkey in _VERIF_READ_CACHE.keys_with_prefix(q_prefix):
+        rest = qkey[len(q_prefix) :]
+        parts = rest.split(":", 2)
+        if len(parts) != 3:
+            _VERIF_READ_CACHE.delete(qkey)
+            continue
+        key_user_id, _key_has_manage, filter_json = parts
+        try:
+            (
+                f_status,
+                f_domain,
+                _f_person,
+                _f_source,
+                f_reviewer_id,
+                _f_category,
+                f_search,
+                f_sort_by,
+                f_sort_dir,
+                _f_limit,
+                f_offset,
+            ) = json.loads(filter_json)
+        except Exception:
+            _VERIF_READ_CACHE.delete(qkey)
+            continue
+
+        # Never propagate unredacted text edits across different viewers
+        if (claim_changed or domain_changed) and key_user_id != str(actor_user_id):
+            _VERIF_READ_CACHE.delete(qkey)
+            continue
+
+        if status_changed and f_status is not None:
+            _VERIF_READ_CACHE.delete(qkey)
+            continue
+        if domain_changed and f_domain is not None:
+            _VERIF_READ_CACHE.delete(qkey)
+            continue
+        if assigned_reviewer_changed and f_reviewer_id is not None:
+            _VERIF_READ_CACHE.delete(qkey)
+            continue
+        if (claim_changed or domain_changed) and f_search is not None:
+            _VERIF_READ_CACHE.delete(qkey)
+            continue
+        if status_changed and f_sort_by == "status":
+            _VERIF_READ_CACHE.delete(qkey)
+            continue
+        if domain_changed and f_sort_by == "domain":
+            _VERIF_READ_CACHE.delete(qkey)
+            continue
+
+        qdata = _VERIF_READ_CACHE.get(qkey)
+        if not isinstance(qdata, dict) or not isinstance(qdata.get("items"), list):
+            continue
+
+        items: list[dict[str, Any]] = qdata["items"]
+        match_idx = next(
+            (idx for idx, item in enumerate(items) if isinstance(item, dict) and item.get("id") == case_id_str),
+            None,
+        )
+        if match_idx is None:
+            if f_sort_by == "updated_at":
+                _VERIF_READ_CACHE.delete(qkey)
+            continue
+
+        patched = dict(items[match_idx])
+        patched["case_status"] = new_status
+        patched["version"] = version
+        patched["updated_at"] = updated_iso
+        patched["last_reviewed_at"] = reviewed_iso
+        if claim_changed and current_claim is not None:
+            patched["current_claim"] = current_claim
+        if domain_changed and domain is not None:
+            patched["domain"] = domain
+        if assigned_reviewer_changed:
+            patched["assigned_reviewer_id"] = (
+                str(assigned_reviewer_id) if assigned_reviewer_id else None
+            )
+            patched["assigned_reviewer_name"] = assigned_reviewer_name
+
+        if f_sort_by == "updated_at":
+            if int(f_offset or 0) == 0 and str(f_sort_dir or "desc").lower() != "asc":
+                items.pop(match_idx)
+                items.insert(0, patched)
+            else:
+                _VERIF_READ_CACHE.delete(qkey)
+                continue
+        else:
+            items[match_idx] = patched
+
+        case_details_map = qdata.get("case_details")
+        if isinstance(case_details_map, dict):
+            if patched_case_detail is not None and key_user_id == str(actor_user_id):
+                case_details_map[case_id_str] = patched_case_detail
+            elif key_user_id != str(actor_user_id):
+                case_details_map.pop(case_id_str, None)
+
+        _VERIF_READ_CACHE.set(qkey, qdata, ttl_seconds=300)
 
 
 class VerificationReviewService:
@@ -156,6 +323,185 @@ class VerificationReviewService:
                     code="PROJECT_MEMBERSHIP_REQUIRED",
                 )
         return user.id, has_manage
+
+    def _get_restricted_titles(
+        self,
+        project_id: uuid.UUID,
+        user_id: uuid.UUID,
+        has_manage: bool,
+    ) -> set[str]:
+        use_cache = not bool(os.getenv("PYTEST_CURRENT_TEST"))
+        rest_cache_key = f"vrest:{project_id}:{user_id}:{has_manage}"
+        if use_cache:
+            cached = _VERIF_READ_CACHE.get(rest_cache_key)
+            if isinstance(cached, list):
+                return set(cached)
+        titles = self.access_policy.list_restricted_titles_for_viewer(
+            self.session,
+            project_id=project_id,
+            user_id=user_id,
+            has_project_manage=has_manage,
+        )
+        if use_cache:
+            _VERIF_READ_CACHE.set(rest_cache_key, sorted(titles), ttl_seconds=300)
+        return titles
+
+    def _has_viewer_restrictions(
+        self,
+        project_id: uuid.UUID,
+        user_id: uuid.UUID,
+        has_manage: bool,
+    ) -> bool:
+        use_cache = not bool(os.getenv("PYTEST_CURRENT_TEST"))
+        cache_key = f"vunrest:{project_id}:{user_id}:{has_manage}"
+        if use_cache:
+            cached = _VERIF_READ_CACHE.get(cache_key)
+            if isinstance(cached, bool):
+                return cached
+
+        policies = list(
+            self.session.execute(
+                select(SourceAccessPolicy).where(SourceAccessPolicy.project_id == project_id)
+            )
+            .scalars()
+            .all()
+        )
+        viewer_str = str(user_id)
+        has_restrictions = any(
+            p.sync_permission_status == SourcePermissionVerificationStatus.REVOKED.value
+            or (not has_manage and viewer_str not in (p.allowed_user_ids or []))
+            for p in policies
+        )
+        if use_cache:
+            _VERIF_READ_CACHE.set(cache_key, has_restrictions, ttl_seconds=300)
+        return has_restrictions
+
+    def _get_project_facets(
+        self, project_id: uuid.UUID
+    ) -> tuple[list[str], list[str], list[str]]:
+        use_cache = not bool(os.getenv("PYTEST_CURRENT_TEST"))
+        cache_key = f"vfacets:{project_id}"
+        if use_cache:
+            cached = _VERIF_READ_CACHE.get(cache_key)
+            if (
+                isinstance(cached, dict)
+                and isinstance(cached.get("domains"), list)
+                and isinstance(cached.get("sources"), list)
+                and isinstance(cached.get("people"), list)
+            ):
+                return cached["domains"], cached["sources"], cached["people"]
+
+        from app.services.knowledge_domains import resolve_canonical_domain
+
+        facet_rows = self.session.execute(
+            select(
+                VerificationCase.domain,
+                VerificationCase.source_provider,
+                VerificationCase.person_name,
+            )
+            .where(
+                VerificationCase.project_id == project_id,
+                VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+            )
+            .distinct()
+        ).all()
+        f_domains: set[str] = set()
+        f_sources: set[str] = set()
+        f_people: set[str] = set()
+        for d_val, s_val, p_val in facet_rows:
+            if d_val:
+                try:
+                    f_domains.add(resolve_canonical_domain(d_val).value)
+                except (ValueError, KeyError):
+                    f_domains.add(d_val)
+            if s_val:
+                f_sources.add(s_val)
+            if p_val:
+                f_people.add(p_val)
+
+        result = (sorted(f_domains), sorted(f_sources), sorted(f_people))
+        if use_cache:
+            _VERIF_READ_CACHE.set(
+                cache_key,
+                {"domains": result[0], "sources": result[1], "people": result[2]},
+                ttl_seconds=300,
+            )
+        return result
+
+    def _build_case_sql_filters(
+        self,
+        project_id: uuid.UUID,
+        *,
+        status: str | None = None,
+        domain: str | None = None,
+        person: str | None = None,
+        source: str | None = None,
+        reviewer_id: uuid.UUID | None = None,
+        category: str | None = None,
+        search: str | None = None,
+    ) -> list[Any]:
+        from app.services.knowledge_domains import (
+            canonical_domain_to_legacy_category,
+            resolve_canonical_domain,
+        )
+
+        base_filter: list[Any] = [
+            VerificationCase.project_id == project_id,
+            VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
+        ]
+        if status:
+            base_filter.append(VerificationCase.case_status == status)
+        if domain:
+            dom_clean = domain.strip()
+            allowed_doms = {dom_clean.lower()}
+            try:
+                c_dom = resolve_canonical_domain(dom_clean)
+                allowed_doms.add(c_dom.value.lower())
+                allowed_doms.add(canonical_domain_to_legacy_category(c_dom).lower())
+            except (ValueError, KeyError):
+                pass
+            base_filter.append(func.lower(VerificationCase.domain).in_(allowed_doms))
+        if source:
+            base_filter.append(VerificationCase.source_provider == source)
+        if reviewer_id:
+            base_filter.append(VerificationCase.assigned_reviewer_id == reviewer_id)
+        person_q = person.strip().lower() if person and person.strip() else None
+        if person_q:
+            base_filter.append(
+                func.lower(func.coalesce(VerificationCase.person_name, "")).contains(
+                    person_q, autoescape=True
+                )
+            )
+        if category:
+            cat_exists = (
+                select(VerificationIssue.id)
+                .where(
+                    VerificationIssue.case_id == VerificationCase.id,
+                    VerificationIssue.resolution_state == IssueResolutionState.OPEN.value,
+                    VerificationIssue.verification_category == category,
+                )
+                .exists()
+            )
+            base_filter.append(cat_exists)
+        search_q = search.strip().lower() if search and search.strip() else None
+        if search_q:
+            base_filter.append(
+                or_(
+                    func.lower(func.coalesce(VerificationCase.title, "")).contains(
+                        search_q, autoescape=True
+                    ),
+                    func.lower(VerificationCase.current_claim).contains(
+                        search_q, autoescape=True
+                    ),
+                    func.lower(VerificationCase.original_ai_claim).contains(
+                        search_q, autoescape=True
+                    ),
+                    func.lower(VerificationCase.domain).contains(
+                        search_q, autoescape=True
+                    ),
+                )
+            )
+        return base_filter
 
     @staticmethod
     def _parse_uuid(value: Any) -> uuid.UUID | None:
@@ -641,21 +987,8 @@ class VerificationReviewService:
             VerificationIssue,
         )
 
-        # Fast SQL GROUP BY path when viewer has full access to all project sources
-        policies = list(
-            self.session.execute(
-                select(SourceAccessPolicy).where(SourceAccessPolicy.project_id == project_id)
-            )
-            .scalars()
-            .all()
-        )
-        viewer_str = str(user_id)
-        has_restrictions = any(
-            p.sync_permission_status == SourcePermissionVerificationStatus.REVOKED.value
-            or (not has_manage and viewer_str not in (p.allowed_user_ids or []))
-            for p in policies
-        )
-        if not has_restrictions:
+        # Fast SQL GROUP BY + scalar subquery path when viewer has full access to all project sources
+        if not self._has_viewer_restrictions(project_id, user_id, has_manage):
             rows = self.session.execute(
                 select(VerificationCase.case_status, func.count(VerificationCase.id))
                 .where(
@@ -670,33 +1003,33 @@ class VerificationReviewService:
                     VerificationCase.project_id == project_id,
                     VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
                 )
-                open_issues = (
-                    self.session.execute(
-                        select(func.count(VerificationIssue.id)).where(
-                            VerificationIssue.case_id.in_(active_subq),
-                            VerificationIssue.resolution_state == IssueResolutionState.OPEN.value,
-                        )
-                    ).scalar()
-                    or 0
+                issues_scalar = (
+                    select(func.count(VerificationIssue.id))
+                    .where(
+                        VerificationIssue.case_id.in_(active_subq),
+                        VerificationIssue.resolution_state == IssueResolutionState.OPEN.value,
+                    )
+                    .scalar_subquery()
                 )
-                open_conflicts = (
-                    self.session.execute(
-                        select(func.count(VerificationConflict.id)).where(
-                            VerificationConflict.case_id.in_(active_subq),
-                            VerificationConflict.resolution_state == ConflictResolutionState.UNRESOLVED.value,
-                        )
-                    ).scalar()
-                    or 0
+                conflicts_scalar = (
+                    select(func.count(VerificationConflict.id))
+                    .where(
+                        VerificationConflict.case_id.in_(active_subq),
+                        VerificationConflict.resolution_state == ConflictResolutionState.UNRESOLVED.value,
+                    )
+                    .scalar_subquery()
                 )
-                pending_ctx = (
-                    self.session.execute(
-                        select(func.count(VerificationContextRequest.id)).where(
-                            VerificationContextRequest.case_id.in_(active_subq),
-                            VerificationContextRequest.status == ContextRequestStatus.PENDING.value,
-                        )
-                    ).scalar()
-                    or 0
+                ctx_scalar = (
+                    select(func.count(VerificationContextRequest.id))
+                    .where(
+                        VerificationContextRequest.case_id.in_(active_subq),
+                        VerificationContextRequest.status == ContextRequestStatus.PENDING.value,
+                    )
+                    .scalar_subquery()
                 )
+                open_issues, open_conflicts, pending_ctx = self.session.execute(
+                    select(issues_scalar, conflicts_scalar, ctx_scalar)
+                ).one()
                 resp = VerificationSummaryResponse(
                     project_id=project_id,
                     total_cases=sum(status_counts.values()),
@@ -706,9 +1039,9 @@ class VerificationReviewService:
                     unresolved_count=status_counts.get(VerificationCaseStatus.UNRESOLVED.value, 0),
                     verified_count=status_counts.get(VerificationCaseStatus.VERIFIED.value, 0),
                     rejected_count=status_counts.get(VerificationCaseStatus.REJECTED.value, 0),
-                    open_issues_count=int(open_issues),
-                    open_conflicts_count=int(open_conflicts),
-                    pending_context_requests_count=int(pending_ctx),
+                    open_issues_count=int(open_issues or 0),
+                    open_conflicts_count=int(open_conflicts or 0),
+                    pending_context_requests_count=int(pending_ctx or 0),
                 )
                 if use_cache:
                     _VERIF_READ_CACHE.set(cache_key, resp.model_dump(mode="json"), ttl_seconds=300)
@@ -800,10 +1133,23 @@ class VerificationReviewService:
         user_id, has_manage = self._verify_viewer_access(project_ctx)
 
         use_cache = not bool(os.getenv("PYTEST_CURRENT_TEST"))
-        q_cache_key = (
-            f"vq:{project_id}:{user_id}:{has_manage}:{status}:{domain}:{person}:{source}:"
-            f"{reviewer_id}:{category}:{search}:{sort_by}:{sort_dir}:{limit}:{offset}"
+        q_filter_json = json.dumps(
+            [
+                status,
+                domain,
+                person,
+                source,
+                str(reviewer_id) if reviewer_id else None,
+                category,
+                search,
+                sort_by,
+                sort_dir,
+                limit,
+                offset,
+            ],
+            separators=(",", ":"),
         )
+        q_cache_key = f"vq:{project_id}:{user_id}:{has_manage}:{q_filter_json}"
         if use_cache:
             cached_q = _VERIF_READ_CACHE.get(q_cache_key)
             if isinstance(cached_q, dict):
@@ -812,131 +1158,120 @@ class VerificationReviewService:
         search_q = search.strip().lower() if search and search.strip() else None
         person_q = person.strip().lower() if person and person.strip() else None
 
-        # Fast SQL-paginated path when viewer has unrestricted access and no text/category filter
-        if (
-            not search_q
-            and not category
-            and not person_q
-            and not domain
-        ):
-            policies = list(
-                self.session.execute(
-                    select(SourceAccessPolicy).where(SourceAccessPolicy.project_id == project_id)
-                )
-                .scalars()
-                .all()
+        # Fast SQL-paginated path supporting all filters whenever viewer has unrestricted access
+        if not self._has_viewer_restrictions(project_id, user_id, has_manage):
+            base_filter = self._build_case_sql_filters(
+                project_id,
+                status=status,
+                domain=domain,
+                person=person,
+                source=source,
+                reviewer_id=reviewer_id,
+                category=category,
+                search=search,
             )
-            viewer_str = str(user_id)
-            has_restrictions = any(
-                p.sync_permission_status == SourcePermissionVerificationStatus.REVOKED.value
-                or (not has_manage and viewer_str not in (p.allowed_user_ids or []))
-                for p in policies
-            )
-            if not has_restrictions:
-                from app.models.verification import VerificationCase
-                from app.services.knowledge_domains import resolve_canonical_domain
+            sort_col = {
+                "updated_at": VerificationCase.updated_at,
+                "created_at": VerificationCase.created_at,
+                "priority": VerificationCase.priority,
+                "status": VerificationCase.case_status,
+                "domain": VerificationCase.domain,
+            }.get(sort_by, VerificationCase.updated_at)
+            order_expr = sort_col.asc() if sort_dir.lower() == "asc" else sort_col.desc()
 
-                base_filter = [
-                    VerificationCase.project_id == project_id,
-                    VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
-                ]
-                if status:
-                    base_filter.append(VerificationCase.case_status == status)
-                if source:
-                    base_filter.append(VerificationCase.source_provider == source)
-                if reviewer_id:
-                    base_filter.append(VerificationCase.assigned_reviewer_id == reviewer_id)
-
-                total_fast = int(
-                    self.session.execute(
-                        select(func.count(VerificationCase.id)).where(*base_filter)
-                    ).scalar()
-                    or 0
-                )
-                if total_fast > 0:
-                    sort_col = {
-                        "updated_at": VerificationCase.updated_at,
-                        "created_at": VerificationCase.created_at,
-                        "priority": VerificationCase.priority,
-                        "status": VerificationCase.case_status,
-                        "domain": VerificationCase.domain,
-                    }.get(sort_by, VerificationCase.updated_at)
-                    order_expr = sort_col.asc() if sort_dir.lower() == "asc" else sort_col.desc()
-                    page_ids = list(
+            id_count_rows = self.session.execute(
+                select(VerificationCase.id, func.count(VerificationCase.id).over())
+                .where(*base_filter)
+                .order_by(order_expr, VerificationCase.id.asc())
+                .limit(limit)
+                .offset(offset)
+            ).all()
+            if id_count_rows:
+                page_ids = [r[0] for r in id_count_rows]
+                total_fast = int(id_count_rows[0][1])
+            else:
+                page_ids = []
+                total_fast = (
+                    int(
                         self.session.execute(
-                            select(VerificationCase.id)
-                            .where(*base_filter)
-                            .order_by(order_expr, VerificationCase.id.asc())
-                            .limit(limit)
-                            .offset(offset)
-                        )
-                        .scalars()
-                        .all()
+                            select(func.count(VerificationCase.id)).where(*base_filter)
+                        ).scalar()
+                        or 0
                     )
-                    facet_rows = self.session.execute(
-                        select(
-                            VerificationCase.domain,
-                            VerificationCase.source_provider,
-                            VerificationCase.person_name,
-                        )
-                        .where(
-                            VerificationCase.project_id == project_id,
-                            VerificationCase.case_status != VerificationCaseStatus.ARCHIVED.value,
-                        )
-                        .distinct()
-                    ).all()
-                    f_domains: set[str] = set()
-                    f_sources: set[str] = set()
-                    f_people: set[str] = set()
-                    for d_val, s_val, p_val in facet_rows:
-                        if d_val:
-                            try:
-                                f_domains.add(resolve_canonical_domain(d_val).value)
-                            except (ValueError, KeyError):
-                                f_domains.add(d_val)
-                        if s_val:
-                            f_sources.add(s_val)
-                        if p_val:
-                            f_people.add(p_val)
+                    if offset > 0
+                    else 0
+                )
 
-                    page_cases = self.repo.list_project_cases_by_ids(project_id, page_ids)
-                    acl_map, fallback_target_evs = self._batch_evaluate_cases_acl(
+            f_domains, f_sources, f_people = self._get_project_facets(project_id)
+            has_any_filter = any([status, domain, person_q, source, reviewer_id, category, search_q])
+            if total_fast > 0 or has_any_filter or f_domains or f_sources or f_people:
+                page_cases = (
+                    self.repo.list_project_cases_by_ids(project_id, page_ids) if page_ids else []
+                )
+                acl_map, fallback_target_evs = (
+                    self._batch_evaluate_cases_acl(
                         page_cases, project_id=project_id, user_id=user_id, has_manage=has_manage
                     )
-                    fast_items: list[VerificationQueueItem] = []
-                    for case in page_cases:
-                        accessible_refs, restricted_cnt, _ = self._classify_case_access(
-                            case, acl_map, fallback_target_evs
-                        )
-                        accessible_open_issues = [
-                            i
-                            for i in case.issues
-                            if i.resolution_state == IssueResolutionState.OPEN.value
-                        ]
-                        fast_items.append(
-                            self._to_queue_item(
-                                case,
-                                accessible_evidence_count=len(accessible_refs),
-                                accessible_open_issues=accessible_open_issues,
-                                sanitized_assessment=case.machine_assessment_json,
-                                safe_title=case.title or case.current_claim[:80],
-                                safe_current_claim=case.current_claim,
-                                safe_original_ai_claim=case.original_ai_claim,
-                                restricted_titles=set(),
-                            )
-                        )
-                    fast_resp = VerificationQueueResponse(
-                        items=fast_items,
-                        total=total_fast,
-                        limit=limit,
-                        offset=offset,
-                        available_domains=sorted(f_domains),
-                        available_sources=sorted(f_sources),
-                        available_people=sorted(f_people),
+                    if page_cases
+                    else ({}, {})
+                )
+                user_names = (
+                    self._resolve_user_names_for_cases(
+                        page_cases, viewer=project_ctx.principal.user
                     )
+                    if page_cases
+                    else {}
+                )
+                fast_items: list[VerificationQueueItem] = []
+                fast_details: dict[str, VerificationCaseDetailResponse] = {}
+                for case in page_cases:
+                    accessible_refs, _restricted_cnt, _ = self._classify_case_access(
+                        case, acl_map, fallback_target_evs
+                    )
+                    accessible_open_issues = [
+                        i
+                        for i in case.issues
+                        if i.resolution_state == IssueResolutionState.OPEN.value
+                    ]
+                    fast_items.append(
+                        self._to_queue_item(
+                            case,
+                            accessible_evidence_count=len(accessible_refs),
+                            accessible_open_issues=accessible_open_issues,
+                            sanitized_assessment=case.machine_assessment_json,
+                            safe_title=case.title or case.current_claim[:80],
+                            safe_current_claim=case.current_claim,
+                            safe_original_ai_claim=case.original_ai_claim,
+                            restricted_titles=set(),
+                        )
+                    )
+                    detail_resp = self._build_case_detail_from_loaded(
+                        case,
+                        acl_map=acl_map,
+                        fallback_target_evs=fallback_target_evs,
+                        restricted_titles=set(),
+                        user_names=user_names,
+                    )
+                    fast_details[str(case.id)] = detail_resp
                     if use_cache:
-                        _VERIF_READ_CACHE.set(q_cache_key, fast_resp.model_dump(mode="json"), ttl_seconds=300)
-                    return fast_resp
+                        _VERIF_READ_CACHE.set(
+                            f"vcase:{project_id}:{case.id}:{user_id}:{has_manage}",
+                            detail_resp.model_dump(mode="json"),
+                            ttl_seconds=300,
+                        )
+                fast_resp = VerificationQueueResponse(
+                    items=fast_items,
+                    total=total_fast,
+                    limit=limit,
+                    offset=offset,
+                    available_domains=f_domains,
+                    available_sources=f_sources,
+                    available_people=f_people,
+                    case_details=fast_details,
+                )
+                if use_cache:
+                    _VERIF_READ_CACHE.set(q_cache_key, fast_resp.model_dump(mode="json"), ttl_seconds=300)
+                return fast_resp
 
         light_data = self.repo.list_project_cases_lightweight(
             project_id,
@@ -961,12 +1296,7 @@ class VerificationReviewService:
         acl_map, fallback_target_evs = self._batch_evaluate_lightweight_acl(
             light_data, project_id=project_id, user_id=user_id, has_manage=has_manage
         )
-        restricted_titles = self.access_policy.list_restricted_titles_for_viewer(
-            self.session,
-            project_id=project_id,
-            user_id=user_id,
-            has_project_manage=has_manage,
-        )
+        restricted_titles = self._get_restricted_titles(project_id, user_id, has_manage)
 
         refs_by_case = light_data["refs_by_case"]
         open_issues_by_case = light_data["open_issues_by_case"]
@@ -1098,7 +1428,15 @@ class VerificationReviewService:
                 )
             )
 
+        user_names = (
+            self._resolve_user_names_for_cases(
+                page_cases, viewer=project_ctx.principal.user
+            )
+            if page_cases
+            else {}
+        )
         page_items: list[VerificationQueueItem] = []
+        page_details: dict[str, VerificationCaseDetailResponse] = {}
         for case in page_cases:
             accessible_refs, restricted_cnt, _ = self._classify_case_access(
                 case, acl_map, fallback_target_evs
@@ -1169,6 +1507,20 @@ class VerificationReviewService:
                     restricted_titles=restricted_titles,
                 )
             )
+            detail_resp = self._build_case_detail_from_loaded(
+                case,
+                acl_map=acl_map,
+                fallback_target_evs=fallback_target_evs,
+                restricted_titles=restricted_titles,
+                user_names=user_names,
+            )
+            page_details[str(case.id)] = detail_resp
+            if use_cache:
+                _VERIF_READ_CACHE.set(
+                    f"vcase:{project_id}:{case.id}:{user_id}:{has_manage}",
+                    detail_resp.model_dump(mode="json"),
+                    ttl_seconds=300,
+                )
 
         q_resp = VerificationQueueResponse(
             items=page_items,
@@ -1178,6 +1530,7 @@ class VerificationReviewService:
             available_domains=sorted(facet_domains),
             available_sources=sorted(facet_sources),
             available_people=sorted(facet_people),
+            case_details=page_details,
         )
         if use_cache:
             _VERIF_READ_CACHE.set(q_cache_key, q_resp.model_dump(mode="json"), ttl_seconds=300)
@@ -1188,8 +1541,16 @@ class VerificationReviewService:
         case_id: uuid.UUID,
         *,
         project_ctx: ProjectContext,
+        force_reload: bool = False,
     ) -> VerificationCaseDetailResponse:
         user_id, has_manage = self._verify_viewer_access(project_ctx)
+
+        use_cache = not bool(os.getenv("PYTEST_CURRENT_TEST"))
+        case_cache_key = f"vcase:{project_ctx.project.id}:{case_id}:{user_id}:{has_manage}"
+        if use_cache and not force_reload:
+            cached_case = _VERIF_READ_CACHE.get(case_cache_key)
+            if isinstance(cached_case, dict):
+                return VerificationCaseDetailResponse.model_validate(cached_case)
 
         case = self.repo.get_case(case_id, project_id=project_ctx.project.id, load_details=True)
         if case is None:
@@ -1198,13 +1559,66 @@ class VerificationReviewService:
         acl_map, fallback_target_evs = self._batch_evaluate_cases_acl(
             [case], project_id=project_ctx.project.id, user_id=user_id, has_manage=has_manage
         )
-        restricted_titles = self.access_policy.list_restricted_titles_for_viewer(
-            self.session,
-            project_id=project_ctx.project.id,
-            user_id=user_id,
-            has_project_manage=has_manage,
+        restricted_titles = self._get_restricted_titles(
+            project_ctx.project.id, user_id, has_manage
         )
+        user_names = self._resolve_user_names_for_cases(
+            [case], viewer=project_ctx.principal.user
+        )
+        detail_resp = self._build_case_detail_from_loaded(
+            case,
+            acl_map=acl_map,
+            fallback_target_evs=fallback_target_evs,
+            restricted_titles=restricted_titles,
+            user_names=user_names,
+        )
+        if use_cache:
+            _VERIF_READ_CACHE.set(
+                case_cache_key, detail_resp.model_dump(mode="json"), ttl_seconds=300
+            )
+        return detail_resp
 
+    def _resolve_user_names_for_cases(
+        self,
+        cases: list[VerificationCase],
+        *,
+        viewer: User,
+    ) -> dict[uuid.UUID, str]:
+        known_names: dict[uuid.UUID, str] = {
+            viewer.id: viewer.full_name or viewer.email,
+        }
+        user_ids: set[uuid.UUID] = set()
+        for case in cases:
+            if case.assigned_reviewer is not None:
+                known_names[case.assigned_reviewer.id] = (
+                    case.assigned_reviewer.full_name or case.assigned_reviewer.email
+                )
+            if case.assigned_reviewer_id:
+                user_ids.add(case.assigned_reviewer_id)
+            for rev in case.revisions:
+                if rev.edited_by_user_id:
+                    user_ids.add(rev.edited_by_user_id)
+            for evt in case.review_events:
+                user_ids.add(evt.reviewer_user_id)
+            for req in case.context_requests:
+                user_ids.add(req.requested_by_user_id)
+                user_ids.add(req.requested_from_user_id)
+
+        missing_user_ids = {uid for uid in user_ids if uid not in known_names}
+        user_names = dict(known_names)
+        if missing_user_ids:
+            user_names.update(self._load_user_names(missing_user_ids))
+        return user_names
+
+    def _build_case_detail_from_loaded(
+        self,
+        case: VerificationCase,
+        *,
+        acl_map: dict[uuid.UUID, tuple[bool, EvidenceItem | None]],
+        fallback_target_evs: dict[uuid.UUID, set[uuid.UUID]],
+        restricted_titles: set[str],
+        user_names: dict[uuid.UUID, str],
+    ) -> VerificationCaseDetailResponse:
         accessible_ref_objs, restricted_count, fully_restricted = self._classify_case_access(
             case, acl_map, fallback_target_evs
         )
@@ -1294,20 +1708,6 @@ class VerificationReviewService:
                     created_at=conf.created_at,
                 )
             )
-
-        user_ids: set[uuid.UUID] = set()
-        if case.assigned_reviewer_id:
-            user_ids.add(case.assigned_reviewer_id)
-        for rev in case.revisions:
-            if rev.edited_by_user_id:
-                user_ids.add(rev.edited_by_user_id)
-        for evt in case.review_events:
-            user_ids.add(evt.reviewer_user_id)
-        for req in case.context_requests:
-            user_ids.add(req.requested_by_user_id)
-            user_ids.add(req.requested_from_user_id)
-
-        user_names = self._load_user_names(user_ids)
 
         if fully_restricted or restricted_count > 0:
             eligible = False
@@ -1487,7 +1887,7 @@ class VerificationReviewService:
             )
         )
 
-        return VerificationCaseDetailResponse(
+        detail_resp = VerificationCaseDetailResponse(
             id=case.id,
             project_id=case.project_id,
             target_type=case.target_type,
@@ -1538,6 +1938,7 @@ class VerificationReviewService:
             created_at=case.created_at,
             updated_at=case.updated_at,
         )
+        return detail_resp
 
     def list_context_requests(
         self,
@@ -1623,14 +2024,16 @@ class VerificationReviewService:
         case.case_status = VerificationCaseStatus.VERIFIED.value
         case.resolved_at = now
         case.last_reviewed_at = now
+        case.updated_at = now
 
         self._sync_target_review_state(
             case,
             epistemic_status=EpistemicStatus.HUMAN_VERIFIED.value,
             review_status=KnowledgeReviewStatus.APPROVED.value,
             rel_status=RelationshipVerificationStatus.VERIFIED.value,
+            now=now,
         )
-        self._record_review_event(
+        evt = self._record_review_event(
             case=case,
             reviewer_id=project_ctx.principal.user.id,
             action=ReviewActionType.APPROVE.value,
@@ -1638,6 +2041,7 @@ class VerificationReviewService:
             new_status=case.case_status,
             decision_reason=payload.decision_reason,
             review_notes=payload.reviewer_note,
+            now=now,
         )
         self.audit.record_event(
             event_type="verification.case.approved",
@@ -1650,8 +2054,12 @@ class VerificationReviewService:
             metadata={"previous_status": prev_status, "version": case.version},
         )
         self.session.commit()
-        self.session.expire_all()
-        return self.get_case_detail(case.id, project_ctx=project_ctx)
+        return self._finalize_case_action_response(
+            case=case,
+            project_ctx=project_ctx,
+            previous_status=prev_status,
+            review_event=evt,
+        )
 
     def reject_case(
         self,
@@ -1668,14 +2076,16 @@ class VerificationReviewService:
         case.case_status = VerificationCaseStatus.REJECTED.value
         case.resolved_at = now
         case.last_reviewed_at = now
+        case.updated_at = now
 
         self._sync_target_review_state(
             case,
             epistemic_status=None,
             review_status=KnowledgeReviewStatus.REJECTED.value,
             rel_status=RelationshipVerificationStatus.REJECTED.value,
+            now=now,
         )
-        self._record_review_event(
+        evt = self._record_review_event(
             case=case,
             reviewer_id=project_ctx.principal.user.id,
             action=ReviewActionType.REJECT.value,
@@ -1683,6 +2093,7 @@ class VerificationReviewService:
             new_status=case.case_status,
             decision_reason=payload.decision_reason,
             review_notes=payload.reviewer_note,
+            now=now,
         )
         self.audit.record_event(
             event_type="verification.case.rejected",
@@ -1695,8 +2106,12 @@ class VerificationReviewService:
             metadata={"previous_status": prev_status, "reason": payload.decision_reason},
         )
         self.session.commit()
-        self.session.expire_all()
-        return self.get_case_detail(case.id, project_ctx=project_ctx)
+        return self._finalize_case_action_response(
+            case=case,
+            project_ctx=project_ctx,
+            previous_status=prev_status,
+            review_event=evt,
+        )
 
     def edit_finding(
         self,
@@ -1706,7 +2121,16 @@ class VerificationReviewService:
         payload: EditFindingRequest,
     ) -> VerificationCaseDetailResponse:
         case = self._require_case(case_id, project_ctx.project.id)
-        if not case.evidence_refs:
+        evidence_item_ids = list(
+            self.session.execute(
+                select(VerificationEvidenceRef.evidence_item_id).where(
+                    VerificationEvidenceRef.case_id == case.id
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not evidence_item_ids:
             raise UnprocessableEntityError(
                 "Factual claims must be supported by at least one evidence reference before editing. "
                 "Request additional context or attach evidence first."
@@ -1715,42 +2139,53 @@ class VerificationReviewService:
         now = datetime.now(UTC)
         prev_status = case.case_status
         prev_claim = case.current_claim
+        prev_domain = case.domain
         new_domain = payload.domain.strip() if payload.domain else case.domain
 
         case.version += 1
         case.current_claim = payload.current_claim
         case.domain = new_domain
         case.last_reviewed_at = now
+        case.updated_at = now
         # Editing returns a finding to PENDING_REVIEW so the updated claim is explicitly confirmed
         if case.case_status != VerificationCaseStatus.CONFLICTED.value:
             case.case_status = VerificationCaseStatus.PENDING_REVIEW.value
 
-        self.session.add(
-            VerificationFindingRevision(
-                organisation_id=case.organisation_id,
-                project_id=case.project.id,
-                case_id=case.id,
-                revision_number=case.version,
-                claim_text=payload.current_claim,
-                domain=new_domain,
-                is_ai_original=False,
-                edited_by_user_id=project_ctx.principal.user.id,
-                edit_reason=payload.edit_reason,
-                evidence_snapshot_json={
-                    "evidence_item_ids": [str(r.evidence_item_id) for r in case.evidence_refs]
-                },
-            )
+        revision = VerificationFindingRevision(
+            id=uuid.uuid4(),
+            organisation_id=case.organisation_id,
+            project_id=case.project_id,
+            case_id=case.id,
+            revision_number=case.version,
+            claim_text=payload.current_claim,
+            domain=new_domain,
+            is_ai_original=False,
+            edited_by_user_id=project_ctx.principal.user.id,
+            edit_reason=payload.edit_reason,
+            evidence_snapshot_json={
+                "evidence_item_ids": [str(eid) for eid in evidence_item_ids]
+            },
+            created_at=now,
         )
+        self.session.add(revision)
 
         # Sync edited statement back to KnowledgeItem without overwriting AI original on case
         if case.target_type == VerificationTargetType.KNOWLEDGE_ITEM.value:
-            ki = self.session.get(KnowledgeItem, case.target_id)
-            if ki is not None and ki.project_id == case.project_id:
-                ki.structured_summary = payload.current_claim
-                ki.category = new_domain
-                ki.review_status = KnowledgeReviewStatus.PENDING_REVIEW.value
+            self.session.execute(
+                update(KnowledgeItem)
+                .where(
+                    KnowledgeItem.id == case.target_id,
+                    KnowledgeItem.project_id == case.project_id,
+                )
+                .values(
+                    structured_summary=payload.current_claim,
+                    category=new_domain,
+                    review_status=KnowledgeReviewStatus.PENDING_REVIEW.value,
+                    updated_at=now,
+                )
+            )
 
-        self._record_review_event(
+        evt = self._record_review_event(
             case=case,
             reviewer_id=project_ctx.principal.user.id,
             action=ReviewActionType.EDIT.value,
@@ -1760,6 +2195,7 @@ class VerificationReviewService:
             review_notes=payload.reviewer_note,
             previous_snapshot={"claim": prev_claim},
             new_snapshot={"claim": payload.current_claim, "domain": new_domain},
+            now=now,
         )
         self.audit.record_event(
             event_type="verification.case.edited",
@@ -1772,8 +2208,15 @@ class VerificationReviewService:
             metadata={"version": case.version, "edit_reason": payload.edit_reason},
         )
         self.session.commit()
-        self.session.expire_all()
-        return self.get_case_detail(case.id, project_ctx=project_ctx)
+        return self._finalize_case_action_response(
+            case=case,
+            project_ctx=project_ctx,
+            previous_status=prev_status,
+            review_event=evt,
+            revision=revision,
+            claim_changed=True,
+            domain_changed=(new_domain != prev_domain),
+        )
 
     def request_context(
         self,
@@ -1787,6 +2230,7 @@ class VerificationReviewService:
         prev_status = case.case_status
 
         req = VerificationContextRequest(
+            id=uuid.uuid4(),
             organisation_id=case.organisation_id,
             project_id=case.project_id,
             case_id=case.id,
@@ -1795,14 +2239,30 @@ class VerificationReviewService:
             question=payload.question,
             requested_information_type=payload.requested_information_type,
             status=ContextRequestStatus.PENDING.value,
+            created_at=now,
+            updated_at=now,
         )
         self.session.add(req)
 
         if case.case_status == VerificationCaseStatus.CANDIDATE.value:
             case.case_status = VerificationCaseStatus.PENDING_REVIEW.value
         case.last_reviewed_at = now
+        case.updated_at = now
 
-        self._record_review_event(
+        requested_from_name: str | None = None
+        viewer = project_ctx.principal.user
+        has_manage = project_ctx.has_permission("project.manage")
+        use_cache = not bool(os.getenv("PYTEST_CURRENT_TEST"))
+        case_cache_key = f"vcase:{case.project_id}:{case.id}:{viewer.id}:{has_manage}"
+        if use_cache and _VERIF_READ_CACHE.get(case_cache_key) is not None:
+            if payload.requested_from_user_id == viewer.id:
+                requested_from_name = viewer.full_name or viewer.email
+            else:
+                requested_from_name = self._load_user_names({payload.requested_from_user_id}).get(
+                    payload.requested_from_user_id
+                )
+
+        evt = self._record_review_event(
             case=case,
             reviewer_id=project_ctx.principal.user.id,
             action=ReviewActionType.REQUEST_CONTEXT.value,
@@ -1810,6 +2270,7 @@ class VerificationReviewService:
             new_status=case.case_status,
             decision_reason=payload.question,
             review_notes=payload.reviewer_note,
+            now=now,
         )
         self.audit.record_event(
             event_type="verification.context_request.created",
@@ -1822,8 +2283,15 @@ class VerificationReviewService:
             metadata={"requested_from_user_id": str(payload.requested_from_user_id)},
         )
         self.session.commit()
-        self.session.expire_all()
-        return self.get_case_detail(case.id, project_ctx=project_ctx)
+        return self._finalize_case_action_response(
+            case=case,
+            project_ctx=project_ctx,
+            previous_status=prev_status,
+            review_event=evt,
+            context_request=req,
+            requested_from_name=requested_from_name,
+            pending_context_delta=1,
+        )
 
     def respond_context_request(
         self,
@@ -1898,6 +2366,7 @@ class VerificationReviewService:
             outcome=AuditOutcome.SUCCESS.value,
         )
         self.session.commit()
+        invalidate_verification_read_cache(case.project_id)
         names = self._load_user_names({req.requested_by_user_id, req.requested_from_user_id})
         return VerificationContextRequestDetail(
             id=req.id,
@@ -1930,14 +2399,16 @@ class VerificationReviewService:
         case.case_status = VerificationCaseStatus.UNRESOLVED.value
         case.last_reviewed_at = now
         case.resolved_at = None
+        case.updated_at = now
 
         self._sync_target_review_state(
             case,
             epistemic_status=None,
             review_status=KnowledgeReviewStatus.NEEDS_CLARIFICATION.value,
             rel_status=RelationshipVerificationStatus.UNRESOLVED.value,
+            now=now,
         )
-        self._record_review_event(
+        evt = self._record_review_event(
             case=case,
             reviewer_id=project_ctx.principal.user.id,
             action=ReviewActionType.MARK_UNRESOLVED.value,
@@ -1945,6 +2416,7 @@ class VerificationReviewService:
             new_status=case.case_status,
             decision_reason=payload.decision_reason,
             review_notes=payload.reviewer_note,
+            now=now,
         )
         self.audit.record_event(
             event_type="verification.case.marked_unresolved",
@@ -1957,8 +2429,12 @@ class VerificationReviewService:
             metadata={"previous_status": prev_status, "reason": payload.decision_reason},
         )
         self.session.commit()
-        self.session.expire_all()
-        return self.get_case_detail(case.id, project_ctx=project_ctx)
+        return self._finalize_case_action_response(
+            case=case,
+            project_ctx=project_ctx,
+            previous_status=prev_status,
+            review_event=evt,
+        )
 
     def assign_reviewer(
         self,
@@ -1968,29 +2444,351 @@ class VerificationReviewService:
         assigned_reviewer_id: uuid.UUID | None,
     ) -> VerificationCaseDetailResponse:
         case = self._require_case(case_id, project_ctx.project.id)
+        now = datetime.now(UTC)
         prev_status = case.case_status
         case.assigned_reviewer_id = assigned_reviewer_id
+        case.updated_at = now
         if assigned_reviewer_id is not None and case.case_status == VerificationCaseStatus.CANDIDATE.value:
             case.case_status = VerificationCaseStatus.PENDING_REVIEW.value
 
-        self._record_review_event(
+        assigned_reviewer_name: str | None = None
+        viewer = project_ctx.principal.user
+        has_manage = project_ctx.has_permission("project.manage")
+        use_cache = not bool(os.getenv("PYTEST_CURRENT_TEST"))
+        if assigned_reviewer_id is not None and use_cache:
+            case_cached = (
+                _VERIF_READ_CACHE.get(
+                    f"vcase:{case.project_id}:{case.id}:{viewer.id}:{has_manage}"
+                )
+                is not None
+            )
+            queue_cached = bool(_VERIF_READ_CACHE.keys_with_prefix(f"vq:{case.project_id}:"))
+            if case_cached or queue_cached:
+                if assigned_reviewer_id == viewer.id:
+                    assigned_reviewer_name = viewer.full_name or viewer.email
+                else:
+                    assigned_reviewer_name = self._load_user_names({assigned_reviewer_id}).get(
+                        assigned_reviewer_id
+                    )
+
+        evt = self._record_review_event(
             case=case,
             reviewer_id=project_ctx.principal.user.id,
             action=ReviewActionType.ASSIGN.value,
             previous_status=prev_status,
             new_status=case.case_status,
             decision_reason="Assigned reviewer" if assigned_reviewer_id else "Unassigned reviewer",
+            now=now,
         )
         self.session.commit()
-        self.session.expire_all()
-        return self.get_case_detail(case.id, project_ctx=project_ctx)
+        return self._finalize_case_action_response(
+            case=case,
+            project_ctx=project_ctx,
+            previous_status=prev_status,
+            review_event=evt,
+            assigned_reviewer_changed=True,
+            assigned_reviewer_name=assigned_reviewer_name,
+        )
+
+    def verify_all_cases(
+        self,
+        *,
+        project_ctx: ProjectContext,
+        payload: VerifyAllFindingsRequest,
+    ) -> VerifyAllFindingsResponse:
+        user_id, has_manage = self._verify_viewer_access(project_ctx)
+        project_id = project_ctx.project.id
+
+        eligible_statuses = {
+            VerificationCaseStatus.CANDIDATE.value,
+            VerificationCaseStatus.PENDING_REVIEW.value,
+            VerificationCaseStatus.CONFLICTED.value,
+            VerificationCaseStatus.UNRESOLVED.value,
+        }
+
+        target_rows: list[tuple[uuid.UUID, uuid.UUID, str, str, uuid.UUID, int]] = []
+        already_verified_count = 0
+
+        if not self._has_viewer_restrictions(project_id, user_id, has_manage):
+            base_filter = self._build_case_sql_filters(
+                project_id,
+                status=payload.status,
+                domain=payload.domain,
+                person=payload.person,
+                source=payload.source,
+                reviewer_id=payload.reviewer_id,
+                category=payload.category,
+                search=payload.search,
+            )
+            raw_rows = self.session.execute(
+                select(
+                    VerificationCase.id,
+                    VerificationCase.organisation_id,
+                    VerificationCase.case_status,
+                    VerificationCase.target_type,
+                    VerificationCase.target_id,
+                    VerificationCase.version,
+                ).where(*base_filter)
+            ).all()
+            for row in raw_rows:
+                st = str(row[2])
+                if st == VerificationCaseStatus.VERIFIED.value:
+                    already_verified_count += 1
+                elif st in eligible_statuses:
+                    target_rows.append(
+                        (row[0], row[1], st, str(row[3]), row[4], int(row[5] or 1))
+                    )
+            if payload.status and payload.status != VerificationCaseStatus.VERIFIED.value:
+                already_verified_count = int(
+                    self.session.execute(
+                        select(func.count(VerificationCase.id)).where(
+                            VerificationCase.project_id == project_id,
+                            VerificationCase.case_status == VerificationCaseStatus.VERIFIED.value,
+                        )
+                    ).scalar()
+                    or 0
+                )
+        else:
+            from app.services.knowledge_domains import (
+                canonical_domain_to_legacy_category,
+                resolve_canonical_domain,
+            )
+
+            search_q = payload.search.strip().lower() if payload.search and payload.search.strip() else None
+            person_q = payload.person.strip().lower() if payload.person and payload.person.strip() else None
+            light_data = self.repo.list_project_cases_lightweight(
+                project_id,
+                include_claim_text=search_q is not None,
+            )
+            acl_map, fallback_target_evs = self._batch_evaluate_lightweight_acl(
+                light_data, project_id=project_id, user_id=user_id, has_manage=has_manage
+            )
+            restricted_titles = self._get_restricted_titles(project_id, user_id, has_manage)
+            refs_by_case = light_data["refs_by_case"]
+            open_issues_by_case = light_data["open_issues_by_case"]
+
+            allowed_doms: set[str] | None = None
+            if payload.domain:
+                dom_clean = payload.domain.strip()
+                allowed_doms = {dom_clean, dom_clean.lower(), dom_clean.upper()}
+                try:
+                    c_dom = resolve_canonical_domain(dom_clean)
+                    allowed_doms.add(c_dom.value)
+                    allowed_doms.add(c_dom.value.lower())
+                    leg_cat = canonical_domain_to_legacy_category(c_dom)
+                    allowed_doms.add(leg_cat)
+                    allowed_doms.add(leg_cat.upper())
+                except (ValueError, KeyError):
+                    pass
+
+            eligible_ids: list[uuid.UUID] = []
+            for row in light_data["cases"]:
+                _, _, fully_restricted = self._classify_lightweight_access(
+                    row, refs_by_case, acl_map, fallback_target_evs
+                )
+                if fully_restricted:
+                    continue
+                if row.case_status == VerificationCaseStatus.VERIFIED.value:
+                    already_verified_count += 1
+                if payload.status and row.case_status != payload.status:
+                    continue
+                if allowed_doms is not None and row.domain not in allowed_doms and (row.domain or "").lower() not in allowed_doms:
+                    continue
+                if payload.source and row.source_provider != payload.source:
+                    continue
+                if payload.reviewer_id and row.assigned_reviewer_id != payload.reviewer_id:
+                    continue
+                if person_q and (not row.person_name or person_q not in row.person_name.lower()):
+                    continue
+                if payload.category:
+                    has_cat = any(
+                        cat == payload.category
+                        and (conf_ev_id is None or acl_map.get(conf_ev_id, (False, None))[0])
+                        for cat, conf_ev_id in open_issues_by_case.get(row.id, ())
+                    )
+                    if not has_cat:
+                        continue
+                if search_q is not None:
+                    s_title = (
+                        self._scrub_derived_text(
+                            row.title or (row.current_claim or "")[:80],
+                            restricted_titles=restricted_titles,
+                            replacement=_REDACTED_FINDING_TITLE,
+                        )
+                        or _REDACTED_FINDING_TITLE
+                    )
+                    s_curr = (
+                        self._scrub_derived_text(
+                            row.current_claim,
+                            restricted_titles=restricted_titles,
+                            replacement=_REDACTED_CLAIM_TEXT,
+                        )
+                        or ""
+                    )
+                    s_orig = (
+                        self._scrub_derived_text(
+                            row.original_ai_claim,
+                            restricted_titles=restricted_titles,
+                            replacement=_REDACTED_CLAIM_TEXT,
+                        )
+                        or ""
+                    )
+                    if not any(
+                        search_q in field.lower()
+                        for field in (s_title, s_curr, s_orig, row.domain or "")
+                    ):
+                        continue
+                if row.case_status in eligible_statuses:
+                    eligible_ids.append(row.id)
+
+            for idx in range(0, len(eligible_ids), 500):
+                batch_ids = eligible_ids[idx : idx + 500]
+                raw_rows = self.session.execute(
+                    select(
+                        VerificationCase.id,
+                        VerificationCase.organisation_id,
+                        VerificationCase.case_status,
+                        VerificationCase.target_type,
+                        VerificationCase.target_id,
+                        VerificationCase.version,
+                    ).where(
+                        VerificationCase.project_id == project_id,
+                        VerificationCase.id.in_(batch_ids),
+                    )
+                ).all()
+                for row in raw_rows:
+                    target_rows.append(
+                        (row[0], row[1], str(row[2]), str(row[3]), row[4], int(row[5] or 1))
+                    )
+
+        ki_target_ids: list[uuid.UUID] = []
+        rel_target_ids: list[uuid.UUID] = []
+        if target_rows:
+            now = datetime.now(UTC)
+            reason_text = (
+                (payload.decision_reason or "").strip()
+                or "Bulk verified via Verify All in Verification Center"
+            )
+            note_text = (payload.reviewer_note or "").strip() or None
+            corr_id = (get_correlation_id() or "-")[:64]
+
+            case_ids = [r[0] for r in target_rows]
+            ki_target_ids = list(
+                {r[4] for r in target_rows if r[3] == VerificationTargetType.KNOWLEDGE_ITEM.value}
+            )
+            rel_target_ids = list(
+                {r[4] for r in target_rows if r[3] == VerificationTargetType.RELATIONSHIP.value}
+            )
+
+            for idx in range(0, len(case_ids), 500):
+                batch_ids = case_ids[idx : idx + 500]
+                self.session.execute(
+                    update(VerificationCase)
+                    .where(
+                        VerificationCase.project_id == project_id,
+                        VerificationCase.id.in_(batch_ids),
+                    )
+                    .values(
+                        case_status=VerificationCaseStatus.VERIFIED.value,
+                        resolved_at=now,
+                        last_reviewed_at=now,
+                        updated_at=now,
+                    )
+                )
+
+            for idx in range(0, len(ki_target_ids), 500):
+                batch_ids = ki_target_ids[idx : idx + 500]
+                self.session.execute(
+                    update(KnowledgeItem)
+                    .where(
+                        KnowledgeItem.project_id == project_id,
+                        KnowledgeItem.id.in_(batch_ids),
+                    )
+                    .values(
+                        epistemic_status=EpistemicStatus.HUMAN_VERIFIED.value,
+                        review_status=KnowledgeReviewStatus.APPROVED.value,
+                        updated_at=now,
+                    )
+                )
+
+            for idx in range(0, len(rel_target_ids), 500):
+                batch_ids = rel_target_ids[idx : idx + 500]
+                self.session.execute(
+                    update(KnowledgeRelationship)
+                    .where(
+                        KnowledgeRelationship.project_id == project_id,
+                        KnowledgeRelationship.id.in_(batch_ids),
+                    )
+                    .values(
+                        verification_status=RelationshipVerificationStatus.VERIFIED.value,
+                        updated_at=now,
+                    )
+                )
+
+            event_rows = [
+                {
+                    "id": uuid.uuid4(),
+                    "organisation_id": org_id,
+                    "project_id": project_id,
+                    "case_id": cid,
+                    "reviewer_user_id": user_id,
+                    "action": ReviewActionType.APPROVE.value,
+                    "previous_status": prev_st,
+                    "new_status": VerificationCaseStatus.VERIFIED.value,
+                    "case_version": ver,
+                    "decision_reason": reason_text,
+                    "review_notes": note_text,
+                    "previous_snapshot_json": None,
+                    "new_snapshot_json": None,
+                    "correlation_id": corr_id,
+                    "created_at": now,
+                }
+                for cid, org_id, prev_st, _ttype, _tid, ver in target_rows
+            ]
+            for idx in range(0, len(event_rows), 500):
+                self.session.execute(
+                    insert(VerificationReviewEvent), event_rows[idx : idx + 500]
+                )
+
+            self.audit.record_event(
+                event_type="verification.cases.bulk_approved",
+                resource_type="verification_case",
+                actor_user_id=user_id,
+                organisation_id=project_ctx.organisation.id,
+                project_id=project_id,
+                resource_id=str(project_id),
+                outcome=AuditOutcome.SUCCESS.value,
+                metadata={
+                    "verified_count": len(case_ids),
+                    "knowledge_items_verified": len(ki_target_ids),
+                    "relationships_verified": len(rel_target_ids),
+                },
+            )
+            self.session.commit()
+
+        invalidate_verification_read_cache(project_id)
+        summary = self.get_summary(project_id, project_ctx=project_ctx)
+        return VerifyAllFindingsResponse(
+            project_id=project_id,
+            verified_count=len(target_rows),
+            knowledge_items_verified=len(ki_target_ids),
+            relationships_verified=len(rel_target_ids),
+            already_verified_count=already_verified_count,
+            summary=summary,
+        )
 
     # -----------------------------------------------------------------------
     # Internal Helpers
     # -----------------------------------------------------------------------
 
-    def _require_case(self, case_id: uuid.UUID, project_id: uuid.UUID) -> VerificationCase:
-        case = self.repo.get_case(case_id, project_id=project_id, load_details=True)
+    def _require_case(
+        self,
+        case_id: uuid.UUID,
+        project_id: uuid.UUID,
+        *,
+        load_details: bool = False,
+    ) -> VerificationCase:
+        case = self.repo.get_case(case_id, project_id=project_id, load_details=load_details)
         if case is None:
             raise NotFoundError(f"Verification case {case_id} not found in this project.")
         return case
@@ -2009,17 +2807,33 @@ class VerificationReviewService:
         epistemic_status: str | None,
         review_status: str,
         rel_status: str,
+        now: datetime | None = None,
     ) -> None:
+        ts = now or datetime.now(UTC)
         if case.target_type == VerificationTargetType.KNOWLEDGE_ITEM.value:
-            ki = self.session.get(KnowledgeItem, case.target_id)
-            if ki is not None and ki.project_id == case.project_id:
-                if epistemic_status is not None:
-                    ki.epistemic_status = epistemic_status
-                ki.review_status = review_status
+            values: dict[str, Any] = {
+                "review_status": review_status,
+                "updated_at": ts,
+            }
+            if epistemic_status is not None:
+                values["epistemic_status"] = epistemic_status
+            self.session.execute(
+                update(KnowledgeItem)
+                .where(
+                    KnowledgeItem.id == case.target_id,
+                    KnowledgeItem.project_id == case.project_id,
+                )
+                .values(**values)
+            )
         elif case.target_type == VerificationTargetType.RELATIONSHIP.value:
-            rel = self.session.get(KnowledgeRelationship, case.target_id)
-            if rel is not None and rel.project_id == case.project_id:
-                rel.verification_status = rel_status
+            self.session.execute(
+                update(KnowledgeRelationship)
+                .where(
+                    KnowledgeRelationship.id == case.target_id,
+                    KnowledgeRelationship.project_id == case.project_id,
+                )
+                .values(verification_status=rel_status, updated_at=ts)
+            )
 
     def _record_review_event(
         self,
@@ -2033,26 +2847,265 @@ class VerificationReviewService:
         review_notes: str | None = None,
         previous_snapshot: dict[str, Any] | None = None,
         new_snapshot: dict[str, Any] | None = None,
-    ) -> None:
+        now: datetime | None = None,
+    ) -> VerificationReviewEvent:
         corr_id = get_correlation_id() or "-"
-        self.session.add(
-            VerificationReviewEvent(
-                organisation_id=case.organisation_id,
-                project_id=case.project_id,
-                case_id=case.id,
-                reviewer_user_id=reviewer_id,
-                action=action,
-                previous_status=previous_status,
-                new_status=new_status,
-                case_version=case.version,
-                decision_reason=decision_reason,
-                review_notes=review_notes,
-                previous_snapshot_json=previous_snapshot,
-                new_snapshot_json=new_snapshot,
-                correlation_id=corr_id[:64],
-            )
+        event_time = now or datetime.now(UTC)
+        evt = VerificationReviewEvent(
+            id=uuid.uuid4(),
+            organisation_id=case.organisation_id,
+            project_id=case.project_id,
+            case_id=case.id,
+            reviewer_user_id=reviewer_id,
+            action=action,
+            previous_status=previous_status,
+            new_status=new_status,
+            case_version=case.version,
+            decision_reason=decision_reason,
+            review_notes=review_notes,
+            previous_snapshot_json=previous_snapshot,
+            new_snapshot_json=new_snapshot,
+            correlation_id=corr_id[:64],
+            created_at=event_time,
         )
-        invalidate_verification_read_cache(case.project_id)
+        self.session.add(evt)
+        return evt
+
+    def _finalize_case_action_response(
+        self,
+        *,
+        case: VerificationCase,
+        project_ctx: ProjectContext,
+        previous_status: str,
+        review_event: VerificationReviewEvent,
+        revision: VerificationFindingRevision | None = None,
+        context_request: VerificationContextRequest | None = None,
+        requested_from_name: str | None = None,
+        claim_changed: bool = False,
+        domain_changed: bool = False,
+        assigned_reviewer_changed: bool = False,
+        assigned_reviewer_name: str | None = None,
+        pending_context_delta: int = 0,
+    ) -> VerificationCaseDetailResponse:
+        viewer = project_ctx.principal.user
+        user_id = viewer.id
+        viewer_name = viewer.full_name or viewer.email
+        has_manage = project_ctx.has_permission("project.manage")
+
+        use_cache = not bool(os.getenv("PYTEST_CURRENT_TEST"))
+        case_cache_key = f"vcase:{case.project_id}:{case.id}:{user_id}:{has_manage}"
+        cached_case = _VERIF_READ_CACHE.get(case_cache_key) if use_cache else None
+
+        safe_claim_for_queue: str | None = None
+        if isinstance(cached_case, dict):
+            restricted_count = int(cached_case.get("restricted_evidence_count") or 0)
+            fully_restricted = (
+                cached_case.get("source_provider") == "restricted"
+                and cached_case.get("evidence_completeness") == "restricted"
+            )
+            restricted_titles = (
+                self._get_restricted_titles(case.project_id, user_id, has_manage)
+                if not fully_restricted
+                else set()
+            )
+            if fully_restricted or restricted_count > 0:
+                eligible = False
+                eligibility_reason = (
+                    "Blocked: supporting source evidence is restricted for the current viewer."
+                )
+            else:
+                eligible, eligibility_reason = self._compute_handover_eligibility(case)
+
+            updated_ts = case.updated_at or review_event.created_at
+            cached_case["case_status"] = case.case_status
+            cached_case["version"] = case.version
+            cached_case["handover_eligible"] = eligible
+            cached_case["handover_eligibility_reason"] = eligibility_reason
+            cached_case["last_reviewed_at"] = (
+                case.last_reviewed_at.isoformat() if case.last_reviewed_at else None
+            )
+            cached_case["resolved_at"] = (
+                case.resolved_at.isoformat() if case.resolved_at else None
+            )
+            cached_case["updated_at"] = updated_ts.isoformat()
+
+            if claim_changed:
+                safe_curr_claim = (
+                    _REDACTED_CLAIM_TEXT
+                    if fully_restricted
+                    else (
+                        self._scrub_derived_text(
+                            case.current_claim,
+                            restricted_titles=restricted_titles,
+                            replacement=_REDACTED_CLAIM_TEXT,
+                        )
+                        or ""
+                    )
+                )
+                cached_case["current_claim"] = safe_curr_claim
+                safe_claim_for_queue = safe_curr_claim
+
+            if domain_changed:
+                cached_case["domain"] = case.domain
+
+            if assigned_reviewer_changed:
+                cached_case["assigned_reviewer_id"] = (
+                    str(case.assigned_reviewer_id) if case.assigned_reviewer_id else None
+                )
+                cached_case["assigned_reviewer_name"] = assigned_reviewer_name
+
+            evt_detail = VerificationReviewEventDetail(
+                id=review_event.id,
+                reviewer_user_id=review_event.reviewer_user_id,
+                reviewer_name=viewer_name,
+                action=review_event.action,
+                previous_status=review_event.previous_status,
+                new_status=review_event.new_status,
+                case_version=review_event.case_version,
+                decision_reason=(
+                    None
+                    if fully_restricted
+                    else self._scrub_derived_text(
+                        review_event.decision_reason, restricted_titles=restricted_titles
+                    )
+                ),
+                review_notes=(
+                    None
+                    if fully_restricted
+                    else self._scrub_derived_text(
+                        review_event.review_notes, restricted_titles=restricted_titles
+                    )
+                ),
+                created_at=review_event.created_at,
+            )
+            events = list(cached_case.get("review_events") or [])
+            events.insert(0, evt_detail.model_dump(mode="json"))
+            cached_case["review_events"] = events
+
+            if revision is not None:
+                redact_revisions = fully_restricted or restricted_count > 0
+                rev_restricted = redact_revisions or self._text_mentions_restricted(
+                    revision.claim_text, restricted_titles
+                )
+                rev_detail = VerificationRevisionDetail(
+                    id=revision.id,
+                    revision_number=revision.revision_number,
+                    claim_text=(
+                        _REDACTED_CLAIM_TEXT
+                        if rev_restricted
+                        else redact_secrets(revision.claim_text)
+                    ),
+                    domain=revision.domain,
+                    is_ai_original=revision.is_ai_original,
+                    edited_by_user_id=revision.edited_by_user_id,
+                    edited_by_name=viewer_name if revision.edited_by_user_id else None,
+                    edit_reason=(
+                        None
+                        if rev_restricted
+                        else self._scrub_derived_text(
+                            revision.edit_reason, restricted_titles=restricted_titles
+                        )
+                    ),
+                    created_at=revision.created_at,
+                )
+                revs = list(cached_case.get("revisions") or [])
+                revs.insert(0, rev_detail.model_dump(mode="json"))
+                cached_case["revisions"] = revs
+
+            if context_request is not None:
+                ctx_detail = VerificationContextRequestDetail(
+                    id=context_request.id,
+                    case_id=context_request.case_id,
+                    requested_by_user_id=context_request.requested_by_user_id,
+                    requested_by_name=viewer_name,
+                    requested_from_user_id=context_request.requested_from_user_id,
+                    requested_from_name=requested_from_name,
+                    question=(
+                        _REDACTED_CLAIM_TEXT
+                        if fully_restricted
+                        else (
+                            self._scrub_derived_text(
+                                context_request.question, restricted_titles=restricted_titles
+                            )
+                            or _REDACTED_CLAIM_TEXT
+                        )
+                    ),
+                    requested_information_type=context_request.requested_information_type,
+                    status=context_request.status,
+                    response_text=None,
+                    response_evidence_id=None,
+                    responded_at=None,
+                    created_at=context_request.created_at,
+                )
+                ctxs = list(cached_case.get("context_requests") or [])
+                ctxs.insert(0, ctx_detail.model_dump(mode="json"))
+                cached_case["context_requests"] = ctxs
+
+            for other_key in _VERIF_READ_CACHE.keys_with_prefix(
+                f"vcase:{case.project_id}:{case.id}:"
+            ):
+                if other_key != case_cache_key:
+                    _VERIF_READ_CACHE.delete(other_key)
+
+            validated = VerificationCaseDetailResponse.model_validate(cached_case)
+            validated_dict = validated.model_dump(mode="json")
+            _VERIF_READ_CACHE.set(case_cache_key, validated_dict, ttl_seconds=300)
+
+            patch_verification_read_cache_for_case(
+                project_id=case.project_id,
+                actor_user_id=user_id,
+                case_id=case.id,
+                previous_status=previous_status,
+                new_status=case.case_status,
+                version=case.version,
+                updated_at=updated_ts,
+                last_reviewed_at=case.last_reviewed_at,
+                current_claim=safe_claim_for_queue,
+                domain=case.domain,
+                claim_changed=claim_changed,
+                domain_changed=domain_changed,
+                assigned_reviewer_id=case.assigned_reviewer_id,
+                assigned_reviewer_name=assigned_reviewer_name,
+                assigned_reviewer_changed=assigned_reviewer_changed,
+                pending_context_delta=pending_context_delta,
+                patched_case_detail=validated_dict,
+            )
+            return validated
+
+        _VERIF_READ_CACHE.invalidate_prefix(f"vcase:{case.project_id}:{case.id}:")
+        if use_cache:
+            if claim_changed:
+                restricted_titles = self._get_restricted_titles(
+                    case.project_id, user_id, has_manage
+                )
+                safe_claim_for_queue = (
+                    self._scrub_derived_text(
+                        case.current_claim,
+                        restricted_titles=restricted_titles,
+                        replacement=_REDACTED_CLAIM_TEXT,
+                    )
+                    or ""
+                )
+            patch_verification_read_cache_for_case(
+                project_id=case.project_id,
+                actor_user_id=user_id,
+                case_id=case.id,
+                previous_status=previous_status,
+                new_status=case.case_status,
+                version=case.version,
+                updated_at=case.updated_at or review_event.created_at,
+                last_reviewed_at=case.last_reviewed_at,
+                current_claim=safe_claim_for_queue,
+                domain=case.domain,
+                claim_changed=claim_changed,
+                domain_changed=domain_changed,
+                assigned_reviewer_id=case.assigned_reviewer_id,
+                assigned_reviewer_name=assigned_reviewer_name,
+                assigned_reviewer_changed=assigned_reviewer_changed,
+                pending_context_delta=pending_context_delta,
+            )
+        self.session.expire(case)
+        return self.get_case_detail(case.id, project_ctx=project_ctx, force_reload=True)
 
     def _load_user_names(self, user_ids: set[uuid.UUID]) -> dict[uuid.UUID, str]:
         if not user_ids:

@@ -71,6 +71,7 @@ export interface VerificationQueueResponse {
   available_domains: string[];
   available_sources: string[];
   available_people: string[];
+  case_details?: Record<string, VerificationCaseDetail>;
 }
 
 export interface EvidenceReferenceDetail {
@@ -296,6 +297,30 @@ export interface QueueFilters {
   offset?: number;
 }
 
+export const DEFAULT_VERIFICATION_FILTERS: QueueFilters = {
+  status: "all",
+  domain: "all",
+  person: "all",
+  source: "all",
+  reviewer_id: "all",
+  category: "all",
+  search: "",
+  sort_by: "updated_at",
+  sort_dir: "desc",
+};
+
+const inFlightGetRequests = new Map<string, Promise<unknown>>();
+
+function dedupedGet<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
+  const existing = inFlightGetRequests.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+  const pending = fetcher().finally(() => {
+    inFlightGetRequests.delete(key);
+  });
+  inFlightGetRequests.set(key, pending);
+  return pending;
+}
+
 async function vcRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const base = getApiBaseUrl();
   const token =
@@ -327,9 +352,31 @@ async function vcRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
+export interface VerifyAllFindingsRequest {
+  status?: string;
+  domain?: string;
+  person?: string;
+  source?: string;
+  reviewer_id?: string;
+  category?: string;
+  search?: string;
+  reviewer_note?: string;
+  decision_reason?: string;
+}
+
+export interface VerifyAllFindingsResponse {
+  project_id: string;
+  verified_count: number;
+  knowledge_items_verified: number;
+  relationships_verified: number;
+  already_verified_count: number;
+  summary: VerificationSummary;
+}
+
 export const verificationApi = {
   getSummary(projectId: string) {
-    return vcRequest<VerificationSummary>(`/projects/${projectId}/verification/summary`);
+    const path = `/projects/${projectId}/verification/summary`;
+    return dedupedGet(path, () => vcRequest<VerificationSummary>(path));
   },
   getQueue(projectId: string, filters: QueueFilters = {}) {
     const qs = new URLSearchParams();
@@ -339,9 +386,8 @@ export const verificationApi = {
       }
     });
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return vcRequest<VerificationQueueResponse>(
-      `/projects/${projectId}/verification/queue${suffix}`
-    );
+    const path = `/projects/${projectId}/verification/queue${suffix}`;
+    return dedupedGet(path, () => vcRequest<VerificationQueueResponse>(path));
   },
   getCaseDetail(projectId: string, caseId: string) {
     return vcRequest<VerificationCaseDetail>(
@@ -435,6 +481,15 @@ export const verificationApi = {
     return vcRequest<VerificationCaseDetail>(
       `/projects/${projectId}/verification/cases/${caseId}/assign`,
       { method: "POST", body: JSON.stringify({ assigned_reviewer_id }) }
+    );
+  },
+  verifyAll(
+    projectId: string,
+    payload: VerifyAllFindingsRequest = {}
+  ) {
+    return vcRequest<VerifyAllFindingsResponse>(
+      `/projects/${projectId}/verification/verify-all`,
+      { method: "POST", body: JSON.stringify(payload) }
     );
   },
 };

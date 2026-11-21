@@ -616,3 +616,363 @@ def test_direct_finding_review_endpoint(monkeypatch: pytest.MonkeyPatch) -> None
             assert res_approve.status_code == 200
             assert res_approve.json()["case_status"] == "verified"
 
+
+def test_verification_read_cache_in_place_patching_and_acl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify cache-hit case detail, in-place summary/queue patching, and viewer ACL isolation."""
+    from app.services.verification_review import _VERIF_READ_CACHE
+
+    _VERIF_READ_CACHE.clear()
+    try:
+        with isolated_auth_app(monkeypatch) as ctx:
+            with TestClient(ctx.app) as client:
+                owner = register_and_login_user(
+                    client, email="cache_owner@example.com", full_name="Cache Owner"
+                )
+                org_id_str, proj_id_str = _create_org_and_project(client, owner.headers, "vc-cache")
+                org_id, proj_id = uuid.UUID(org_id_str), uuid.UUID(proj_id_str)
+
+                member = register_and_login_user(
+                    client, email="cache_member@example.com", full_name="Cache Member"
+                )
+                invite_and_accept_member(
+                    client,
+                    organisation_id=org_id_str,
+                    inviter_headers=owner.headers,
+                    invitee=member,
+                    role_name="org_member",
+                )
+                client.post(
+                    f"/api/v1/projects/{proj_id_str}/members",
+                    headers=owner.headers,
+                    json={"user_id": str(member.user_id), "role_name": "project_member"},
+                )
+
+                with ctx.session_factory() as db:
+                    ev1 = _seed_evidence(
+                        db, org_id=org_id, project_id=proj_id, user_id=owner.user_id, title="Doc A"
+                    )
+                    ev2 = _seed_evidence(
+                        db,
+                        org_id=org_id,
+                        project_id=proj_id,
+                        user_id=owner.user_id,
+                        title="Restricted Secret Spec",
+                        acl_scope="source_restricted",
+                        allowed_user_ids=[str(owner.user_id)],
+                    )
+                    ki1 = _seed_knowledge_item(
+                        db,
+                        org_id=org_id,
+                        project_id=proj_id,
+                        title="Public Finding",
+                        statement="Postgres stores canonical state.",
+                        evidence=ev1,
+                    )
+                    ki2 = _seed_knowledge_item(
+                        db,
+                        org_id=org_id,
+                        project_id=proj_id,
+                        title="Private Repo Finding",
+                        statement="Secret spec rotation happens monthly.",
+                        evidence=ev2,
+                    )
+                    db.commit()
+                    ki1_id, ki2_id = str(ki1.id), str(ki2.id)
+
+                sync_resp = client.post(
+                    f"/api/v1/projects/{proj_id_str}/verification/sync", headers=owner.headers
+                )
+                assert sync_resp.status_code == 200
+
+                # Enable read/write verification cache paths
+                monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+                # Warm summary, unfiltered queue, status-filtered queue, and detail for owner
+                sum_before = client.get(
+                    f"/api/v1/projects/{proj_id_str}/verification/summary",
+                    headers=owner.headers,
+                ).json()
+                assert sum_before["verified_count"] == 0
+
+                q_unfiltered = client.get(
+                    f"/api/v1/projects/{proj_id_str}/verification/queue?sort_by=updated_at&sort_dir=desc",
+                    headers=owner.headers,
+                ).json()
+                case1_id = next(i["id"] for i in q_unfiltered["items"] if i["target_id"] == ki1_id)
+                case2_id = next(i["id"] for i in q_unfiltered["items"] if i["target_id"] == ki2_id)
+                assert case1_id in q_unfiltered["case_details"]
+                assert case2_id in q_unfiltered["case_details"]
+                assert len(q_unfiltered["case_details"][case1_id]["evidence_references"]) == 1
+
+                q_verified_before = client.get(
+                    f"/api/v1/projects/{proj_id_str}/verification/queue?status=verified",
+                    headers=owner.headers,
+                ).json()
+                assert q_verified_before["total"] == 0
+
+                # Warm owner detail + member queue caches (member queue case_details must also exclude restricted case2)
+                detail1 = client.get(
+                    f"/api/v1/projects/{proj_id_str}/verification/cases/{case1_id}",
+                    headers=owner.headers,
+                ).json()
+                assert detail1["case_status"] != "verified"
+
+                member_q_before = client.get(
+                    f"/api/v1/projects/{proj_id_str}/verification/queue",
+                    headers=member.headers,
+                ).json()
+                assert all(i["id"] != case2_id for i in member_q_before["items"])
+                assert case2_id not in member_q_before.get("case_details", {})
+
+                from sqlalchemy import event
+
+                sql_statements: list[str] = []
+
+                def _count_sql(conn, cursor, statement, parameters, context, executemany):
+                    sql_statements.append(statement.strip())
+
+                event.listen(ctx.engine, "before_cursor_execute", _count_sql)
+                try:
+                    # Approve case1 -> minimal SQL queries, zero heavy detail relation reloads
+                    sql_statements.clear()
+                    approved = client.post(
+                        f"/api/v1/projects/{proj_id_str}/verification/cases/{case1_id}/approve",
+                        headers=owner.headers,
+                        json={"reviewer_note": "Verified on cache path"},
+                    )
+                    assert approved.status_code == 200
+                    approve_query_count = len(sql_statements)
+                    assert approve_query_count <= 14, f"Too many SQL queries on approve ({approve_query_count}): {sql_statements}"
+                    assert not any("verification_evidence_refs" in s.lower() for s in sql_statements)
+                    assert not any("verification_issues" in s.lower() for s in sql_statements)
+
+                    approved_json = approved.json()
+                    assert approved_json["case_status"] == "verified"
+                    assert approved_json["handover_eligible"] is True
+                    assert approved_json["review_events"][0]["action"] == "approve"
+                    assert approved_json["review_events"][0]["review_notes"] == "Verified on cache path"
+
+                    # Summary cache was patched in-place (0 verification_* queries)
+                    sql_statements.clear()
+                    sum_after = client.get(
+                        f"/api/v1/projects/{proj_id_str}/verification/summary",
+                        headers=owner.headers,
+                    ).json()
+                    assert sum_after["verified_count"] == 1
+                    assert not any("verification_" in s.lower() for s in sql_statements)
+
+                    # Unfiltered queue was patched in-place (including case_details) and verified item moved to top (0 verification_* queries)
+                    sql_statements.clear()
+                    q_after = client.get(
+                        f"/api/v1/projects/{proj_id_str}/verification/queue?sort_by=updated_at&sort_dir=desc",
+                        headers=owner.headers,
+                    ).json()
+                    assert q_after["items"][0]["id"] == case1_id
+                    assert q_after["items"][0]["case_status"] == "verified"
+                    assert q_after["case_details"][case1_id]["case_status"] == "verified"
+                    assert q_after["case_details"][case1_id]["review_events"][0]["action"] == "approve"
+                    assert not any("verification_" in s.lower() for s in sql_statements)
+                finally:
+                    event.remove(ctx.engine, "before_cursor_execute", _count_sql)
+
+                # Status-filtered queue was invalidated and now returns verified case1
+                q_verified_after = client.get(
+                    f"/api/v1/projects/{proj_id_str}/verification/queue?status=verified",
+                    headers=owner.headers,
+                ).json()
+                assert any(i["id"] == case1_id for i in q_verified_after["items"])
+
+                # Cached detail matches
+                detail1_after = client.get(
+                    f"/api/v1/projects/{proj_id_str}/verification/cases/{case1_id}",
+                    headers=owner.headers,
+                ).json()
+                assert detail1_after["case_status"] == "verified"
+                assert detail1_after["review_events"][0]["action"] == "approve"
+
+                # Edit finding -> bumps version, prepends revision, invalidates other viewers' queue cache
+                edited = client.patch(
+                    f"/api/v1/projects/{proj_id_str}/verification/cases/{case1_id}/finding",
+                    headers=owner.headers,
+                    json={
+                        "current_claim": "Postgres stores canonical application state and audit logs.",
+                        "edit_reason": "Clarify canonical role",
+                    },
+                )
+                assert edited.status_code == 200
+                edited_json = edited.json()
+                assert edited_json["version"] == 2
+                assert edited_json["case_status"] == "pending_review"
+                assert edited_json["revisions"][0]["revision_number"] == 2
+                assert (
+                    edited_json["revisions"][0]["claim_text"]
+                    == "Postgres stores canonical application state and audit logs."
+                )
+
+                # Assign reviewer -> updates reviewer name & cache
+                assigned = client.post(
+                    f"/api/v1/projects/{proj_id_str}/verification/cases/{case1_id}/assign",
+                    headers=owner.headers,
+                    json={"assigned_reviewer_id": str(owner.user_id)},
+                )
+                assert assigned.status_code == 200
+                assert assigned.json()["assigned_reviewer_name"] == "Cache Owner"
+    finally:
+        _VERIF_READ_CACHE.clear()
+
+
+def test_verify_all_findings_bulk_and_filtered_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify filtered SQL fast path and set-based POST /verification/verify-all with RBAC/audit."""
+    with isolated_auth_app(monkeypatch) as ctx:
+        with TestClient(ctx.app) as client:
+            owner = register_and_login_user(
+                client, email="bulk_owner@example.com", full_name="Bulk Owner"
+            )
+            org_id_str, proj_id_str = _create_org_and_project(client, owner.headers, "vc-bulk")
+            org_id, proj_id = uuid.UUID(org_id_str), uuid.UUID(proj_id_str)
+
+            member = register_and_login_user(
+                client, email="bulk_member@example.com", full_name="Bulk Member"
+            )
+            invite_and_accept_member(
+                client,
+                organisation_id=org_id_str,
+                inviter_headers=owner.headers,
+                invitee=member,
+                role_name="org_member",
+            )
+            client.post(
+                f"/api/v1/projects/{proj_id_str}/members",
+                headers=owner.headers,
+                json={"user_id": str(member.user_id), "role_name": "project_member"},
+            )
+
+            with ctx.session_factory() as db:
+                ev = _seed_evidence(
+                    db,
+                    org_id=org_id,
+                    project_id=proj_id,
+                    user_id=owner.user_id,
+                    title="Bulk Evidence Doc",
+                )
+                ki1 = _seed_knowledge_item(
+                    db,
+                    org_id=org_id,
+                    project_id=proj_id,
+                    title="FastAPI Gateway Architecture",
+                    statement="FastAPI gateway enforces RBAC before RAG retrieval.",
+                    category=KnowledgeCategory.TECHNICAL_ARCHITECTURE.value,
+                    evidence=ev,
+                )
+                ki2 = _seed_knowledge_item(
+                    db,
+                    org_id=org_id,
+                    project_id=proj_id,
+                    title="Worker Pool Policy",
+                    statement="Background worker runs async extraction jobs.",
+                    category=KnowledgeCategory.OPERATIONAL_HISTORICAL.value,
+                    evidence=ev,
+                )
+                ki_rej = _seed_knowledge_item(
+                    db,
+                    org_id=org_id,
+                    project_id=proj_id,
+                    title="Deprecated Finding",
+                    statement="Legacy token exchange is disabled.",
+                    category=KnowledgeCategory.DECISIONS_RATIONALE.value,
+                    evidence=ev,
+                )
+                db.commit()
+                ki1_id, ki2_id, ki_rej_id = ki1.id, ki2.id, ki_rej.id
+
+            sync_res = client.post(
+                f"/api/v1/projects/{proj_id_str}/verification/sync", headers=owner.headers
+            )
+            assert sync_res.status_code == 200
+
+            q_all = client.get(
+                f"/api/v1/projects/{proj_id_str}/verification/queue", headers=owner.headers
+            ).json()
+            assert q_all["total"] == 3
+
+            # Verify filtered SQL fast-path endpoints (domain + search + person + zero-match status)
+            q_domain = client.get(
+                f"/api/v1/projects/{proj_id_str}/verification/queue?domain={KnowledgeCategory.TECHNICAL_ARCHITECTURE.value}",
+                headers=owner.headers,
+            )
+            assert q_domain.status_code == 200
+            assert q_domain.json()["total"] == 1
+            assert q_domain.json()["items"][0]["target_id"] == str(ki1_id)
+
+            q_search = client.get(
+                f"/api/v1/projects/{proj_id_str}/verification/queue?search=background%20worker",
+                headers=owner.headers,
+            )
+            assert q_search.status_code == 200
+            assert q_search.json()["total"] == 1
+            assert q_search.json()["items"][0]["target_id"] == str(ki2_id)
+
+            q_empty_verified = client.get(
+                f"/api/v1/projects/{proj_id_str}/verification/queue?status=verified",
+                headers=owner.headers,
+            )
+            assert q_empty_verified.status_code == 200
+            assert q_empty_verified.json()["total"] == 0
+
+            # Reject one case so verify-all leaves rejected untouched
+            rej_case_id = next(
+                i["id"] for i in q_all["items"] if i["target_id"] == str(ki_rej_id)
+            )
+            rej_resp = client.post(
+                f"/api/v1/projects/{proj_id_str}/verification/cases/{rej_case_id}/reject",
+                headers=owner.headers,
+                json={"decision_reason": "Outdated policy"},
+            )
+            assert rej_resp.status_code == 200
+
+            # Member without review permission gets 403
+            forbid = client.post(
+                f"/api/v1/projects/{proj_id_str}/verification/verify-all",
+                headers=member.headers,
+                json={},
+            )
+            assert forbid.status_code == 403
+
+            # Owner runs bulk Verify All
+            bulk_resp = client.post(
+                f"/api/v1/projects/{proj_id_str}/verification/verify-all",
+                headers=owner.headers,
+                json={"reviewer_note": "Bulk approved in Verification Center"},
+            )
+            assert bulk_resp.status_code == 200, bulk_resp.text
+            bulk_data = bulk_resp.json()
+            assert bulk_data["verified_count"] == 2
+            assert bulk_data["knowledge_items_verified"] == 2
+            assert bulk_data["summary"]["verified_count"] == 2
+            assert bulk_data["summary"]["rejected_count"] == 1
+            assert bulk_data["summary"]["pending_review_count"] == 0
+            assert bulk_data["summary"]["candidate_count"] == 0
+
+            with ctx.session_factory() as db:
+                db_ki1 = db.get(KnowledgeItem, ki1_id)
+                db_ki_rej = db.get(KnowledgeItem, ki_rej_id)
+                assert db_ki1 is not None
+                assert db_ki1.review_status == KnowledgeReviewStatus.APPROVED.value
+                assert db_ki1.epistemic_status == EpistemicStatus.HUMAN_VERIFIED.value
+                assert db_ki_rej is not None
+                assert db_ki_rej.review_status == KnowledgeReviewStatus.REJECTED.value
+
+                audit_row = db.execute(
+                    select(AuditLog).where(
+                        AuditLog.project_id == proj_id,
+                        AuditLog.event_type == "verification.cases.bulk_approved",
+                    )
+                ).scalar_one_or_none()
+                assert audit_row is not None
+
+
+

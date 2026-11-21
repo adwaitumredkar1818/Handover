@@ -6,7 +6,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.enums import (
     ConflictResolutionState,
@@ -50,7 +50,7 @@ class VerificationRepository:
                 selectinload(VerificationCase.revisions),
                 selectinload(VerificationCase.review_events),
                 selectinload(VerificationCase.context_requests),
-                selectinload(VerificationCase.assigned_reviewer),
+                joinedload(VerificationCase.assigned_reviewer),
             )
         return self.session.execute(stmt).scalar_one_or_none()
 
@@ -184,8 +184,10 @@ class VerificationRepository:
                 selectinload(VerificationCase.issues),
                 selectinload(VerificationCase.evidence_refs),
                 selectinload(VerificationCase.conflicts),
+                selectinload(VerificationCase.revisions),
+                selectinload(VerificationCase.review_events),
                 selectinload(VerificationCase.context_requests),
-                selectinload(VerificationCase.assigned_reviewer),
+                joinedload(VerificationCase.assigned_reviewer),
             )
         )
         if status:
@@ -227,8 +229,10 @@ class VerificationRepository:
                 selectinload(VerificationCase.issues),
                 selectinload(VerificationCase.evidence_refs),
                 selectinload(VerificationCase.conflicts),
+                selectinload(VerificationCase.revisions),
+                selectinload(VerificationCase.review_events),
                 selectinload(VerificationCase.context_requests),
-                selectinload(VerificationCase.assigned_reviewer),
+                joinedload(VerificationCase.assigned_reviewer),
             )
         )
         by_id = {c.id: c for c in self.session.execute(stmt).scalars().all()}

@@ -214,10 +214,10 @@ export function AssistantWorkspaceView() {
         setMessages((prev) => {
           // If we have an optimistic pending user message not yet returned by DB, preserve it
           const dbUserContents = new Set(
-            filtered.filter((m) => m.sender_type === "user").map((m) => m.content.trim())
+            filtered.filter((m) => m.sender_type === "user").map((m) => (m.content || "").trim())
           );
           const pendingOptimistic = prev.filter(
-            (m) => m.id?.startsWith("temp-user-") && !dbUserContents.has(m.content.trim())
+            (m) => m.id?.startsWith("temp-user-") && !dbUserContents.has((m.content || "").trim())
           );
           return [...pendingOptimistic, ...filtered];
         });
@@ -1090,7 +1090,13 @@ export function AssistantWorkspaceView() {
                       return (
                         <div
                           key={conv.id}
-                          onClick={() => setActiveConversationId(conv.id)}
+                          onClick={() => {
+                            if (activeConversationId === conv.id) {
+                              void loadMessages(conv.id);
+                            } else {
+                              setActiveConversationId(conv.id);
+                            }
+                          }}
                           className={`group p-2 rounded-lg border text-xs cursor-pointer transition-all flex items-center justify-between gap-2 ${
                             isActive
                               ? "bg-blue-50/90 border-blue-200 font-semibold text-blue-950 shadow-2xs"

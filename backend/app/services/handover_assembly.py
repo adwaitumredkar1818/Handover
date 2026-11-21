@@ -27,6 +27,7 @@ from app.core.security import utc_now
 from app.models.audit import AuditLog
 from app.models.enums import (
     AuditOutcome,
+    ConflictResolutionState,
     EpistemicStatus,
     HandoverCaseStatus,
     HandoverLinkType,
@@ -253,30 +254,31 @@ class PackageAssemblyService:
         }
         sample_verified_items: list[dict[str, Any]] = []
 
-        # Batch preload maps when assembling provisional draft or large project cleanly
+        # Batch preload maps for all projects so assembly never triggers N+1 eligibility queries
         vc_ki_map: dict[uuid.UUID, VerificationCase] = {}
+        vc_rel_map: dict[uuid.UUID, VerificationCase] = {}
         open_conflict_vc_ids: set[uuid.UUID] = set()
         blocking_issue_vc_ids: set[uuid.UUID] = set()
         ki_ev_links_map: dict[uuid.UUID, list[uuid.UUID]] = {}
         rel_ev_links_map: dict[uuid.UUID, list[uuid.UUID]] = {}
         accessible_ev_cache: dict[uuid.UUID, bool] = {}
 
-        if allow_provisional_draft and filtered_kis:
-            ki_ids_all = [k.id for k in filtered_kis]
+        if filtered_kis or filtered_rels:
             for vc in self.session.execute(
                 select(VerificationCase).where(
                     VerificationCase.project_id == project_id,
-                    VerificationCase.target_type == VerificationTargetType.KNOWLEDGE_ITEM.value,
-                    VerificationCase.target_id.in_(ki_ids_all),
                 )
             ).scalars().all():
-                vc_ki_map[vc.target_id] = vc
+                if vc.target_type == VerificationTargetType.KNOWLEDGE_ITEM.value:
+                    vc_ki_map[vc.target_id] = vc
+                elif vc.target_type == VerificationTargetType.RELATIONSHIP.value:
+                    vc_rel_map[vc.target_id] = vc
 
             open_conflict_vc_ids = set(
                 self.session.execute(
                     select(VerificationConflict.case_id).where(
                         VerificationConflict.project_id == project_id,
-                        VerificationConflict.resolution_state.notin_(["resolved", "dismissed"]),
+                        VerificationConflict.resolution_state == ConflictResolutionState.UNRESOLVED.value,
                     )
                 ).scalars().all()
             )
@@ -354,84 +356,83 @@ class PackageAssemblyService:
                 })
                 continue
 
-            if allow_provisional_draft:
-                vc = vc_ki_map.get(ki.id)
-                vc_status = vc.case_status if vc else "missing_case"
-                has_open_conflict = bool(vc and vc.id in open_conflict_vc_ids)
-                has_blocking_issue = bool(vc and vc.id in blocking_issue_vc_ids)
-                ev_ids = ki_ev_links_map.get(ki.id, [])
-                ev_ok = bool(ev_ids) and all(accessible_ev_cache.get(eid, False) for eid in ev_ids)
+            vc = vc_ki_map.get(ki.id)
+            vc_status = vc.case_status if vc else "missing_case"
+            has_open_conflict = bool(vc and vc.id in open_conflict_vc_ids)
+            has_blocking_issue = bool(vc and vc.id in blocking_issue_vc_ids)
+            ev_ids = ki_ev_links_map.get(ki.id, [])
+            ev_ok = bool(ev_ids) and all(accessible_ev_cache.get(eid, False) for eid in ev_ids)
 
-                if not ev_ids:
-                    exclusion_breakdown["missing_evidence"] += 1
-                    excluded_ki_ids.append({
-                        "id": str(ki.id),
-                        "title": ki.title or str(ki.id),
-                        "blockers": ["Knowledge item has no supporting evidence links attached."],
-                    })
-                    continue
-                if not ev_ok:
-                    exclusion_breakdown["restricted_acl"] += 1
-                    excluded_ki_ids.append({
-                        "id": str(ki.id),
-                        "title": ki.title or str(ki.id),
-                        "blockers": ["Viewer lacks access to supporting evidence source(s)."],
-                    })
-                    continue
-                if has_open_conflict:
-                    exclusion_breakdown["conflicted"] += 1
-                    excluded_ki_ids.append({
-                        "id": str(ki.id),
-                        "title": ki.title or str(ki.id),
-                        "blockers": ["Unresolved cross-source conflict."],
-                    })
-                    continue
-
-                strict_eligible = (
-                    is_ki_meta_verified
-                    and vc_status == VerificationCaseStatus.VERIFIED.value
-                    and not has_blocking_issue
-                )
-                matched_section = HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value
-                for sec_type, categories in DOMAIN_CATEGORY_MAP.items():
-                    if ki.category in categories:
-                        matched_section = sec_type
-                        break
-                link_meta = {
-                    "is_eligible": strict_eligible,
-                    "is_provisional_draft": not strict_eligible,
-                    "case_status": vc_status,
-                    "epistemic_status": ki.epistemic_status if strict_eligible else EpistemicStatus.EXTRACTED.value,
-                }
-                eligible_items_by_section[matched_section].append((ki, link_meta))
-                if strict_eligible:
-                    included_ki_ids.append(str(ki.id))
-                    if len(sample_verified_items) < 5:
-                        sample_verified_items.append({
-                            "id": str(ki.id),
-                            "title": ki.title or "Verified Finding",
-                            "category": ki.category,
-                            "review_status": ki.review_status,
-                            "epistemic_status": ki.epistemic_status,
-                        })
-                else:
-                    provisional_ki_ids.append(str(ki.id))
+            if not allow_provisional_draft:
+                if vc is None:
                     exclusion_breakdown["pending_review"] += 1
+                    excluded_ki_ids.append({
+                        "id": str(ki.id),
+                        "title": ki.title or str(ki.id),
+                        "blockers": ["No active verification case found for this knowledge item."],
+                    })
+                    continue
+                if vc_status != VerificationCaseStatus.VERIFIED.value:
+                    exclusion_breakdown["pending_review"] += 1
+                    excluded_ki_ids.append({
+                        "id": str(ki.id),
+                        "title": ki.title or str(ki.id),
+                        "blockers": [f"Verification case is in status '{vc_status}', expected 'verified'."],
+                    })
+                    continue
+                if has_blocking_issue:
+                    exclusion_breakdown["other"] += 1
+                    excluded_ki_ids.append({
+                        "id": str(ki.id),
+                        "title": ki.title or str(ki.id),
+                        "blockers": ["There are unresolved blocking verification issues."],
+                    })
+                    continue
+
+            if not ev_ids:
+                exclusion_breakdown["missing_evidence"] += 1
+                excluded_ki_ids.append({
+                    "id": str(ki.id),
+                    "title": ki.title or str(ki.id),
+                    "blockers": ["Knowledge item has no supporting evidence links attached."],
+                })
+                continue
+            if not ev_ok:
+                exclusion_breakdown["restricted_acl"] += 1
+                excluded_ki_ids.append({
+                    "id": str(ki.id),
+                    "title": ki.title or str(ki.id),
+                    "blockers": ["Viewer lacks access to supporting evidence source(s)."],
+                })
+                continue
+            if has_open_conflict:
+                exclusion_breakdown["conflicted"] += 1
+                excluded_ki_ids.append({
+                    "id": str(ki.id),
+                    "title": ki.title or str(ki.id),
+                    "blockers": ["Unresolved cross-source conflict."],
+                })
                 continue
 
-            eligibility = self.eligibility_service.check_knowledge_item_eligibility(
-                ki.id,
-                viewer_user_id=user_id,
-                has_project_manage=has_project_manage,
+            strict_eligible = (
+                is_ki_meta_verified
+                and vc_status == VerificationCaseStatus.VERIFIED.value
+                and not has_blocking_issue
             )
-            if eligibility.is_eligible:
+            matched_section = HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value
+            for sec_type, categories in DOMAIN_CATEGORY_MAP.items():
+                if ki.category in categories:
+                    matched_section = sec_type
+                    break
+            link_meta = {
+                "is_eligible": strict_eligible,
+                "is_provisional_draft": not strict_eligible,
+                "case_status": vc_status,
+                "epistemic_status": ki.epistemic_status if strict_eligible else EpistemicStatus.EXTRACTED.value,
+            }
+            eligible_items_by_section[matched_section].append((ki, link_meta))
+            if strict_eligible:
                 included_ki_ids.append(str(ki.id))
-                matched_section = HandoverPackageSectionType.PROJECT_OVERVIEW_CONTEXT.value
-                for sec_type, categories in DOMAIN_CATEGORY_MAP.items():
-                    if ki.category in categories:
-                        matched_section = sec_type
-                        break
-                eligible_items_by_section[matched_section].append((ki, eligibility))
                 if len(sample_verified_items) < 5:
                     sample_verified_items.append({
                         "id": str(ki.id),
@@ -441,63 +442,42 @@ class PackageAssemblyService:
                         "epistemic_status": ki.epistemic_status,
                     })
             else:
-                blocker_text = " ".join(str(b).lower() for b in (eligibility.blockers or []))
-                if "conflict" in blocker_text:
-                    exclusion_breakdown["conflicted"] += 1
-                elif "evidence" in blocker_text:
-                    exclusion_breakdown["missing_evidence"] += 1
-                elif "access" in blocker_text or "acl" in blocker_text or "permission" in blocker_text:
-                    exclusion_breakdown["restricted_acl"] += 1
-                elif "reject" in blocker_text:
-                    exclusion_breakdown["rejected"] += 1
-                elif "pending" in blocker_text or "review" in blocker_text or "candidate" in blocker_text:
-                    exclusion_breakdown["pending_review"] += 1
-                else:
-                    exclusion_breakdown["other"] += 1
-                excluded_ki_ids.append({
-                    "id": str(ki.id),
-                    "title": ki.title or str(ki.id),
-                    "blockers": eligibility.blockers,
-                })
+                provisional_ki_ids.append(str(ki.id))
+                exclusion_breakdown["pending_review"] += 1
 
-        # Evaluate eligibility for relationships
+        # Evaluate eligibility for relationships using preloaded maps
         eligible_rels_by_section: dict[str, list[tuple[KnowledgeRelationship, Any]]] = {
             sec: [] for sec in SECTION_ORDER
         }
         for rel in filtered_rels:
-            if allow_provisional_draft:
-                if rel.verification_status in (
-                    RelationshipVerificationStatus.REJECTED.value,
-                    "rejected",
-                ) or getattr(rel, "is_stale", False):
-                    continue
-                r_ev_ids = rel_ev_links_map.get(rel.id, [])
-                if not r_ev_ids or not all(accessible_ev_cache.get(eid, False) for eid in r_ev_ids):
-                    continue
-                is_rel_verified = rel.verification_status == RelationshipVerificationStatus.VERIFIED.value
-                eligible_rels_by_section[
-                    HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value
-                ].append((
-                    rel,
-                    {
-                        "is_eligible": is_rel_verified,
-                        "is_provisional_draft": not is_rel_verified,
-                        "case_status": "verified" if is_rel_verified else "candidate",
-                    },
-                ))
+            if rel.verification_status in (
+                RelationshipVerificationStatus.REJECTED.value,
+                "rejected",
+            ) or getattr(rel, "is_stale", False):
                 continue
 
-            if rel.verification_status != RelationshipVerificationStatus.VERIFIED.value:
+            if not allow_provisional_draft:
+                if rel.verification_status != RelationshipVerificationStatus.VERIFIED.value:
+                    continue
+                r_vc = vc_rel_map.get(rel.id)
+                if r_vc is None or r_vc.case_status != VerificationCaseStatus.VERIFIED.value:
+                    continue
+
+            r_ev_ids = rel_ev_links_map.get(rel.id, [])
+            if not r_ev_ids or not all(accessible_ev_cache.get(eid, False) for eid in r_ev_ids):
                 continue
-            eligibility = self.eligibility_service.check_relationship_eligibility(
-                rel.id,
-                viewer_user_id=user_id,
-                has_project_manage=has_project_manage,
-            )
-            if eligibility.is_eligible:
-                eligible_rels_by_section[
-                    HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value
-                ].append((rel, eligibility))
+
+            is_rel_verified = rel.verification_status == RelationshipVerificationStatus.VERIFIED.value
+            eligible_rels_by_section[
+                HandoverPackageSectionType.DEPENDENCIES_RELATIONSHIPS.value
+            ].append((
+                rel,
+                {
+                    "is_eligible": is_rel_verified,
+                    "is_provisional_draft": not is_rel_verified,
+                    "case_status": "verified" if is_rel_verified else "candidate",
+                },
+            ))
 
         handover_type = str((case.metadata_json or {}).get("handover_type") or "developer").lower()
         ordered_sections = ROLE_SECTION_ORDER.get(handover_type, SECTION_ORDER)

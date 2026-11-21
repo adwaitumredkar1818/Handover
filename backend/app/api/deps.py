@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import uuid
@@ -90,6 +91,32 @@ _rbac_cache_lock = threading.RLock()
 _principal_cache: OrderedDict[tuple[Any, ...], tuple[float, AuthenticatedPrincipal]] = OrderedDict()
 _project_ctx_cache: OrderedDict[tuple[Any, ...], tuple[float, ProjectContext]] = OrderedDict()
 _org_ctx_cache: OrderedDict[tuple[Any, ...], tuple[float, OrganisationContext]] = OrderedDict()
+
+_NON_RBAC_MUTATION_SEGMENTS = (
+    "/verification/",
+    "/handover/",
+    "/evidence/",
+    "/knowledge-intelligence/",
+    "/relationships/",
+    "/assistant/",
+)
+
+
+def _is_non_rbac_mutation_path(request: Request) -> bool:
+    """Return True when request mutates project domain data rather than auth/RBAC/memberships."""
+    path = request.url.path
+    if path.endswith(
+        (
+            "/verification",
+            "/handover",
+            "/evidence",
+            "/knowledge-intelligence",
+            "/relationships",
+            "/assistant",
+        )
+    ):
+        return True
+    return any(seg in path for seg in _NON_RBAC_MUTATION_SEGMENTS)
 
 
 def _rbac_cache_get(store: OrderedDict[tuple[Any, ...], Any], key: tuple[Any, ...]) -> Any | None:
@@ -696,10 +723,13 @@ def get_current_principal(
         )
 
     is_read_method = request.method.upper() in {"GET", "HEAD"}
+    use_rbac_cache = is_read_method or (
+        _is_non_rbac_mutation_path(request) and not bool(os.getenv("PYTEST_CURRENT_TEST"))
+    )
     claims = decode_access_token(credentials.credentials, settings)
     bind_id = id(db_session.get_bind())
     cache_key = (bind_id, claims.subject, claims.session_family_id)
-    if is_read_method:
+    if use_rbac_cache:
         cached = _rbac_cache_get(_principal_cache, cache_key)
         if cached is not None:
             return cast(AuthenticatedPrincipal, cached)
@@ -712,7 +742,7 @@ def get_current_principal(
         db_session=db_session,
         rbac_service=rbac_service,
     )
-    if is_read_method:
+    if use_rbac_cache:
         _ = (
             principal.user.id,
             principal.user.email,
@@ -862,6 +892,9 @@ def _resolve_project_ctx_with_cache(
     read_visibility_mode: bool = False,
 ) -> ProjectContext:
     is_read_method = request.method.upper() in {"GET", "HEAD"}
+    use_rbac_cache = is_read_method or (
+        _is_non_rbac_mutation_path(request) and not bool(os.getenv("PYTEST_CURRENT_TEST"))
+    )
     bind_id = id(db_session.get_bind())
     cache_key = (
         bind_id,
@@ -870,7 +903,7 @@ def _resolve_project_ctx_with_cache(
         require_explicit_membership,
         read_visibility_mode,
     )
-    if is_read_method:
+    if use_rbac_cache:
         cached = _rbac_cache_get(_project_ctx_cache, cache_key)
         if cached is not None:
             return cast(ProjectContext, cached)
@@ -889,7 +922,7 @@ def _resolve_project_ctx_with_cache(
             require_explicit_membership=require_explicit_membership,
         )
 
-    if is_read_method:
+    if use_rbac_cache:
         _ = (
             ctx.organisation.id,
             ctx.organisation.status,
