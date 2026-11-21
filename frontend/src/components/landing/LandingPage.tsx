@@ -1,26 +1,56 @@
 "use client";
 
 import React, { useEffect } from "react";
+import dynamic from "next/dynamic";
 import { BrandIntro } from "./BrandIntro";
 import { LandingNav } from "./LandingNav";
 import { ReadingProgressBar } from "./ReadingProgressBar";
 import { BackToTop } from "./BackToTop";
 import { HeroSection } from "./HeroSection";
 import { SectionDivider } from "./SectionDivider";
-import { ProblemSection } from "./ProblemSection";
-import { IntroducingSection } from "./IntroducingSection";
-import { HowItWorksSection } from "./HowItWorksSection";
-import { ConnectedSourcesSection } from "./ConnectedSourcesSection";
-import { EvidenceCenterSection } from "./EvidenceCenterSection";
-import { IntelligenceSection } from "./IntelligenceSection";
-import { ExplorerSection } from "./ExplorerSection";
-import { KnowledgeAssistantSection } from "./KnowledgeAssistantSection";
-import { HandoversSection } from "./HandoversSection";
-import { RolesSection } from "./RolesSection";
-import { TrustSection } from "./TrustSection";
-import { FaqSection } from "./FaqSection";
-import { FinalCtaSection } from "./FinalCtaSection";
-import { LandingFooter } from "./LandingFooter";
+
+const ProblemSection = dynamic(() =>
+  import("./ProblemSection").then((m) => m.ProblemSection)
+);
+const IntroducingSection = dynamic(() =>
+  import("./IntroducingSection").then((m) => m.IntroducingSection)
+);
+const HowItWorksSection = dynamic(() =>
+  import("./HowItWorksSection").then((m) => m.HowItWorksSection)
+);
+const ConnectedSourcesSection = dynamic(() =>
+  import("./ConnectedSourcesSection").then((m) => m.ConnectedSourcesSection)
+);
+const EvidenceCenterSection = dynamic(() =>
+  import("./EvidenceCenterSection").then((m) => m.EvidenceCenterSection)
+);
+const IntelligenceSection = dynamic(() =>
+  import("./IntelligenceSection").then((m) => m.IntelligenceSection)
+);
+const ExplorerSection = dynamic(() =>
+  import("./ExplorerSection").then((m) => m.ExplorerSection)
+);
+const KnowledgeAssistantSection = dynamic(() =>
+  import("./KnowledgeAssistantSection").then((m) => m.KnowledgeAssistantSection)
+);
+const HandoversSection = dynamic(() =>
+  import("./HandoversSection").then((m) => m.HandoversSection)
+);
+const RolesSection = dynamic(() =>
+  import("./RolesSection").then((m) => m.RolesSection)
+);
+const TrustSection = dynamic(() =>
+  import("./TrustSection").then((m) => m.TrustSection)
+);
+const FaqSection = dynamic(() =>
+  import("./FaqSection").then((m) => m.FaqSection)
+);
+const FinalCtaSection = dynamic(() =>
+  import("./FinalCtaSection").then((m) => m.FinalCtaSection)
+);
+const LandingFooter = dynamic(() =>
+  import("./LandingFooter").then((m) => m.LandingFooter)
+);
 
 export function LandingPage() {
   useEffect(() => {

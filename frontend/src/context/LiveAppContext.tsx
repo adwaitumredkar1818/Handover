@@ -442,6 +442,24 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
           return;
         }
 
+        // On public marketing/auth pages without a stored token or OAuth callback, skip blocking network auth checks
+        const currentPath = typeof window !== "undefined" ? window.location.pathname : "";
+        const searchStr = typeof window !== "undefined" ? window.location.search : "";
+        const isPublicUnauthFastPath =
+          !stored &&
+          !searchStr.includes("supabase_code=") &&
+          !searchStr.includes("supabase_auth=success") &&
+          (currentPath === "/" ||
+            currentPath === "/landing" ||
+            currentPath === "/developers" ||
+            currentPath === "/login" ||
+            currentPath === "/signup");
+
+        if (isPublicUnauthFastPath) {
+          setIsLoadingAuth(false);
+          return;
+        }
+
         // 2. Only if unauthenticated, check if there's an active Supabase OAuth session or fallback code to exchange
         try {
           const supabase = createSupabaseClient();
@@ -728,10 +746,18 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     };
   }, [userId, activeOrgId, refreshProjects]);
 
-  // Background-warm all projects in the workspace whenever user is on any page/dashboard
+  // Background-warm all projects in the workspace only when user is inside authenticated app routes
   const projectIdsKey = projects.map((p) => p.id).join(",");
   useEffect(() => {
     if (!userId || projects.length === 0) return;
+    if (
+      pathname === "/" ||
+      pathname === "/landing" ||
+      pathname === "/login" ||
+      pathname === "/signup"
+    ) {
+      return;
+    }
     let active = true;
     const timer = setTimeout(() => {
       if (!active) return;
@@ -745,7 +771,7 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       active = false;
       clearTimeout(timer);
     };
-  }, [userId, projectIdsKey]);
+  }, [userId, projectIdsKey, pathname]);
 
   // Synchronize active project from URL pathname ONLY when navigating to a new /projects/:id URL
   const lastSyncedUrlProjectIdRef = useRef<string | null>(null);

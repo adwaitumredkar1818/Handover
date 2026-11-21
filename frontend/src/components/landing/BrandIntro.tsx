@@ -15,7 +15,7 @@ export type IntroLifecycleState =
   | "FALLBACK";
 
 export function BrandIntro() {
-  const [lifecycle, setLifecycle] = useState<IntroLifecycleState>("INITIALIZING");
+  const [lifecycle, setLifecycle] = useState<IntroLifecycleState>("COMPLETED");
   const [progress, setProgress] = useState<number>(0.08);
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const hasInitializedRef = useRef(false);
@@ -97,17 +97,11 @@ export function BrandIntro() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const forceReplay = params.get("replay") === "1" || params.get("intro") === "1";
-    let alreadySeen = false;
-    try {
-      alreadySeen = sessionStorage.getItem("handover_intro_seen") === "1";
-    } catch {
-      alreadySeen = false;
-    }
-
-    if (alreadySeen && !forceReplay) {
+    if (!forceReplay) {
       setLifecycle("COMPLETED");
       return;
     }
+    setLifecycle("INITIALIZING");
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
