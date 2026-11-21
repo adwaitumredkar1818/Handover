@@ -205,14 +205,28 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProjectInternal] = useState<Project | null>(null);
 
-  // Restore cached org & project from localStorage after client hydration (SSR-safe)
+  // Restore cached org & project lists + active selections from localStorage after client hydration (SSR-safe)
   useEffect(() => {
     try {
-      const rawOrg = typeof window !== "undefined" ? localStorage.getItem("handover_cached_active_org") : null;
-      if (rawOrg) {
-        setActiveOrgInternal(JSON.parse(rawOrg));
+      if (typeof window === "undefined") return;
+      const rawOrgs = localStorage.getItem("handover_cached_orgs");
+      if (rawOrgs) {
+        const parsedOrgs = JSON.parse(rawOrgs);
+        if (Array.isArray(parsedOrgs)) setOrganisations(parsedOrgs);
       }
-      const rawProj = typeof window !== "undefined" ? localStorage.getItem("handover_cached_active_project") : null;
+      const rawOrg = localStorage.getItem("handover_cached_active_org");
+      if (rawOrg) {
+        const parsedOrg = JSON.parse(rawOrg);
+        setActiveOrgInternal(parsedOrg);
+        if (parsedOrg?.id) {
+          const rawProjs = localStorage.getItem(`handover_cached_projects:${parsedOrg.id}`);
+          if (rawProjs) {
+            const parsedProjs = JSON.parse(rawProjs);
+            if (Array.isArray(parsedProjs)) setProjects(parsedProjs);
+          }
+        }
+      }
+      const rawProj = localStorage.getItem("handover_cached_active_project");
       if (rawProj) {
         setActiveProjectInternal(JSON.parse(rawProj));
       }
@@ -642,6 +656,13 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
     try {
       const orgs = await api.organisations.list();
       setOrganisations(orgs);
+      if (typeof window !== "undefined") {
+        try {
+          localStorage.setItem("handover_cached_orgs", JSON.stringify(orgs));
+        } catch {
+          // ignore
+        }
+      }
       if (orgs.length > 0) {
         const storedOrgId = typeof window !== "undefined" ? localStorage.getItem("handover_active_org_id") : null;
         const preferredOrg =
@@ -695,6 +716,13 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       // Discard stale response if user switched organisations while request was in flight
       if (activeOrgIdRef.current !== targetOrgId) return;
       setProjects(projs);
+      if (typeof window !== "undefined") {
+        try {
+          localStorage.setItem(`handover_cached_projects:${targetOrgId}`, JSON.stringify(projs));
+        } catch {
+          // ignore
+        }
+      }
       if (projs.length > 0) {
         const storedProjId = typeof window !== "undefined" ? localStorage.getItem("handover_active_project_id") : null;
         const urlMatch = pathnameRef.current?.match(/^\/projects\/([a-zA-Z0-9_-]+)/);
@@ -1380,8 +1408,11 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!user || !activeProject) return;
 
-    void refreshNotifications();
-    void refreshActiveJobs();
+    const initialTimer = setTimeout(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void refreshNotifications();
+      void refreshActiveJobs();
+    }, 1200);
 
     const intervalTime = hasActiveJobs ? 2500 : 15000;
     const timer = setInterval(() => {
@@ -1392,7 +1423,10 @@ export function LiveAppProvider({ children }: { children: ReactNode }) {
       void refreshNotifications();
     }, intervalTime);
 
-    return () => clearInterval(timer);
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(timer);
+    };
   }, [user?.id, activeProject?.id, hasActiveJobs, refreshActiveJobs, refreshNotifications]);
 
 

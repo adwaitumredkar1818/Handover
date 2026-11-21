@@ -75,7 +75,7 @@ class ProjectsAPIRoute(APIRoute):
         return custom_route_handler
 
 
-def _cached_project_get(cache_key: str, builder: Any, *, ttl_seconds: int = 60) -> Any:
+def _cached_project_get(cache_key: str, builder: Any, *, ttl_seconds: int = 300) -> Any:
     if not os.getenv("PYTEST_CURRENT_TEST"):
         cached = local_response_cache.get(cache_key)
         if cached is not None:

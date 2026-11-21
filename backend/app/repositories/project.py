@@ -120,7 +120,6 @@ class ProjectRepository:
             pattern = f"%{search.strip()}%"
             base = base.where(or_(Project.name.ilike(pattern), Project.slug.ilike(pattern)))
 
-        total = int(self._session.scalar(select(func.count()).select_from(base.subquery())) or 0)
         stmt = (
             base.options(
                 joinedload(Project.owner),
@@ -133,6 +132,10 @@ class ProjectRepository:
         rows: list[tuple[Project, ProjectMembership | None]] = [
             (project, mem) for project, mem in self._session.execute(stmt).unique().all()
         ]
+        if offset == 0 and len(rows) < limit:
+            total = len(rows)
+        else:
+            total = int(self._session.scalar(select(func.count()).select_from(base.subquery())) or 0)
         return rows, total
 
     def archive(self, project: Project, *, archived_at: datetime) -> None:
