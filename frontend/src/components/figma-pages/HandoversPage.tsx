@@ -51,6 +51,8 @@ import { ReadinessIntelligencePanel } from '../handover/ReadinessIntelligencePan
 import { TransitionChecklistsPanel } from '../handover/TransitionChecklistsPanel'
 import { ResponsibilityTransferPanel } from '../handover/ResponsibilityTransferPanel'
 import { SignoffApprovalPanel } from '../handover/SignoffApprovalPanel'
+import { HandoverWorkspaceHeader } from '../handover/HandoverWorkspaceHeader'
+import { HandoverWorkspaceNav } from '../handover/HandoverWorkspaceNav'
 
 export const isUUID = (val?: string | null): boolean =>
   Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(val))
@@ -1673,86 +1675,6 @@ export function HandoverLayout({
     }
   }
 
-  const actions: ReactNode[] = []
-  if (prevStage) {
-    actions.push(
-      <Button
-        key="prev-stage"
-        variant="secondary"
-        icon={ArrowLeft}
-        onClick={() =>
-          router.push(
-            prevStage === 'review'
-              ? `/handovers/${h.id}/review`
-              : prevStage === 'report'
-              ? `/handovers/${h.id}/report`
-              : prevStage === 'overview'
-              ? `/handovers/${h.id}`
-              : `/handovers/${h.id}?tab=${prevStage}`
-          )
-        }
-      >
-        Previous: {TAB_LABELS[prevStage] || prevStage}
-      </Button>
-    )
-  }
-  if (!isLockedLifecycle) {
-    actions.push(
-      <Button
-        key="edit-case"
-        variant="secondary"
-        icon={Pencil}
-        onClick={openEditModal}
-      >
-        Edit Details
-      </Button>
-    )
-    actions.push(
-      <Button
-        key="refresh-draft"
-        variant="secondary"
-        icon={RefreshCw}
-        disabled={isRefreshingDraft}
-        onClick={() => void refreshDraftPackage()}
-      >
-        {isRefreshingDraft ? 'Refreshing…' : 'Refresh Draft'}
-      </Button>
-    )
-  }
-  actions.push(
-    <Button
-      key="assistant"
-      variant="secondary"
-      icon={Bot}
-      onClick={() => router.push('/assistant')}
-    >
-      Ask Assistant
-    </Button>
-  )
-  if (tab !== 'review') {
-    actions.push(
-      <Button
-        key="signoff"
-        icon={ShieldCheck}
-        onClick={() => router.push(`/handovers/${h.id}/review`)}
-      >
-        Sign-Off &amp; Approval
-      </Button>
-    )
-  }
-  if (h.status === 'published' || h.status === 'completed') {
-    actions.push(
-      <Button
-        key="recipient"
-        variant="secondary"
-        icon={BookOpen}
-        onClick={() => router.push(`/handovers/${h.id}/recipient`)}
-      >
-        Recipient View
-      </Button>
-    )
-  }
-
   // Real tab badge counts derived strictly from canonical backend sections (never mock stores)
   const sectionByType = new Map((sectionsData?.sections || []).map((sec) => [sec.section_type, sec]))
   const uniqueEvidenceIds = new Set<string>()
@@ -1765,7 +1687,6 @@ export function HandoverLayout({
     }
   }
 
-  const tabs = [...H_TABS]
   const counts: Partial<Record<string, number>> = {
     readiness: readinessData?.blocker_count,
     checklists: readinessData?.checklist_summary?.mandatory_outstanding,
@@ -1783,159 +1704,58 @@ export function HandoverLayout({
     evidence: uniqueEvidenceIds.size,
   }
 
-  const selectedVersion = versions.find((v) => v.id === selectedVersionId) || sectionsData?.version || null
   const activeTabValue = tab === 'knowledge' ? 'overview' : tab
 
   return (
     <>
       <div className="no-print">
-        <Card className="mb-5 overflow-hidden">
-          <div className="p-5 sm:p-6">
-            <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-semibold text-muted">{h.code}</span>
-                  <StatusBadge status={h.status} />
-                  <Badge tone="indigo">
-                    {sectionsData?.handover_type_label ||
-                      HANDOVER_TYPE_LABELS[h.handoverType || 'developer'] ||
-                      'Developer Handover'}
-                  </Badge>
-                  <Tooltip content="Your perspective on this handover, based on your role in the project.">
-                    <span><RoleBadge role={role} /></span>
-                  </Tooltip>
-                  {selectedVersion && (
-                    <Badge tone={selectedVersion.is_current ? 'blue' : 'amber'}>
-                      Package v{selectedVersion.version_number}
-                      {selectedVersion.is_current ? ' (Current)' : ' (Historical)'}
-                    </Badge>
-                  )}
-                  {readinessData && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        router.push(
-                          selectedVersionId
-                            ? `/handovers/${h.id}?tab=readiness&version=${selectedVersionId}`
-                            : `/handovers/${h.id}?tab=readiness`
-                        )
-                      }
-                      className="inline-flex items-center gap-1.5 rounded-full border border-line bg-slate-50 px-2.5 py-0.5 text-[11px] font-semibold text-navy transition hover:border-brand/40 hover:bg-tint/40"
-                    >
-                      <span>Readiness {readinessData.overall_score}/100</span>
-                      <span
-                        className={cn(
-                          'size-1.5 rounded-full',
-                          readinessData.overall_level === 'ready'
-                            ? 'bg-emerald-500'
-                            : readinessData.overall_level === 'ready_with_warnings'
-                            ? 'bg-blue-500'
-                            : readinessData.overall_level === 'partially_ready'
-                            ? 'bg-amber-500'
-                            : 'bg-red-500'
-                        )}
-                      />
-                    </button>
-                  )}
-                </div>
-                <h1 className="mt-2 text-[22px] font-semibold tracking-tight text-navy">{project.name}</h1>
-                <p className="mt-0.5 text-[13px] text-muted">{h.scope}</p>
-                <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-3 text-[13px]">
-                  <span className="flex items-center gap-2">
-                    <Avatar id={h.outgoingId} name={getMemberDisplayName(h.outgoingId, members, user)} size={28} />
-                    <span>
-                      <span className="block text-[11px] text-muted">Outgoing</span>
-                      <span className="font-medium text-navy">{getMemberDisplayName(h.outgoingId, members, user)}</span>
-                    </span>
-                  </span>
-                  <ArrowRight className="size-4 text-brand" />
-                  <span className="flex items-center gap-2">
-                    <Avatar id={h.incomingId} name={getMemberDisplayName(h.incomingId, members, user)} size={28} />
-                    <span>
-                      <span className="block text-[11px] text-muted">Incoming</span>
-                      <span className="font-medium text-navy">{getMemberDisplayName(h.incomingId, members, user)}</span>
-                    </span>
-                  </span>
-                  <span className="hidden h-8 w-px bg-line sm:block" />
-                  <span>
-                    <span className="block text-[11px] text-muted">Last updated</span>
-                    <span className="font-medium text-navy">{h.updated}</span>
-                  </span>
-                  <span>
-                    <span className="block text-[11px] text-muted">Due</span>
-                    <span className="font-medium text-navy">{h.due}</span>
-                  </span>
-                </div>
-              </div>
-              <div className="flex shrink-0 flex-col items-start gap-3 lg:items-end">
-                <div className="flex items-center gap-3">
-                  <Ring value={totalCandidates > 0 ? Math.round((verifiedCount / totalCandidates) * 100) : 0} size={56} />
-                  <div>
-                    <p className="text-[11px] text-muted">Verified Knowledge</p>
-                    <p className="text-[13px] font-medium text-navy">
-                      {isLoadingSections ? 'Loading…' : `${verifiedCount} verified · ${pendingCount} pending`}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {actions}
-                  <Button variant="secondary" icon={FileText} onClick={() => router.push(`/handovers/${h.id}/report`)}>
-                    Report
-                  </Button>
-                </div>
-              </div>
-            </div>
-            <ol className="mt-6 grid grid-cols-6 gap-1.5">
-              {STAGE_LABELS.map(([k, l], i) => (
-                <li key={k}>
-                  <div className={cn('h-1.5 rounded-full', i < idx ? 'bg-ok' : i === idx ? 'bg-brand' : 'bg-slate-200')} />
-                  <p className={cn('mt-1.5 hidden text-[11px] font-medium sm:block', i === idx ? 'text-brand' : i < idx ? 'text-navy' : 'text-slate-400')}>
-                    {l}
-                  </p>
-                </li>
-              ))}
-            </ol>
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-slate-50/60 px-5 py-2.5 text-xs text-muted">
-            <div className="flex flex-wrap items-center gap-3">
-              {versions.length > 0 ? (
-                <label className="flex items-center gap-2">
-                  <span className="font-medium text-navy">Package Version:</span>
-                  <select
-                    aria-label="Package Version"
-                    value={selectedVersionId || ''}
-                    onChange={(e) => setSelectedVersionId(e.target.value)}
-                    className="rounded-lg border border-line bg-white px-2.5 py-1 text-xs font-medium text-navy focus:border-brand focus:outline-none"
-                  >
-                    {versions.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        v{v.version_number}
-                        {v.is_current ? ' (Current)' : ' (Historical)'}
-                        {v.assembled_at ? ` · ${new Date(v.assembled_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : (
-                <span>{isLoadingVersions ? 'Loading package versions…' : 'No package versions assembled yet'}</span>
-              )}
-              {selectedVersion?.content_hash && (
-                <span
-                  className="inline-flex items-center gap-1 rounded-md border border-line bg-white px-2 py-0.5 font-mono text-[11px] text-slate-600"
-                  title={`Immutable Package SHA-256: ${selectedVersion.content_hash}`}
-                >
-                  <ShieldCheck className="size-3 text-ok" />
-                  SHA-256: {selectedVersion.content_hash.slice(0, 12)}…
-                </span>
-              )}
-            </div>
-          </div>
-        </Card>
-        <Tabs
+        <HandoverWorkspaceHeader
+          handover={h}
+          projectName={project.name}
+          role={role}
+          members={members}
+          currentUser={user}
+          sectionsData={sectionsData}
+          versions={versions}
+          selectedVersionId={selectedVersionId}
+          onSelectVersionId={(v) => setSelectedVersionId(v)}
+          isLoadingVersions={isLoadingVersions}
+          isLoadingSections={isLoadingSections}
+          readinessData={readinessData}
+          isRefreshingDraft={isRefreshingDraft}
+          onRefreshDraft={refreshDraftPackage}
+          onOpenEditModal={openEditModal}
+          onAskAssistant={() => router.push('/assistant')}
+          onSignOff={() => router.push(`/handovers/${h.id}/review`)}
+          onOpenReport={() => router.push(`/handovers/${h.id}/report`)}
+          onOpenRecipientView={
+            h.status === 'published' || h.status === 'completed'
+              ? () => router.push(`/handovers/${h.id}/recipient`)
+              : undefined
+          }
+          onNavigatePrevious={
+            prevStage
+              ? () =>
+                  router.push(
+                    prevStage === 'review'
+                      ? `/handovers/${h.id}/review`
+                      : prevStage === 'report'
+                      ? `/handovers/${h.id}/report`
+                      : prevStage === 'overview'
+                      ? `/handovers/${h.id}`
+                      : `/handovers/${h.id}?tab=${prevStage}`
+                  )
+              : undefined
+          }
+          prevStageLabel={prevStage ? (TAB_LABELS[prevStage] || prevStage) : null}
+          currentTab={activeTabValue}
+        />
+        <HandoverWorkspaceNav
           className="mb-5"
-          tabs={tabs.map((t) => ({ id: t, label: TAB_LABELS[t] || t, count: counts[t] }))}
-          value={activeTabValue}
-          onChange={(t) =>
+          activeTab={activeTabValue}
+          counts={counts}
+          readinessData={readinessData}
+          onSelectTab={(t) =>
             router.push(
               t === 'review'
                 ? `/handovers/${h.id}/review`
@@ -2309,6 +2129,10 @@ export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?:
                 caseStatus={h.rawStatus || h.status}
                 onRetry={sectionsCtx.retryLoadSections}
                 onNavigateTab={navigateTab}
+                members={members || []}
+                currentUser={user}
+                canReview={_role === 'manager' || _role === 'outgoing' || Boolean((user?.roles || []).includes('admin') || (user?.roles || []).includes('org_admin'))}
+                readinessScore={sectionsCtx.readinessData?.overall_score}
               />
             </div>
           )
@@ -2356,6 +2180,10 @@ export function HandoverWorkspace({ id, initialTab }: { id: string; initialTab?:
             onRetry={sectionsCtx.retryLoadSections}
             onNavigateTab={navigateTab}
             overviewExtras={normalizedTab === 'overview' ? checklistsCard : undefined}
+            members={members || []}
+            currentUser={user}
+            canReview={_role === 'manager' || _role === 'outgoing' || Boolean((user?.roles || []).includes('admin') || (user?.roles || []).includes('org_admin'))}
+            readinessScore={sectionsCtx.readinessData?.overall_score}
           />
         )
       }}

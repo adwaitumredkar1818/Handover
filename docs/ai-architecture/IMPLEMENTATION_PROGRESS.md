@@ -26,10 +26,27 @@
 | **AI-8.3** | Architecture Integrity Audit & Acceptance Gate | **VERIFIED** | 2026-11-18 |
 | **AI-8.4** | Final Durability & Reliability Closure | **VERIFIED** | 2026-11-18 |
 | **AI-9**   | System-Wide Acceptance Testing & AI Quality Validation | **VERIFIED** | 2026-11-18 |
+| **AI-10**  | Strict Project-Scoped Intelligence & Disclosure Guardrails | **VERIFIED** | 2026-11-22 |
 
 ---
 
 ## 2. Activity Log
+
+- **2026-11-22 04:15**: Completed Phase AI-10 Strict Project-Scoped Intelligence & Information Disclosure Guardrails.
+  - Enforced single active project scope across all assistant modes (Standard, Deep Research, Deep Think, Deep Extract).
+  - Implemented pre-flight scope classifier in `AssistantQueryClassifier.classify_scope` to short-circuit personal device/hardware, cross-project, and injection queries with zero retrieval and zero token waste.
+  - Implemented post-generation disclosure control pipeline in `AssistantAnswerValidator`: scrubs workstation hardware (RTX 4050, 6GB VRAM, Victus, local paths), redacts secrets (`sk-`, `ghp_`, `xoxb-`, JWTs, private keys) to `[REDACTED_SECRET]`, and enforces project ID provenance.
+  - Enforced worker and tool sandbox isolation in `DynamicAgentWorker`, `ToolRegistry`, `ProjectWorkingMemoryService`, and SSE endpoints.
+  - Published 7 formal deliverables:
+    1. `PROJECT_SCOPE_GUARDRAIL_ARCHITECTURE.md`
+    2. `PROJECT_CONTEXT_ISOLATION_IMPLEMENTATION.md`
+    3. `PERSONAL_INFORMATION_DISCLOSURE_POLICY.md`
+    4. `AGENT_AND_WORKER_ISOLATION_REPORT.md`
+    5. `PROMPT_INJECTION_DEFENSE_REPORT.md`
+    6. `PROJECT_SCOPE_SECURITY_TEST_REPORT.md`
+    7. `PROJECT_KNOWLEDGE_ASSISTANT_GUARDRAIL_ACCEPTANCE_REPORT.md`
+  - Created and executed comprehensive security test suite `backend/tests/test_assistant_project_guardrails.py` covering Groups A-G (15/15 passed, 100%).
+  - Formally issued Acceptance Gate Verdict: **PASS — PROJECT SCOPE AND DISCLOSURE GUARDRAILS VERIFIED**.
 
 - **2026-11-18 04:30**: Completed Phase AI-9 System-Wide Acceptance Testing & AI Quality Validation.
   - Published `docs/ai-architecture/AI_9_FINAL_SYSTEM_ACCEPTANCE_REPORT.md` and detailed sub-reports:

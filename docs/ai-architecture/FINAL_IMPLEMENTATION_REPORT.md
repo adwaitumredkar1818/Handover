@@ -34,6 +34,7 @@ All 17 new and existing test suites pass with 100% success. Zero production data
 | **AI-8.3** | Architecture Integrity Audit & Acceptance Gate | **VERIFIED** | Distributed Redis tool idempotency lock, bounded multi-agent dispatch (max 2 agents), and formal Acceptance Gate PASS for AI-9. |
 | **AI-8.4** | Final Durability & Reliability Closure | **VERIFIED** | PostgreSQL authoritative checkpoint durability, atomic PostgreSQL tool idempotency claims, live multi-agent execution (`decision_agent`, `database_agent`), and frontend SSE integration. |
 | **AI-9**   | System-Wide Acceptance Testing & AI Quality Validation | **VERIFIED** | Complete acceptance testing program passed 100%: RAG Quality (100% Recall@5, 1.000 MRR), Agent Intelligence (100% accuracy), Hallucination (100% citation precision, 0% ungrounded claims), Concurrency safety on 6GB VRAM, Security & Isolation (0 leaks, strict source ACLs), Process restart durability & tool concurrency idempotency, Gateway (30/30 passed), Backend AI (13/13 passed), Next.js Build (69/69 routes). **SYSTEM ACCEPTED FOR PRODUCTION**. |
+| **AI-10**  | Strict Project-Scoped Intelligence & Disclosure Guardrails | **VERIFIED** | Strict single active project scope; pre-flight refusal for personal device/workstation queries, cross-project questions, and prompt injections; post-generation validation scrubbing workstation hardware (RTX 4050, 6GB VRAM, local paths), redacting secrets (`sk-`, `ghp_`, `xoxb-`, JWTs, private keys), and enforcing project ID provenance. Verified via `test_assistant_project_guardrails.py` (15/15 passed). **PASS — PROJECT SCOPE AND DISCLOSURE GUARDRAILS VERIFIED**. |
 
 ---
 
@@ -116,6 +117,6 @@ All 17 new and existing test suites pass with 100% success. Zero production data
 
 ## G. Final Verdict
 
-### **ACCEPTANCE GATE PASSED — READY FOR PHASE AI-9 SYSTEM-WIDE ACCEPTANCE TESTING**
+### **PASS — PROJECT SCOPE AND DISCLOSURE GUARDRAILS VERIFIED.**
 
-The entire AI architecture across Phases AI-0.5 through AI-8.3 is implemented, hardened, and verified with all architecture boundaries enforced. Consequential tool execution is distributedly locked, multi-agent delegation supports bounded multi-facet execution, and the Next.js frontend connects directly to live SSE investigation streams. The platform is officially approved to enter Phase AI-9 System-Wide Acceptance Testing.
+The Project Knowledge Assistant is strictly restricted to understanding and assisting with the currently selected, actively authorized Handover project. Single active project scope is enforced across all modes; personal device and workstation hardware leakage is blocked; cross-project queries are refused; prompt injections are neutralized; secrets are masked; dynamic workers and tools operate under immutable project context; and all 15 security guardrail tests pass with 100% compliance.

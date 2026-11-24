@@ -57,6 +57,12 @@ class ProjectWorkingMemoryService:
             return [m for m in items if topic.lower() in m.topic.lower()]
         return items
 
+    def clear_project_memory(self, project_id: uuid.UUID) -> None:
+        """Clear ephemeral working memory cache when a project context is switched or closed."""
+        if project_id in self._memory_cache:
+            del self._memory_cache[project_id]
+            logger.info("Cleared working memory cache for project %s", project_id)
+
     def record_derived_insight(
         self,
         *,
@@ -68,10 +74,15 @@ class ProjectWorkingMemoryService:
         is_hypothesis: bool = False,
     ) -> ProjectDerivedMemoryItem:
         """Record an evidence-backed insight into working memory without overwriting canonical truth."""
+        # Privacy & anti-leakage filter: never persist personal hardware or workstation details to project memory
+        import re
+        hw_pattern = re.compile(r"\b(?:RTX\s*4050|HP\s*Victus|Victus\b|6GB\s*VRAM|16GB\s*RAM|personal\s+laptop)\b", re.IGNORECASE)
+        sanitized_insight = hw_pattern.sub("[protected workstation specification]", insight_text)
+
         item = ProjectDerivedMemoryItem(
             project_id=project_id,
             topic=topic,
-            insight_text=insight_text,
+            insight_text=sanitized_insight,
             supporting_citations=supporting_citations,
             confidence=confidence,
             is_hypothesis=is_hypothesis,

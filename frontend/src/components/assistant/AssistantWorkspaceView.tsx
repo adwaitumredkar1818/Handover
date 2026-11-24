@@ -212,12 +212,17 @@ export function AssistantWorkspaceView() {
           (m) => m.sender_type !== "system" && !m.content?.startsWith("Investigation Checkpoint:")
         );
         setMessages((prev) => {
-          // If we have an optimistic pending user message not yet returned by DB, preserve it
+          if (filtered.length === 0 && prev.length > 0) {
+            return prev;
+          }
+          const dbIds = new Set(filtered.map((m) => m.id));
           const dbUserContents = new Set(
             filtered.filter((m) => m.sender_type === "user").map((m) => (m.content || "").trim())
           );
           const pendingOptimistic = prev.filter(
-            (m) => m.id?.startsWith("temp-user-") && !dbUserContents.has((m.content || "").trim())
+            (m) =>
+              (m.id?.startsWith("temp-user-") && !dbUserContents.has((m.content || "").trim())) ||
+              (m.sender_type === "assistant" && !dbIds.has(m.id))
           );
           return [...pendingOptimistic, ...filtered];
         });

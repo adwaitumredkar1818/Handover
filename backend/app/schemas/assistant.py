@@ -79,6 +79,7 @@ class AssistantCitationResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID | None = None
+    project_id: uuid.UUID | None = None
     citation_label: str = Field(..., description="Stable citation reference tag e.g. S1, S2")
     evidence_id: uuid.UUID
     chunk_id: uuid.UUID | None = None

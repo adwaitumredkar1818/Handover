@@ -188,18 +188,35 @@ export function VerificationCenterWorkspace() {
       return true;
     }
     const projectRole = (activeProject.my_project_role ?? "").toLowerCase();
-    if (projectRole === "project_manager" || projectRole === "reviewer") {
+    if (
+      projectRole === "project_manager" ||
+      projectRole === "reviewer" ||
+      projectRole === "manager" ||
+      projectRole === "admin"
+    ) {
       return true;
     }
     if (user?.id) {
       const me = members.find((m) => m.user_id === user.id);
-      const memberRole = (me?.role_name ?? "").toLowerCase();
-      if (memberRole === "project_manager" || memberRole === "reviewer") {
+      const memberRole = (me?.role_name ?? me?.transition_role ?? "").toLowerCase();
+      if (
+        memberRole === "project_manager" ||
+        memberRole === "reviewer" ||
+        memberRole === "manager" ||
+        memberRole === "admin"
+      ) {
         return true;
       }
     }
     const userRoles = (user?.roles ?? []).map((r) => r.toLowerCase());
-    if (userRoles.includes("org_owner") || userRoles.includes("org_admin")) {
+    const singleRole = ((user as any)?.role ?? "").toLowerCase();
+    if (
+      userRoles.includes("org_owner") ||
+      userRoles.includes("org_admin") ||
+      userRoles.includes("admin") ||
+      userRoles.includes("manager") ||
+      ["admin", "manager", "owner"].includes(singleRole)
+    ) {
       return true;
     }
     return false;

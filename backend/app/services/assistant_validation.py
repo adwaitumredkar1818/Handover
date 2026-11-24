@@ -25,6 +25,50 @@ logger = logging.getLogger("app.services.assistant_validation")
 
 _CITATION_LABEL_RE = re.compile(r"\[(S\d+)\]")
 
+# Personal workstation hardware leakage patterns (protected boundary)
+_PERSONAL_HARDWARE_RE = re.compile(
+    r"\b(?:RTX\s*4050|HP\s*Victus|Victus\b|6GB\s*VRAM|16GB\s*RAM|personal\s+laptop|developer(?:'s)?\s+laptop|my\s+laptop|local\s+workstation|workstation\s+specs)\b",
+    re.IGNORECASE,
+)
+_PERSONAL_FILE_PATH_RE = re.compile(
+    r"\b(?:[a-zA-Z]:\\Users\\[a-zA-Z0-9_\-.\\]+|/home/[a-zA-Z0-9_\-./]+)\b",
+    re.IGNORECASE,
+)
+
+# Secret information patterns requiring mandatory redaction
+_SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+        "[REDACTED_SECRET]",
+    ),
+    (
+        re.compile(r"\beyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-]{10,}\b"),
+        "[REDACTED_SECRET]",
+    ),
+    (
+        re.compile(r"\b(?:sk|pk)[-_][a-zA-Z0-9_\-]{20,}\b"),
+        "[REDACTED_SECRET]",
+    ),
+    (
+        re.compile(r"\bghp_[a-zA-Z0-9]{20,}\b"),
+        "[REDACTED_SECRET]",
+    ),
+    (
+        re.compile(r"\bxox[baprs]-[a-zA-Z0-9\-]{20,}\b"),
+        "[REDACTED_SECRET]",
+    ),
+    (
+        re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+        "[REDACTED_SECRET]",
+    ),
+    (
+        re.compile(
+            r"(?i)\b(password|passwd|secret_key|client_secret)\s*[:=]\s*['\"]?([a-zA-Z0-9_\-!@#$%^&*()+=]{6,})['\"]?"
+        ),
+        r"\1: [REDACTED_SECRET]",
+    ),
+]
+
 
 @dataclass
 class ValidatedAssistantAnswer:
@@ -48,18 +92,121 @@ class ValidatedAssistantAnswer:
 class AssistantAnswerValidator:
     """Validates citations against prompt manifest, enforces grounding, and detects hallucinations."""
 
+    def _redact_secrets(self, text: str) -> str:
+        """Scan and redact passwords, API keys, JWT tokens, and private keys."""
+        cleaned = text
+        for pattern, replacement in _SECRET_PATTERNS:
+            cleaned = pattern.sub(replacement, cleaned)
+        return cleaned
+
+    def _sanitize_prompt_injections(self, text: str) -> str:
+        """Strip internal prompt markers that may have leaked or been mirrored."""
+        sanitized = re.sub(r"(?i)CRITICAL INSTRUCTIONS & SAFEGUARDS:.*", "", text, flags=re.DOTALL)
+        sanitized = re.sub(r"(?i)SYSTEM PROMPT:.*", "", sanitized, flags=re.DOTALL)
+        return sanitized.strip()
+
+    def _sanitize_personal_hardware_leakage(
+        self,
+        text: str,
+        claims: list[FactualClaim],
+        citations: list[AssistantCitationResponse],
+    ) -> tuple[str, list[FactualClaim], bool]:
+        """Detect and scrub personal workstation hardware or file paths from output."""
+        has_hw = bool(_PERSONAL_HARDWARE_RE.search(text)) or any(
+            _PERSONAL_HARDWARE_RE.search(c.claim_text) for c in claims
+        )
+        has_paths = bool(_PERSONAL_FILE_PATH_RE.search(text)) or any(
+            _PERSONAL_FILE_PATH_RE.search(c.claim_text) for c in claims
+        )
+
+        if not (has_hw or has_paths):
+            return text, claims, False
+
+        # Verify whether this was explicitly grounded in official project evidence
+        is_grounded_in_evidence = any(
+            _PERSONAL_HARDWARE_RE.search(cit.excerpt or "")
+            or _PERSONAL_HARDWARE_RE.search(cit.source_title or "")
+            for cit in citations
+        )
+
+        if not is_grounded_in_evidence:
+            # If the response is largely an ungrounded workstation disclosure, trigger privacy refusal
+            if re.search(r"\b(?:runs\s+on\s+(?:an\s+)?rtx|laptop\s+has|victus\b|16gb\s+ram)\b", text, re.IGNORECASE):
+                refusal = (
+                    "I'm here to assist with the currently selected Handover project. "
+                    "I don't provide personal device or environment information through the Project Knowledge Assistant."
+                )
+                return refusal, [], True
+
+            # Otherwise, redact specific workstation hardware phrases and local paths
+            scrubbed_text = _PERSONAL_HARDWARE_RE.sub("[protected workstation specification]", text)
+            scrubbed_text = _PERSONAL_FILE_PATH_RE.sub("[local file path]", scrubbed_text)
+
+            scrubbed_claims = []
+            for c in claims:
+                c_text = _PERSONAL_HARDWARE_RE.sub("[protected workstation specification]", c.claim_text)
+                c_text = _PERSONAL_FILE_PATH_RE.sub("[local file path]", c_text)
+                scrubbed_claims.append(
+                    FactualClaim(
+                        claim_text=c_text,
+                        citation_labels=c.citation_labels,
+                        confidence=c.confidence,
+                    )
+                )
+            return scrubbed_text, scrubbed_claims, False
+
+        return text, claims, False
+
     def validate(
         self,
         *,
         payload: AssistantAnswerPayload,
         citations_manifest: list[AssistantCitationResponse],
         is_access_restricted: bool = False,
+        active_project_id: Any | None = None,
     ) -> ValidatedAssistantAnswer:
         """Validate LLM output against candidate evidence manifest and fail-closed rules."""
+        # 0. Enforce active project isolation on incoming candidate citations
+        if active_project_id is not None:
+            active_pid_str = str(active_project_id)
+            filtered_manifest = []
+            for cit in citations_manifest:
+                cit_pid = getattr(cit, "project_id", None)
+                if cit_pid is None or str(cit_pid) == active_pid_str:
+                    filtered_manifest.append(cit)
+                else:
+                    logger.warning(
+                        "Cross-project citation rejected by validator: cit_id=%s cit_project=%s active_project=%s",
+                        cit.citation_label,
+                        cit_pid,
+                        active_pid_str,
+                    )
+            citations_manifest = filtered_manifest
+
         manifest_map: dict[str, AssistantCitationResponse] = {
             c.citation_label: c for c in citations_manifest
         }
         valid_labels = set(manifest_map.keys())
+
+        # 1. Mandatory Pre-Sanitization across all exit paths: Redact secrets, injections & personal hardware
+        sanitized_input_answer = self._redact_secrets(payload.answer)
+        sanitized_input_answer = self._sanitize_prompt_injections(sanitized_input_answer)
+        sanitized_input_answer, pre_claims, was_hw_refusal = self._sanitize_personal_hardware_leakage(
+            sanitized_input_answer, payload.claims, citations_manifest
+        )
+
+        if was_hw_refusal:
+            return ValidatedAssistantAnswer(
+                answer=sanitized_input_answer,
+                answer_status=AssistantAnswerStatus.UNSUPPORTED_QUERY,
+                claims=[],
+                validated_citations=[],
+                uncertainty="Request is outside the active project boundary.",
+                conflicts=[],
+                missing_information=[],
+                suggested_followup_questions=payload.suggested_followup_questions,
+                response_mode=payload.response_mode,
+            )
 
         # If user access to the requested scope was blocked/restricted
         if is_access_restricted:
@@ -84,7 +231,7 @@ class AssistantAnswerValidator:
             # If the response is a conversational greeting/intro or already answered without claims
             if payload.answer_status == AssistantAnswerStatus.ANSWERED and not payload.claims:
                 return ValidatedAssistantAnswer(
-                    answer=payload.answer,
+                    answer=sanitized_input_answer,
                     answer_status=AssistantAnswerStatus.ANSWERED,
                     claims=[],
                     validated_citations=[],
@@ -99,7 +246,7 @@ class AssistantAnswerValidator:
                 )
 
             return ValidatedAssistantAnswer(
-                answer=payload.answer,
+                answer=sanitized_input_answer,
                 answer_status=AssistantAnswerStatus.INSUFFICIENT_EVIDENCE,
                 claims=[],
                 validated_citations=[],
@@ -134,7 +281,7 @@ class AssistantAnswerValidator:
                 )
 
         # 3. Clean up citation tags from visible answer text so it reads as direct clean prose
-        cleaned_answer = re.sub(r"\[S\d+\]", "", payload.answer)
+        cleaned_answer = re.sub(r"\[S\d+\]", "", sanitized_input_answer)
         cleaned_answer = re.sub(r"  +", " ", cleaned_answer).strip()
 
         # 4. Resolve final validated citations
@@ -162,17 +309,28 @@ class AssistantAnswerValidator:
         if payload.missing_information and resolved_status == AssistantAnswerStatus.ANSWERED:
             resolved_status = AssistantAnswerStatus.PARTIALLY_ANSWERED
 
+        # 6. Apply Strict Disclosure & Anti-Leakage Filters
+        cleaned_answer = self._redact_secrets(cleaned_answer)
+        cleaned_answer = self._sanitize_prompt_injections(cleaned_answer)
+        cleaned_answer, validated_claims, was_hw_refusal = self._sanitize_personal_hardware_leakage(
+            cleaned_answer, validated_claims, final_citations
+        )
+        if was_hw_refusal:
+            resolved_status = AssistantAnswerStatus.UNSUPPORTED_QUERY
+            final_citations = []
+            validated_claims = []
+
         return ValidatedAssistantAnswer(
             answer=cleaned_answer.strip(),
             answer_status=resolved_status,
             claims=validated_claims,
             validated_citations=final_citations,
-            uncertainty=payload.uncertainty,
-            conflicts=payload.conflicts,
-            missing_information=payload.missing_information,
+            uncertainty=payload.uncertainty if not was_hw_refusal else "Request is outside the active project boundary.",
+            conflicts=payload.conflicts if not was_hw_refusal else [],
+            missing_information=payload.missing_information if not was_hw_refusal else [],
             suggested_followup_questions=payload.suggested_followup_questions,
             response_mode=payload.response_mode,
-            research_report=payload.research_report,
-            deep_think=payload.deep_think,
-            deep_extract=payload.deep_extract,
+            research_report=payload.research_report if not was_hw_refusal else None,
+            deep_think=payload.deep_think if not was_hw_refusal else None,
+            deep_extract=payload.deep_extract if not was_hw_refusal else None,
         )

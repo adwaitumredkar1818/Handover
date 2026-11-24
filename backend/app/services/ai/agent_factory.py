@@ -26,24 +26,40 @@ class DynamicAgentWorker:
         definition: AgentDefinition,
         project_ctx: ProjectContext,
         worker_id: str | None = None,
+        investigation_id: uuid.UUID | None = None,
     ) -> None:
         self.definition = definition
-        self.project_ctx = project_ctx
+        self._project_ctx = project_ctx  # Immutable context boundary
         self.worker_id = worker_id or str(uuid.uuid4())
+        self.investigation_id = investigation_id
         self.scratchpad: list[dict[str, Any]] = []
+
+    @property
+    def project_ctx(self) -> ProjectContext:
+        """Immutable project context established by backend authorization."""
+        return self._project_ctx
 
     def execute_task(
         self,
         task_description: str,
         evidence_context: str,
+        target_project_id: uuid.UUID | None = None,
     ) -> AgentFinding:
         """Execute a specialized subtask under strict project and caller permissions."""
+        # Enforce strict project boundary
+        if target_project_id is not None and target_project_id != self._project_ctx.project.id:
+            raise ForbiddenError(
+                f"Agent worker cannot execute task across projects (caller project: {self._project_ctx.project.id}, requested: {target_project_id})",
+                code="CROSS_PROJECT_AGENT_FORBIDDEN",
+            )
+
         logger.info(
-            "Worker [%s: %s] executing task: %s (caller: %s)",
+            "Worker [%s: %s] executing task in project %s: %s (caller: %s)",
             self.worker_id,
             self.definition.name,
+            self._project_ctx.project.id,
             task_description[:60],
-            self.project_ctx.principal.user.email,
+            self._project_ctx.principal.user.email,
         )
 
         # Generate a structured finding grounded in the provided context

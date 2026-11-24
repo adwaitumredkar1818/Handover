@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useState, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   AlertTriangle,
@@ -55,6 +55,9 @@ import {
 } from '../figma-ui/index'
 import { api } from '../../lib/api'
 import { CardSkeleton, TableSkeleton } from '../loading'
+import { HandoverVerificationOverview } from './HandoverVerificationOverview'
+import { HandoverVerificationReviewDrawer } from './HandoverVerificationReviewDrawer'
+import { HandoverConflictModal } from './HandoverConflictModal'
 import type {
   CanonicalHandoverSectionType,
   HandoverContextContributionResponse,
@@ -65,6 +68,8 @@ import type {
   HandoverSectionKnowledgeItem,
   HandoverSectionRelationship,
   HandoverVersionSectionsResponse,
+  ProjectMember,
+  User,
 } from '../../lib/types'
 
 export interface CanonicalDomainMeta {
@@ -573,8 +578,11 @@ function VerifiedRelationshipRow({
         <Badge tone="indigo">{humanizeStatus(rel.target_entity_type)}</Badge>
         <span className="font-semibold text-navy">{rel.target_entity_name}</span>
         <span className="ml-auto flex items-center gap-1.5">
-          <Badge tone="green" icon={ShieldCheck}>
-            {humanizeStatus(rel.verification_status)}
+          <Badge
+            tone={rel.verification_status === 'verified' ? 'green' : 'indigo'}
+            icon={rel.verification_status === 'verified' ? ShieldCheck : Sparkles}
+          >
+            {rel.verification_status === 'verified' ? 'Human Verified' : 'AI Inferred Link'}
           </Badge>
           {rel.is_stale && <Badge tone="amber">Stale</Badge>}
         </span>
@@ -688,6 +696,10 @@ export function CanonicalSectionPanel({
   onRetry,
   onNavigateTab,
   overviewExtras,
+  members,
+  currentUser,
+  canReview = true,
+  readinessScore,
 }: {
   sectionType: CanonicalHandoverSectionType
   data: HandoverVersionSectionsResponse | null
@@ -699,9 +711,33 @@ export function CanonicalSectionPanel({
   onRetry: () => void
   onNavigateTab: (tab: string) => void
   overviewExtras?: React.ReactNode
+  members?: ProjectMember[]
+  currentUser?: User | null
+  canReview?: boolean
+  readinessScore?: number
 }) {
   const router = useRouter()
   const [inspectItem, setInspectItem] = useState<HandoverSectionKnowledgeItem | null>(null)
+
+  // In-Workspace Verification Review Drawer & Conflict Modal state
+  const [showVerificationDrawer, setShowVerificationDrawer] = useState(false)
+  const [verificationDrawerDomain, setVerificationDrawerDomain] = useState<string>(sectionType)
+  const [showConflictModal, setShowConflictModal] = useState(false)
+
+  const handleOpenVerificationDrawer = (domain?: string) => {
+    setVerificationDrawerDomain(domain || sectionType)
+    setShowVerificationDrawer(true)
+  }
+
+  const allConflicts: HandoverSectionConflictItem[] = useMemo(() => {
+    const list: HandoverSectionConflictItem[] = []
+    for (const sec of data?.sections || []) {
+      if (Array.isArray(sec.unresolved_conflicts)) {
+        list.push(...(sec.unresolved_conflicts as HandoverSectionConflictItem[]))
+      }
+    }
+    return list
+  }, [data?.sections])
 
   // Contribute Missing Context state
   const [showContextModal, setShowContextModal] = useState(false)
@@ -790,8 +826,9 @@ export function CanonicalSectionPanel({
     typeof section.metadata_json?.sha256 === 'string' ? section.metadata_json.sha256 : null
   const bd = section.epistemic_breakdown
 
-  const openVerification = () => router.push(`/verification?project=${projectId}`)
-  const openConflicts = () => router.push(`/conflicts?project=${projectId}`)
+  const openVerification = () => handleOpenVerificationDrawer(sectionType)
+  const openConflicts = () => setShowConflictModal(true)
+  const openFullVerificationCenter = () => router.push(`/verification?project=${projectId}`)
   const normalizedStatus = (caseStatus || '').toLowerCase()
   const isLockedVersion =
     Boolean((data.version as unknown as { is_locked?: boolean })?.is_locked) ||
@@ -922,12 +959,26 @@ export function CanonicalSectionPanel({
         />
 
         <div className="grid gap-5 lg:grid-cols-3">
-          <Card className="p-5 lg:col-span-2">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-[15px] font-semibold text-navy">
-                  {String(ctx.project_name || 'Project Overview & Strategic Context')}
-                </p>
+          <Card className="p-5 lg:col-span-2 space-y-4">
+            {/* Top row: Title, badges, and dual actions */}
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-base font-semibold text-navy">
+                    {String(ctx.project_name || 'Project Overview & Strategic Context')}
+                  </h3>
+                  {data.handover_type_label && (
+                    <Badge tone="indigo">{data.handover_type_label}</Badge>
+                  )}
+                  {Boolean(ctx.project_status) && (
+                    <Badge tone="blue">{humanizeStatus(String(ctx.project_status))}</Badge>
+                  )}
+                  {mandatoryMatch?.is_role_priority && (
+                    <Badge tone="blue" icon={Sparkles}>
+                      Priority for {data.handover_type_label || 'Role'}
+                    </Badge>
+                  )}
+                </div>
                 <p className="mt-1 text-[13.5px] leading-relaxed text-slate-700">
                   {String(
                     ctx.project_description ||
@@ -936,12 +987,31 @@ export function CanonicalSectionPanel({
                   )}
                 </p>
               </div>
-              {Boolean(ctx.project_status) && (
-                <Badge tone="blue">{humanizeStatus(String(ctx.project_status))}</Badge>
+
+              {!isLockedVersion && (
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={Plus}
+                    onClick={handleOpenContextModal}
+                  >
+                    Contribute Missing Context
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={Pencil}
+                    onClick={handleOpenNarrativeModal}
+                  >
+                    Draft / Edit Narrative
+                  </Button>
+                </div>
               )}
             </div>
 
-            <dl className="mt-4 grid gap-3 rounded-xl bg-slate-50/70 p-3.5 text-xs sm:grid-cols-3">
+            {/* Scope & Snapshot Metadata Grid */}
+            <dl className="grid gap-3 rounded-xl border border-line/60 bg-slate-50/70 p-3.5 text-xs sm:grid-cols-3">
               <div>
                 <dt className="text-muted">Handover Scope</dt>
                 <dd className="mt-0.5 font-medium text-navy">{String(ctx.case_title || '—')}</dd>
@@ -962,7 +1032,7 @@ export function CanonicalSectionPanel({
             </dl>
 
             {scopeAreas.length > 0 && (
-              <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs">
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
                 <span className="text-muted">Configured focus areas:</span>
                 {scopeAreas.map((area) => (
                   <Badge key={area} tone="gray">
@@ -971,46 +1041,58 @@ export function CanonicalSectionPanel({
                 ))}
               </div>
             )}
-          </Card>
 
-          <Card className="p-5">
-            <p className="text-[15px] font-semibold text-navy">Epistemic Integrity Gate</p>
-            <p className="mt-1 text-xs text-muted">
-              Only human-verified knowledge enters handover content. Pending and conflicting items remain strictly separated.
-            </p>
-            <dl className="mt-4 space-y-2 text-[13px]">
-              <div className="flex justify-between">
-                <dt className="text-muted">Human-verified (included)</dt>
-                <dd className="font-semibold text-ok">{data.epistemic_summary.human_verified_included}</dd>
+            {/* Integrated Section Narrative */}
+            <div className="border-t border-line/80 pt-4">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <FileText className="size-4 text-brand" />
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted">
+                    Executive Handover Narrative
+                  </span>
+                  {(section.section_content || section.content_summary) && (
+                    <Badge tone="blue">Authored</Badge>
+                  )}
+                </div>
+                {!isLockedVersion && (section.section_content || section.content_summary) && (
+                  <Button size="sm" variant="ghost" icon={Pencil} onClick={handleOpenNarrativeModal}>
+                    Edit narrative
+                  </Button>
+                )}
               </div>
-              <div className="flex justify-between">
-                <dt className="text-muted">Pending human verification</dt>
-                <dd className="font-semibold text-amber-700">{data.epistemic_summary.pending_verification}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-muted">Unresolved conflicts</dt>
-                <dd className="font-semibold text-bad">{data.epistemic_summary.unresolved_conflicts}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-muted">Rejected / outdated</dt>
-                <dd className="font-semibold text-slate-500">
-                  {data.epistemic_summary.rejected + data.epistemic_summary.outdated}
-                </dd>
-              </div>
-            </dl>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {data.epistemic_summary.pending_verification > 0 && (
-                <Button size="sm" variant="secondary" icon={ShieldCheck} onClick={openVerification}>
-                  Verify Findings
-                </Button>
+
+              {section.content_summary && (
+                <p className="mb-2 text-xs font-medium text-muted">{section.content_summary}</p>
               )}
-              {data.epistemic_summary.unresolved_conflicts > 0 && (
-                <Button size="sm" variant="secondary" icon={ShieldAlert} onClick={openConflicts}>
-                  Resolve Conflicts
-                </Button>
+
+              {section.section_content ? (
+                <div className="rounded-lg bg-slate-50/50 p-3 border border-line/50 text-[13px] leading-relaxed">
+                  <FormattedMarkdown content={section.section_content} />
+                </div>
+              ) : (
+                <div className="flex items-center justify-between rounded-lg border border-dashed border-line bg-slate-50/40 p-3 text-xs text-muted">
+                  <span>No executive narrative authored for this version snapshot yet.</span>
+                  {!isLockedVersion && (
+                    <Button size="sm" variant="ghost" icon={Pencil} onClick={handleOpenNarrativeModal}>
+                      Draft Narrative
+                    </Button>
+                  )}
+                </div>
               )}
             </div>
           </Card>
+
+          <HandoverVerificationOverview
+            epistemicSummary={data.epistemic_summary}
+            totalCandidates={
+              data.epistemic_summary.human_verified_included +
+              data.epistemic_summary.pending_verification
+            }
+            readinessScore={readinessScore}
+            onOpenPendingQueue={(dom) => handleOpenVerificationDrawer(dom || 'all')}
+            onOpenConflicts={() => setShowConflictModal(true)}
+            onOpenVerificationCenter={openFullVerificationCenter}
+          />
         </div>
 
         {/* Eight-Domain Canonical Coverage Matrix */}
@@ -1035,7 +1117,7 @@ export function CanonicalSectionPanel({
                   key={dom.sectionType}
                   type="button"
                   onClick={() => onNavigateTab(dom.tab)}
-                  className="flex flex-col rounded-xl border border-line bg-slate-50/40 p-3.5 text-left transition hover:border-brand/40 hover:bg-tint/20"
+                  className="flex flex-col rounded-xl border border-line bg-slate-50/40 p-3.5 text-left transition hover:border-brand/40 hover:bg-tint/20 group"
                 >
                   <div className="flex items-center justify-between">
                     <span className="flex items-center gap-1.5 text-xs font-semibold text-brand">
@@ -1045,11 +1127,33 @@ export function CanonicalSectionPanel({
                       {verifiedCount} verified
                     </Badge>
                   </div>
-                  <p className="mt-2 text-[13px] font-semibold text-navy">{dom.shortLabel}</p>
+                  <p className="mt-2 text-[13px] font-semibold text-navy group-hover:text-brand transition">{dom.shortLabel}</p>
                   <p className="mt-1 line-clamp-2 text-[11.5px] text-muted">{dom.title}</p>
                   <div className="mt-auto flex flex-wrap gap-2 pt-2.5 text-[11px] text-muted">
-                    {pendingCount > 0 && <span className="text-amber-700">{pendingCount} pending</span>}
-                    {conflictCount > 0 && <span className="text-bad">{conflictCount} conflicts</span>}
+                    {pendingCount > 0 && (
+                      <span
+                        className="rounded px-1.5 py-0.5 bg-amber-50 text-amber-700 font-medium hover:bg-amber-100 transition cursor-pointer"
+                        title="Click to review pending findings in this domain"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleOpenVerificationDrawer(dom.sectionType)
+                        }}
+                      >
+                        {pendingCount} pending
+                      </span>
+                    )}
+                    {conflictCount > 0 && (
+                      <span
+                        className="rounded px-1.5 py-0.5 bg-red-50 text-bad font-medium hover:bg-red-100 transition cursor-pointer"
+                        title="Click to resolve contradictory claims"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setShowConflictModal(true)
+                        }}
+                      >
+                        {conflictCount} conflicts
+                      </span>
+                    )}
                     {pendingCount === 0 && conflictCount === 0 && verifiedCount === 0 && (
                       <span>No records yet</span>
                     )}
@@ -1091,6 +1195,27 @@ export function CanonicalSectionPanel({
           item={inspectItem}
           projectId={projectId}
           onClose={() => setInspectItem(null)}
+        />
+
+        <HandoverVerificationReviewDrawer
+          isOpen={showVerificationDrawer}
+          onClose={() => setShowVerificationDrawer(false)}
+          projectId={projectId}
+          initialDomain={verificationDrawerDomain}
+          canReview={Boolean(canReview)}
+          members={members || []}
+          currentUser={currentUser}
+          onDataChanged={onRetry}
+        />
+
+        <HandoverConflictModal
+          isOpen={showConflictModal}
+          onClose={() => setShowConflictModal(false)}
+          projectId={projectId}
+          conflicts={allConflicts}
+          onOpenConflictsWorkspace={() => router.push(`/conflicts?project=${projectId}`)}
+          onDataChanged={onRetry}
+          canReview={Boolean(canReview)}
         />
       </div>
     )
@@ -1234,6 +1359,27 @@ export function CanonicalSectionPanel({
           projectId={projectId}
           onClose={() => setInspectItem(null)}
         />
+
+        <HandoverVerificationReviewDrawer
+          isOpen={showVerificationDrawer}
+          onClose={() => setShowVerificationDrawer(false)}
+          projectId={projectId}
+          initialDomain={verificationDrawerDomain}
+          canReview={Boolean(canReview)}
+          members={members || []}
+          currentUser={currentUser}
+          onDataChanged={onRetry}
+        />
+
+        <HandoverConflictModal
+          isOpen={showConflictModal}
+          onClose={() => setShowConflictModal(false)}
+          projectId={projectId}
+          conflicts={allConflicts}
+          onOpenConflictsWorkspace={() => router.push(`/conflicts?project=${projectId}`)}
+          onDataChanged={onRetry}
+          canReview={Boolean(canReview)}
+        />
       </div>
     )
   }
@@ -1311,6 +1457,27 @@ export function CanonicalSectionPanel({
           item={inspectItem}
           projectId={projectId}
           onClose={() => setInspectItem(null)}
+        />
+
+        <HandoverVerificationReviewDrawer
+          isOpen={showVerificationDrawer}
+          onClose={() => setShowVerificationDrawer(false)}
+          projectId={projectId}
+          initialDomain={verificationDrawerDomain}
+          canReview={Boolean(canReview)}
+          members={members || []}
+          currentUser={currentUser}
+          onDataChanged={onRetry}
+        />
+
+        <HandoverConflictModal
+          isOpen={showConflictModal}
+          onClose={() => setShowConflictModal(false)}
+          projectId={projectId}
+          conflicts={allConflicts}
+          onOpenConflictsWorkspace={() => router.push(`/conflicts?project=${projectId}`)}
+          onDataChanged={onRetry}
+          canReview={Boolean(canReview)}
         />
       </div>
     )
@@ -1414,6 +1581,27 @@ export function CanonicalSectionPanel({
           projectId={projectId}
           onClose={() => setInspectItem(null)}
         />
+
+        <HandoverVerificationReviewDrawer
+          isOpen={showVerificationDrawer}
+          onClose={() => setShowVerificationDrawer(false)}
+          projectId={projectId}
+          initialDomain={verificationDrawerDomain}
+          canReview={Boolean(canReview)}
+          members={members || []}
+          currentUser={currentUser}
+          onDataChanged={onRetry}
+        />
+
+        <HandoverConflictModal
+          isOpen={showConflictModal}
+          onClose={() => setShowConflictModal(false)}
+          projectId={projectId}
+          conflicts={allConflicts}
+          onOpenConflictsWorkspace={() => router.push(`/conflicts?project=${projectId}`)}
+          onDataChanged={onRetry}
+          canReview={Boolean(canReview)}
+        />
       </div>
     )
   }
@@ -1480,52 +1668,56 @@ export function CanonicalSectionPanel({
     ms.source_domains.includes(sectionType)
   )
 
+  const isOverview = sectionType === 'project_overview_context'
+
   return (
     <div className="space-y-5">
-      {/* Contribution, Drafting & Epistemic Notice Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-white px-4 py-3 shadow-xs">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[13px] font-semibold text-navy">{section.section_title}</span>
-            {data.handover_type_label && (
-              <Badge tone="indigo">{data.handover_type_label}</Badge>
-            )}
-            {mandatoryMatch?.is_role_priority && (
-              <Badge tone="blue" icon={Sparkles}>
-                Priority for {data.handover_type_label || 'Role'}
-              </Badge>
-            )}
+      {/* Contribution, Drafting & Epistemic Notice Bar (Domains 2-8; Domain 1 integrates this into its unified card) */}
+      {!isOverview && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-white px-4 py-3 shadow-xs">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[13px] font-semibold text-navy">{section.section_title}</span>
+              {data.handover_type_label && (
+                <Badge tone="indigo">{data.handover_type_label}</Badge>
+              )}
+              {mandatoryMatch?.is_role_priority && (
+                <Badge tone="blue" icon={Sparkles}>
+                  Priority for {data.handover_type_label || 'Role'}
+                </Badge>
+              )}
+            </div>
+            <p className="mt-0.5 text-xs text-muted">
+              {mandatoryMatch?.role_emphasis_note ||
+                data.role_focus_summary ||
+                'All verified items remain linked to source evidence and human verification decisions.'}
+            </p>
           </div>
-          <p className="mt-0.5 text-xs text-muted">
-            {mandatoryMatch?.role_emphasis_note ||
-              data.role_focus_summary ||
-              'All verified items remain linked to source evidence and human verification decisions.'}
-          </p>
+          {!isLockedVersion && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={Plus}
+                onClick={handleOpenContextModal}
+              >
+                Contribute Missing Context
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={Pencil}
+                onClick={handleOpenNarrativeModal}
+              >
+                Draft / Edit Section Narrative
+              </Button>
+            </div>
+          )}
         </div>
-        {!isLockedVersion && (
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              variant="secondary"
-              icon={Plus}
-              onClick={handleOpenContextModal}
-            >
-              Contribute Missing Context
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              icon={Pencil}
-              onClick={handleOpenNarrativeModal}
-            >
-              Draft / Edit Section Narrative
-            </Button>
-          </div>
-        )}
-      </div>
+      )}
 
-      {/* Persisted Human-Edited Section Narrative Summary (if authored) */}
-      {(section.section_content || section.content_summary) && (
+      {/* Persisted Human-Edited Section Narrative Summary (Domains 2-8; Domain 1 integrates this into its unified card) */}
+      {!isOverview && (section.section_content || section.content_summary) && (
         <Card className="p-5">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -1718,6 +1910,33 @@ export function CanonicalSectionPanel({
           </Field>
         </div>
       </Modal>
+
+      <ProvenanceDetailModal
+        item={inspectItem}
+        projectId={projectId}
+        onClose={() => setInspectItem(null)}
+      />
+
+      <HandoverVerificationReviewDrawer
+        isOpen={showVerificationDrawer}
+        onClose={() => setShowVerificationDrawer(false)}
+        projectId={projectId}
+        initialDomain={verificationDrawerDomain}
+        canReview={Boolean(canReview)}
+        members={members || []}
+        currentUser={currentUser}
+        onDataChanged={onRetry}
+      />
+
+      <HandoverConflictModal
+        isOpen={showConflictModal}
+        onClose={() => setShowConflictModal(false)}
+        projectId={projectId}
+        conflicts={allConflicts}
+        onOpenConflictsWorkspace={() => router.push(`/conflicts?project=${projectId}`)}
+        onDataChanged={onRetry}
+        canReview={Boolean(canReview)}
+      />
     </div>
   )
 }

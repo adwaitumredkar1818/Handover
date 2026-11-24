@@ -94,13 +94,17 @@
 
 ---
 
-## Record 008: Authoritative PostgreSQL Durability for Investigations & Tool Idempotency
-- **Date**: 2026-11-18 (Phase AI-8.4)
-- **Decision**: Make PostgreSQL the authoritative durable store for both intermediate investigation state (and event history arrays) in `assistant_messages.structured_payload_json`, and consequential tool execution idempotency in `audit_logs`, retaining Redis strictly as a runtime acceleration cache and pub/sub distributor.
+---
+
+## Record 009: Strict Project-Scoped Intelligence & Information Disclosure Guardrails
+- **Date**: 2026-11-22 (Phase AI-10)
+- **Decision**: Implement a defense-in-depth security boundary ensuring the Project Knowledge Assistant operates strictly within the active authorized project, refusing personal device/hardware questions, cross-project inquiries, and platform credential probes upfront, while scrubbing workstation hardware details and masking secrets (`sk-`, `ghp_`, `xoxb-`, JWTs, private keys) in all outputs.
 - **Reasoning**:
-  1. Relying exclusively on Redis created a single point of failure where Redis restarts or evictions orphaned in-flight investigations or allowed duplicate execution of approved operations.
-  2. Storing typed intermediate checkpoints and event arrays inside `assistant_messages.structured_payload_json` enables 100% independent recovery from PostgreSQL without violating the unreviewed remote schema migration freeze.
-  3. Recording `tool.execution.state` in PostgreSQL `audit_logs` ensures consequential actions have an immutable transactional record that blocks replay across any process restart or Redis data loss.
-- **Trade-offs**: Checkpointing to PostgreSQL introduces a few milliseconds of transactional commit latency per graph step, which is negligible compared to LLM inference duration (~5-10s) and provides complete durability.
+  1. The assistant's mission is strictly limited to helping authorized members understand and hand over the active project. It is not a general personal assistant or workstation inspector.
+  2. Spontaneous leakage of workstation hardware (RTX 4050, 6GB VRAM, HP Victus, local disk paths) confuses personal environments with project architecture and violates privacy.
+  3. Pre-flight classification in `AssistantQueryClassifier.classify_scope` short-circuits out-of-scope inquiries immediately with canonical compliant refusal, avoiding unnecessary database and LLM calls.
+  4. Post-generation output validation in `AssistantAnswerValidator` serves as a fail-closed barrier redacting secrets and scrubbing unverified workstation hardware.
+- **Trade-offs**: Out-of-scope personal questions are refused deterministically rather than generating conversational pleasantries, ensuring zero ambiguity about the assistant's strict project-bound role.
+
 
 

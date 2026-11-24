@@ -27,6 +27,9 @@ class ClassifiedQuery:
     target_categories: list[KnowledgeCategory] = field(default_factory=list)
     search_keywords: list[str] = field(default_factory=list)
     expanded_queries: list[str] = field(default_factory=list)
+    is_out_of_scope: bool = False
+    out_of_scope_category: str | None = None
+    refusal_reason: str | None = None
 
 
 # Mapping of AssistantQueryType to related KnowledgeCategory values
@@ -294,10 +297,80 @@ class AssistantQueryClassifier:
         ),
     ]
 
+    @classmethod
+    def classify_scope(cls, query: str) -> tuple[bool, str | None, str | None]:
+        """Detect out-of-scope personal, cross-project, platform secret, or injection queries."""
+        q = (query or "").strip().lower()
+        if not q:
+            return False, None, None
+
+        # 1. Prompt Injection / Jailbreak attempt
+        if re.search(
+            r"\b(?:ignore\s+(?:all\s+)?(?:previous|prior)\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions|system\s+override|reveal\s+(?:the\s+)?system\s+prompt|print\s+(?:the\s+)?system\s+prompt|show\s+(?:the\s+)?developer\s+instructions)\b",
+            q,
+        ):
+            return (
+                True,
+                "prompt_injection",
+                "I cannot comply with instructions attempting to override system guardrails or extract confidential system instructions.",
+            )
+
+        # 2. Personal Device & Workstation Hardware Information (RTX 4050, laptop, RAM, CPU, OS, etc.)
+        if re.search(
+            r"\b(?:what\s+gpu\s+does\s+my\s+laptop\s+have|what\s+gpu\s+do\s+i\s+have|what\s+is\s+my\s+gpu|what\s+laptop\s+do\s+i\s+have|what\s+laptop\s+model|what\s+is\s+my\s+laptop|my\s+laptop\s+(?:specs|ram|cpu|gpu|model)|how\s+much\s+ram\s+do\s+i\s+have|what\s+is\s+my\s+ram|what\s+cpu\s+do\s+i\s+have|what\s+is\s+my\s+cpu|my\s+computer\s+specs|my\s+machine\s+specs|my\s+workstation\s+specs|what\s+operating\s+system\s+(?:do\s+i\s+have|is\s+on\s+my)|what\s+is\s+my\s+operating\s+system|what\s+is\s+my\s+ip\b|what\s+is\s+my\s+location|where\s+do\s+i\s+live|my\s+phone\s+number)\b",
+            q,
+        ) or (
+            re.search(r"\b(?:my\s+laptop|my\s+workstation|my\s+computer|my\s+pc|my\s+machine|my\s+device)\b", q)
+            and re.search(r"\b(?:gpu|cpu|ram|specs|graphics|vram|hardware|model|processor)\b", q)
+        ):
+            return (
+                True,
+                "personal_device",
+                "I'm here to assist with the currently selected Handover project. I don't provide personal device or environment information through the Project Knowledge Assistant.",
+            )
+
+        # 3. Cross-Project Inquiries
+        if re.search(
+            r"\b(?:my\s+other\s+project|another\s+project|different\s+project|previous\s+project|other\s+project['s]?\s+architecture|architecture\s+(?:did\s+we\s+use|is\s+used)\s+in\s+my\s+other\s+project|what\s+did\s+we\s+do\s+in\s+(?:my\s+)?other\s+project)\b",
+            q,
+        ):
+            return (
+                True,
+                "cross_project",
+                "I can only access information from the currently selected project. Please switch to the relevant project if you have permission to access it.",
+            )
+
+        # 4. Personal History / Academic / Education
+        if re.search(
+            r"\b(?:what\s+course\s+am\s+i\s+studying|what\s+course\s+do\s+i\s+take|what\s+degree\s+am\s+i\s+pursuing|which\s+college\s+do\s+i\s+attend|what\s+is\s+my\s+education|my\s+girlfriend|my\s+family|my\s+personal\s+background)\b",
+            q,
+        ):
+            return (
+                True,
+                "personal_history",
+                "That information is outside the scope of this Project Knowledge Assistant. I can help with the currently selected project's documentation, architecture and work.",
+            )
+
+        # 5. Internal Platform Security Secrets (JWT keys, db passwords, live secrets)
+        if re.search(
+            r"\b(?:what\s+is\s+the\s+jwt\s+secret|jwt\s+signing\s+key|database\s+password|db\s+password|system\s+environment\s+variables|show\s+me\s+your\s+\.env)\b",
+            q,
+        ):
+            return (
+                True,
+                "platform_secret",
+                "Internal platform security credentials and configuration secrets are confidential and cannot be disclosed.",
+            )
+
+        return False, None, None
+
     def classify(self, query: str) -> ClassifiedQuery:
         """Classify a question string into an AssistantQueryType and extract key entities."""
         query_text = (query or "").strip()
         query_lower = query_text.lower()
+
+        # Check project scope and disclosure guardrails upfront
+        is_out_of_scope, scope_cat, refusal_reason = self.classify_scope(query_text)
 
         # 1. Extract entities
         jira_keys = list(dict.fromkeys(self.JIRA_KEY_REGEX.findall(query_text)))
@@ -376,6 +449,9 @@ class AssistantQueryClassifier:
             target_categories=target_categories,
             search_keywords=search_keywords,
             expanded_queries=expanded_queries,
+            is_out_of_scope=is_out_of_scope,
+            out_of_scope_category=scope_cat,
+            refusal_reason=refusal_reason,
         )
 
     def _generate_expanded_queries(

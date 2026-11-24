@@ -340,6 +340,9 @@ async def stream_investigation_events(
     """Stream real-time investigation events with automatic Last-Event-ID resumption."""
     registry = InvestigationRuntimeRegistry.get_instance()
     state = registry.get_state(investigation_id)
+    if state and state.project_id != project_id:
+        from app.core.exceptions import ForbiddenError
+        raise ForbiddenError("Investigation belongs to another project.", code="FORBIDDEN_INVESTIGATION")
 
     async def event_generator():
         since_seq = 0
@@ -422,6 +425,9 @@ def get_investigation_state(
     """Inspect current plan, node, and findings of an ongoing or completed investigation."""
     registry = InvestigationRuntimeRegistry.get_instance()
     state = registry.get_state(investigation_id)
+    if state and state.project_id != project_id:
+        from app.core.exceptions import ForbiddenError
+        raise ForbiddenError("Investigation belongs to another project.", code="FORBIDDEN_INVESTIGATION")
     if not state:
         raise NotFoundError("Investigation not found or expired from runtime.", code="INVESTIGATION_NOT_FOUND")
 

@@ -88,6 +88,7 @@ export interface EvidenceReferenceDetail {
   location_label: string | null;
   relationship_to_finding: string;
   acl_scope: string;
+  acl_restricted?: boolean;
 }
 
 export interface VerificationIssueDetail {

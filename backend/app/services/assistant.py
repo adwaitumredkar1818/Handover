@@ -318,6 +318,57 @@ class ProjectKnowledgeAssistantService:
         # 4. Query Classification & Entity Extraction
         classified: ClassifiedQuery = self.classifier.classify(request.question)
 
+        # 4b. Strict Project-Scoped Intelligence & Disclosure Guardrails Gate
+        if classified.is_out_of_scope and classified.refusal_reason:
+            total_duration_ms = int((time.perf_counter() - started_at) * 1000)
+            assistant_message = self.message_repo.create(
+                conversation_id=conversation_id,
+                organisation_id=project_ctx.organisation.id,
+                project_id=project_ctx.project.id,
+                sender_type=AssistantSenderType.ASSISTANT,
+                content=classified.refusal_reason,
+                answer_status=AssistantAnswerStatus.UNSUPPORTED_QUERY,
+                structured_payload_json={
+                    "query_type": classified.query_type.value,
+                    "response_mode": request.response_mode.value,
+                    "claims": [],
+                    "uncertainty": "Request is outside the active project boundary.",
+                    "conflicts": [],
+                    "missing_information": [],
+                    "suggested_followup_questions": [
+                        "What is the overall architecture and backend design of this project?",
+                        "What are the key technical and architectural decisions made in this project?",
+                    ],
+                },
+                model_name="scope-guardrail",
+                prompt_tokens=0,
+                completion_tokens=0,
+                duration_ms=total_duration_ms,
+                retrieval_run_id=None,
+            )
+            self.conversation_repo.touch_last_message(conversation_id)
+            return AssistantAnswerResponse(
+                message_id=assistant_message.id,
+                conversation_id=conversation_id,
+                answer=classified.refusal_reason,
+                answer_status=AssistantAnswerStatus.UNSUPPORTED_QUERY,
+                response_mode=request.response_mode,
+                claims=[],
+                citations=[],
+                uncertainty="Request is outside the active project boundary.",
+                conflicts=[],
+                missing_information=[],
+                suggested_followup_questions=[
+                    "What is the overall architecture and backend design of this project?",
+                    "What are the key technical and architectural decisions made in this project?",
+                ],
+                query_type=classified.query_type,
+                model_name="scope-guardrail",
+                duration_ms=total_duration_ms,
+                retrieval_run_id=None,
+                created_at=assistant_message.created_at,
+            )
+
         # 5. Permission-Aware Retrieval
         retrieval_res: AssistantRetrievalResult = self.retrieval_service.retrieve(
             project_ctx=project_ctx,
@@ -368,6 +419,7 @@ class ProjectKnowledgeAssistantService:
             payload=payload,
             citations_manifest=retrieval_res.citations_manifest,
             is_access_restricted=is_handover_access_restricted,
+            active_project_id=project_ctx.project.id,
         )
 
         total_duration_ms = int((time.perf_counter() - started_at) * 1000)

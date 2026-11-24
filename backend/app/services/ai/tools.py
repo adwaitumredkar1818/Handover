@@ -244,6 +244,9 @@ class ToolRegistry:
         project_ctx: ProjectContext,
     ) -> ToolCallResult:
         """Execute tool in a secure sandbox strictly enforcing caller's ProjectContext."""
+        if not project_ctx or not getattr(project_ctx, "project", None):
+            raise ForbiddenError("Missing authorized ProjectContext.", code="PROJECT_CONTEXT_REQUIRED")
+
         tool_def = cls.get_tool(request.tool_id)
         if not tool_def:
             return ToolCallResult(
@@ -252,6 +255,25 @@ class ToolRegistry:
                 success=False,
                 error_message=f"Tool '{request.tool_id}' not found in registry.",
             )
+
+        # 0. Strict Project Boundary & Workstation Environment Anti-Inspection
+        active_pid_str = str(project_ctx.project.id)
+        arg_project_id = request.arguments.get("project_id")
+        if arg_project_id is not None and str(arg_project_id) != active_pid_str:
+            raise ForbiddenError(
+                f"Cross-project tool execution forbidden: active project is {active_pid_str}, attempted {arg_project_id}",
+                code="CROSS_PROJECT_TOOL_FORBIDDEN",
+            )
+
+        # Check for arbitrary host filesystem inspection in arguments
+        for arg_key, arg_val in request.arguments.items():
+            if isinstance(arg_val, str):
+                import re
+                if re.search(r"\b(?:[a-zA-Z]:\\(?:Windows|Users|Program Files)|/(?:etc|proc|sys|root|home))\b", arg_val, re.IGNORECASE):
+                    raise ForbiddenError(
+                        f"Access to host environment path in argument '{arg_key}' is strictly forbidden.",
+                        code="ENV_INSPECTION_FORBIDDEN",
+                    )
 
         # 1. RBAC Permission check
         if not project_ctx.has_permission(tool_def.required_permission):

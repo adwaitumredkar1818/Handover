@@ -129,9 +129,9 @@ describe("Project Knowledge Assistant UI Redesign Test Suite", () => {
       ).toBeInTheDocument();
 
       // Quick Action Cards in 2x2 Grid and Left Panel
-      expect(screen.getAllByText("Platform Identity & Auth").length).toBeGreaterThanOrEqual(1);
-      expect(screen.getAllByText("RTX 4050 VRAM Contention").length).toBeGreaterThanOrEqual(1);
-      expect(screen.getAllByText("Storage Provider Decision").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Project Overview & Goals").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Architecture & Tech Stack").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Key Decisions & Rationale").length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText("Ownership & Responsibilities").length).toBeGreaterThanOrEqual(1);
     });
   });

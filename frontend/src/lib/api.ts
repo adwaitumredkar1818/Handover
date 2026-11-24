@@ -2522,8 +2522,11 @@ export const api = {
       projectId: string,
       conflictId: string,
       payload: {
-        resolution_state: string;
+        resolution_strategy?: string;
         resolution_notes: string;
+        authoritative_claim_text?: string;
+        sync_finding?: boolean;
+        resolution_state?: string;
         preferred_claim?: string;
       }
     ): Promise<VerificationConflictItem> {

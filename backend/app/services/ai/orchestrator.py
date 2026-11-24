@@ -94,6 +94,19 @@ class ProjectIntelligenceOrchestrator:
             state = await self._node_classify_and_plan(state)
             if state.status == InvestigationStatus.CANCELLED:
                 return state
+            if state.answer_status == AssistantAnswerStatus.UNSUPPORTED_QUERY:
+                state = await self._node_persist(state, project_ctx)
+                state.status = InvestigationStatus.COMPLETED
+                self.registry.update_state(state)
+                await self.registry.emit_event(
+                    state.investigation_id,
+                    "investigation_completed",
+                    {
+                        "answer_status": state.answer_status.value,
+                        "citations_count": 0,
+                    },
+                )
+                return state
 
             # Node 2: Multi-Source Permission-Aware Retrieval
             state = await self._node_retrieve(state, project_ctx)
@@ -158,6 +171,25 @@ class ProjectIntelligenceOrchestrator:
         state.expanded_queries = classified.expanded_queries
         state.search_keywords = classified.search_keywords
         state.target_domains = [c.value for c in classified.target_categories]
+
+        if classified.is_out_of_scope and classified.refusal_reason:
+            state.raw_answer = classified.refusal_reason
+            state.answer_status = AssistantAnswerStatus.UNSUPPORTED_QUERY
+            state.uncertainty = "Request is outside the active project boundary."
+            state.suggested_followups = [
+                "What is the overall architecture and backend design of this project?",
+                "What are the key technical and architectural decisions made in this project?",
+            ]
+            state.plan_steps = [
+                InvestigationPlanStep(
+                    step_id="step_1",
+                    title="Scope & Policy Guardrail Evaluation",
+                    description=f"Request identified as out-of-scope ({classified.out_of_scope_category}). Guardrail refusal applied.",
+                    status=PlanStepStatus.COMPLETED,
+                )
+            ]
+            self.registry.update_state(state)
+            return state
 
         # Generate observable plan steps based on mode
         steps: list[InvestigationPlanStep] = [
@@ -451,6 +483,7 @@ class ProjectIntelligenceOrchestrator:
         validated: ValidatedAssistantAnswer = self.validator.validate(
             payload=payload,
             citations_manifest=state.citations_manifest,
+            active_project_id=state.project_id,
         )
 
         state.raw_answer = validated.answer

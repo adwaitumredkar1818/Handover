@@ -18,10 +18,6 @@ export function createClient() {
   if (!browserClient) {
     browserClient = createBrowserClient(supabaseUrl, supabaseAnonKey, {
       isSingleton: true,
-      cookieOptions: {
-        path: '/',
-        sameSite: 'lax',
-      },
     })
   }
 

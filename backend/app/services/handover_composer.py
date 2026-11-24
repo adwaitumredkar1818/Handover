@@ -1848,12 +1848,13 @@ def compose_mandatory_ten_sections(
         if classify_finding(ki)["kind"] in ("substantive", "operational_doc")
     ]
     for op in ops_runbooks[:3]:
+        clean_op_title = re.sub(r"^Document Section:\s*", "", op.title)
         steps.append(
             {
                 "priority": "normal",
                 "status": "recommended",
                 "source_section": "Architecture & Operations",
-                "title": f"Verify operational setup: {re.sub(r'^Document Section:\\s*', '', op.title)}",
+                "title": f"Verify operational setup: {clean_op_title}",
                 "detail": op.content,
                 "action_target": "operations",
             }
