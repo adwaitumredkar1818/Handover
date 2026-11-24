@@ -209,6 +209,7 @@ describe('Handover Workspace Phase 2.1 — Visual QA & Viewport Responsiveness',
       const { container } = render(
         <HandoverConflictModal
           isOpen={true}
+          projectId="proj-1"
           conflicts={mockConflicts}
           onClose={vi.fn()}
           onDataChanged={vi.fn()}
