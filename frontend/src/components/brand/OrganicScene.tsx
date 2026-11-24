@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 
 /*
  * Handover "Organic Knowledge Sphere" — High-Performance Canvas 2D 3D Renderer
@@ -651,6 +651,7 @@ export interface SceneProps {
   variant?: SceneVariant;
   emptyKind?: EmptyKind;
   progress?: number;
+  progressRef?: RefObject<number | null>;
   highlightCluster?: number | null;
   camZoom?: number;
   camOffset?: [number, number];
@@ -667,6 +668,7 @@ export function OrganicScene({
   variant = "hero",
   emptyKind = "knowledge",
   progress: controlledProgress,
+  progressRef: externalProgressRef,
   highlightCluster = null,
   camZoom = 1,
   camOffset = [0, 0],
@@ -684,6 +686,8 @@ export function OrganicScene({
   accentRef.current = accent;
   const progRef = useRef(controlledProgress);
   progRef.current = controlledProgress;
+  const extProgRef = useRef(externalProgressRef);
+  extProgRef.current = externalProgressRef;
   const highlightRef = useRef(highlightCluster);
   highlightRef.current = highlightCluster;
   const zoomRef = useRef(camZoom);
@@ -1375,7 +1379,7 @@ export function OrganicScene({
         const projB = proj[b];
         const pts =
           (variant === "assemble" || variant === "reconstruct" || variant === "cinematic" || variant === "dossier") &&
-          progress < 0.88 &&
+          progress < 0.98 &&
           projA &&
           projB
             ? [projA, projB]
@@ -2052,10 +2056,15 @@ export function OrganicScene({
 
     function render(t: number, dt: number) {
       if (variant === "assemble") {
-        progress = progRef.current !== undefined ? progRef.current : 1;
+        const directProg = extProgRef.current?.current ?? progRef.current;
+        progress = directProg !== undefined ? directProg : 1;
       } else if (variant === "reconstruct" || variant === "cinematic" || variant === "fragmented" || variant === "dossier") {
-        if (progRef.current !== undefined) {
-          progress += (progRef.current - progress) * Math.min(1, dt * 6);
+        const refProg = extProgRef.current?.current;
+        if (refProg !== null && refProg !== undefined) {
+          progress = refProg;
+        } else if (progRef.current !== undefined) {
+          const trackRate = variant === "cinematic" ? 12 : 6;
+          progress += (progRef.current - progress) * Math.min(1, dt * trackRate);
         } else {
           const cycle = (t % 6.5) / 6.5;
           progress =
@@ -2069,7 +2078,7 @@ export function OrganicScene({
 
       if (!reduced) {
         // Calm, continuous, stately rotation
-        rotYa += dt * (variant === "network" ? 0.025 : variant === "assemble" || variant === "dossier" ? 0.022 : variant === "fragmented" ? 0.018 : 0.038);
+        rotYa += dt * (variant === "network" ? 0.025 : variant === "cinematic" ? 0.024 : variant === "assemble" || variant === "dossier" ? 0.022 : variant === "fragmented" ? 0.018 : 0.038);
         px += (targetTx - px) * Math.min(1, dt * 2.2);
         py += (targetTy - py) * Math.min(1, dt * 2.2);
       }
@@ -2128,22 +2137,10 @@ export function OrganicScene({
           edgeAlpha: 1.15,
         });
       } else if (variant === "cinematic") {
-        const p = progress;
-        const cz =
-          p < 0.2
-            ? 0.92 + p * 0.8
-            : p < 0.45
-            ? 1.08 + smooth(0.2, 0.45, p) * 0.48
-            : p < 0.7
-            ? 1.56 - smooth(0.45, 0.7, p) * 0.38
-            : 1.18 - smooth(0.7, 1, p) * 0.18;
-        const cox =
-          p >= 0.35 && p <= 0.72
-            ? -0.1 * Math.sin(((p - 0.35) / 0.37) * Math.PI)
-            : 0;
-        drawNetwork(t, dt, W * (0.5 + cox + ox), cy, Math.min(W, H) * 0.34 * cz * z, {
+        const cz = 0.86 + smooth(0, 1, progress) * 0.16;
+        drawNetwork(t, dt, cx, cy, Math.min(W, H) * 0.34 * cz * z, {
           shell: true,
-          tags: true,
+          tags: showTags ?? true,
           edgeAlpha: 1.2,
         });
       } else if (variant === "empty") {
